@@ -12,6 +12,7 @@ import { resolveKimchiModels } from "open-sse/services/kimchiModels.js";
 import { resolveQoderModels } from "open-sse/services/qoderModels.js";
 import { resolveCopilotModels } from "open-sse/services/copilotModels.js";
 import { resolveClinepassModels } from "open-sse/services/clinepassModels.js";
+import { resolveClineModels } from "open-sse/services/clineModels.js";
 import { resolveGrokCliModels } from "open-sse/services/grokCliModels.js";
 import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { resolveZedModels } from "open-sse/shared/zedAuth.js";
@@ -22,6 +23,8 @@ import { capabilitiesFromServiceKind, getCapabilitiesForModel } from "open-sse/p
 // Per-provider live model resolvers. Each receives a connection record and
 // returns { models: [{ id, name? }, ...] } | null on failure.
 // Adding a provider here makes /v1/models prefer the live catalog for it.
+const STATIC_CL = PROVIDER_ID_TO_ALIAS["cline"] || "cline";
+
 const LIVE_MODEL_RESOLVERS = {
   kiro: async (conn) => {
     const result = await resolveKiroModels({
@@ -75,6 +78,32 @@ const LIVE_MODEL_RESOLVERS = {
       apiKey: conn.apiKey,
     });
     return result?.models?.length ? { models: result.models } : null;
+  },
+  cline: async (conn) => {
+    // Static paid list (registry) UNION live free shelf: the
+    // recommended-models feed only carries the rotating free tier (plus
+    // clinePass, which belongs to the clinepass provider), so overriding here
+    // would hide the paid models. On fetch failure return null and let the
+    // static list stand alone.
+    const staticModels = (PROVIDER_MODELS[STATIC_CL] || [])
+      .filter((m) => m?.id)
+      .map((m) => ({ id: m.id, name: m.name || m.id }));
+    const result = await resolveClineModels({
+      accessToken: conn.accessToken,
+      apiKey: conn.apiKey,
+      email: conn.email,
+      refreshToken: conn.refreshToken,
+      providerSpecificData: conn.providerSpecificData || {},
+    });
+    if (!result?.models?.length) return null;
+    const seen = new Set(staticModels.map((m) => m.id));
+    const merged = [...staticModels];
+    for (const m of result.models) {
+      if (!m?.id || seen.has(m.id)) continue;
+      seen.add(m.id);
+      merged.push({ id: m.id, name: m.name || m.id });
+    }
+    return { models: merged };
   },
   "grok-cli": async (conn) => {
     const proxy = await resolveConnectionProxyConfig(conn.providerSpecificData || {});
