@@ -871,7 +871,7 @@ export default function ProviderDetailPage() {
   // OpenAI-compatible /models endpoint. Results stay in the page as suggestions
   // and are added explicitly by the user; they never become a second catalog or
   // override the global capability library.
-  const canRefreshOfficialModels = providerId === "opencode-go" || providerId === "bai";
+  const canRefreshOfficialModels = providerId === "opencode-go" || providerId === "bai" || providerId === "cline";
   const handleRefreshOfficialModels = async () => {
     if (officialModelsRefreshing) return;
     const connection = connections.find((item) => item.isActive !== false);
@@ -1483,6 +1483,20 @@ export default function ProviderDetailPage() {
           Add Model
         </button>
 
+        {/* Import Cline models button — show for cline provider */}
+        {providerId === "cline" && connections.some((conn) => conn.isActive !== false) && (
+          <button
+            onClick={handleRefreshOfficialModels}
+            disabled={officialModelsRefreshing}
+            className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-blue-500/40 px-3 py-2 text-xs text-blue-600 dark:text-blue-400 transition-colors hover:border-blue-500 hover:bg-blue-500/5 sm:w-auto disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <span className="material-symbols-outlined text-sm" style={officialModelsRefreshing ? { animation: "spin 1s linear infinite" } : undefined}>
+              {officialModelsRefreshing ? "progress_activity" : "download"}
+            </span>
+            {officialModelsRefreshing ? translate("Importing...") : translate("Import from /models")}
+          </button>
+        )}
+
         {/* Import Qoder models button — only show for qoder provider */}
         {providerId === "qoder" && connections.some((conn) => conn.isActive !== false) && (
           <button
@@ -1497,7 +1511,7 @@ export default function ProviderDetailPage() {
           </button>
         )}
 
-        {canRefreshOfficialModels && (
+        {canRefreshOfficialModels && providerId !== "cline" && (
           <button
             onClick={handleRefreshOfficialModels}
             disabled={officialModelsRefreshing || !connections.some((conn) => conn.isActive !== false)}

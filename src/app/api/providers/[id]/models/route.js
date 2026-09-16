@@ -127,6 +127,19 @@ const buildOAuthResolver = ({ refreshFn, fetchFn, parseFn, errorLabel }) => asyn
 
 // Provider models endpoints configuration
 const PROVIDER_MODELS_CONFIG = {
+  cline: {
+    url: "https://api.cline.bot/api/v1/models",
+    method: "GET",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+      "HTTP-Referer": "https://cline.bot",
+      "X-Title": "Cline",
+    },
+    authHeader: "Authorization",
+    authPrefix: "Bearer workos:",
+    parseResponse: (data) => (Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : [])),
+  },
   claude: {
     url: "https://api.anthropic.com/v1/models",
     method: "GET",
