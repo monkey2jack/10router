@@ -640,6 +640,83 @@ export async function refreshTraeToken(refreshToken, credentials, log) {
   }, log);
 }
 
+// Cline / ClinePass OAuth token refresh.
+// Upstream endpoint: POST https://api.cline.bot/api/v1/auth/refresh
+// Expects JSON: { refreshToken, grantType: "refresh_token", clientType: "extension" }
+export async function refreshClineToken(refreshToken, log, provider = "cline") {
+  if (!refreshToken) return null;
+  return dedupRefresh(provider, refreshToken, async () => {
+    try {
+      const url =
+        PROVIDER_OAUTH[provider]?.refreshUrl ||
+        PROVIDERS[provider]?.refreshUrl ||
+        "https://api.cline.bot/api/v1/auth/refresh";
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          refreshToken,
+          grantType: "refresh_token",
+          clientType: "extension",
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        const failure = classifyOAuthRefreshError(errorText, response.status);
+        if (failure.permanent) {
+          log?.error?.("TOKEN_REFRESH", `${provider} refresh token invalid or expired. Re-auth required.`, {
+            status: response.status,
+            code: failure.code,
+          });
+          return { error: "unrecoverable_refresh_error", code: failure.code };
+        }
+        log?.error?.("TOKEN_REFRESH", `Failed to refresh token for ${provider}`, {
+          status: response.status,
+          error: errorText,
+        });
+        return null;
+      }
+
+      const payload = await response.json();
+      const data = payload?.data || payload;
+      const expiresAtIso = data?.expiresAt;
+      const expiresIn = expiresAtIso
+        ? Math.max(1, Math.floor((new Date(expiresAtIso).getTime() - Date.now()) / 1000))
+        : undefined;
+
+      let accessToken = data?.accessToken;
+      if (accessToken && !accessToken.startsWith("workos:")) {
+        accessToken = `workos:${accessToken}`;
+      }
+
+      const newRefreshToken = data?.refreshToken || refreshToken;
+
+      log?.info?.("TOKEN_REFRESH", `Successfully refreshed token for ${provider}`, {
+        hasNewAccessToken: !!accessToken,
+        hasNewRefreshToken: newRefreshToken !== refreshToken,
+        expiresIn,
+      });
+
+      return {
+        accessToken,
+        refreshToken: newRefreshToken,
+        expiresIn,
+        expiresAt: expiresAtIso,
+      };
+    } catch (error) {
+      log?.error?.("TOKEN_REFRESH", `Error refreshing token for ${provider}`, {
+        error: error.message,
+      });
+      return null;
+    }
+  }, log);
+}
+
 // Zed access_token is long-lived; auth flow returns no refresh_token.
 // No refresh possible — re-login required when token expires/revoked.
 // Mirrors cursor/kilocode null-refresh pattern.

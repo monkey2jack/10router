@@ -19,4 +19,13 @@ describe("tokenRefresh dispatch", () => {
     const mod = await load();
     expect(await mod.refreshTokenByProvider("claude", {}, null)).toBeNull();
   });
+
+  it("dispatches cline and clinepass via REFRESH_HANDLERS", async () => {
+    const mod = await load();
+    expect(typeof mod.refreshClineToken).toBe("function");
+    expect(await mod.getAccessToken("cline", {}, null)).toBeNull();
+    expect(await mod.getAccessToken("clinepass", {}, null)).toBeNull();
+    expect(await mod.refreshTokenByProvider("cline", {}, null)).toBeNull();
+    expect(await mod.refreshTokenByProvider("clinepass", {}, null)).toBeNull();
+  });
 });

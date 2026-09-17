@@ -16,6 +16,7 @@ import {
   refreshTraeToken,
   refreshZedToken,
   refreshWindsurfToken,
+  refreshClineToken,
   classifyOAuthRefreshError,
 } from "./tokenRefresh/providers.js";
 
@@ -35,6 +36,7 @@ export {
   refreshTraeToken,
   refreshZedToken,
   refreshWindsurfToken,
+  refreshClineToken,
   classifyOAuthRefreshError,
 };
 
@@ -147,6 +149,8 @@ const REFRESH_HANDLERS = {
   trae: (c, log) => refreshTraeToken(c.refreshToken, c, log),
   zed: () => refreshZedToken(),
   windsurf: (c, log) => refreshWindsurfToken(c, log),
+  cline: (c, log) => refreshClineToken(c.refreshToken, log, "cline"),
+  clinepass: (c, log) => refreshClineToken(c.refreshToken, log, "clinepass"),
   // Kimi Code OAuth (merged into id `kimi`); legacy id still routes here
   kimi: (c, log) => refreshKimiToken(c.refreshToken, c, log),
   "kimi-coding": (c, log) => refreshKimiToken(c.refreshToken, c, log),
