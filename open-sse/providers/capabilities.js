@@ -593,7 +593,7 @@ export const PROVIDER_CAPABILITIES = {
   // 这种情况：canonical 行写的是 opencode 那份部署（1M/524288），CodeBuddy 自家
   // 的服务是 1M/64000（同 codebuddy-cn 行），差 8 倍，输出夹子不能共用。
   //
-  // ⚠️ 本块目前只有 2 行，其余 intl 模型都落到 canonical / 通配行，而那些行是按
+  // ⚠️ 本块目前只有 1 行，其余 intl 模型都落到 canonical / 通配行，而那些行是按
   // 各家第一方部署写的：intl 的 glm-5.2 因此报 vision:false / 200000 / 131072，
   // CN 的同一模型是 vision:true / 1M / 48000。thinkingFormat 不受影响——registry
   // transport 与 PROVIDERS 两处都写死 openai，而 resolveFormat 让 provider 覆盖
@@ -605,13 +605,10 @@ export const PROVIDER_CAPABILITIES = {
   // （与 CN 同形的 maxInputTokens/maxOutputTokens/supportsImages 表），而
   // 2026-10-09 扫过 /v2/{plugin,chat,billing}/{model,config,list} 等 10 个候选
   // 路径，CN 与 intl 两边都是 404。
+  // 网关侧的路由 id `auto` 也刻意不给行：它五个 prompt 全落在 glm-5.2，但落点
+  // 会变，没有稳定的能力声明可写（详见 registry/codebuddy-intl.js 的说明）。
   "codebuddy-intl": {
     "space-bunny": { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 64000 },
-    // auto 是网关侧真 id，五个 prompt 一律回显 model:"glm-5.2"（2026-10-09 探测），
-    // 所以按 glm-5.2 记。intl 自己的上限表取不到，先沿用 CN 的 glm-5.2 行（同一
-    // 套积分系统、同一个模型），而不是 canonical 的 200000/131072——后者会少报
-    // 5 倍上下文、并把本该夹到 48000 的 max_tokens 放行到上游。
-    "auto": { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1000000, maxOutput: 48000 },
   },
   // Qoder — upstream exposes opaque internal ids (dfmodel, kmodel, …);
   // capability lookup matches on the raw id, while clients may also address
