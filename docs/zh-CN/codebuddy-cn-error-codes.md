@@ -1,13 +1,14 @@
 # CodeBuddy 错误码对照与修复速查（CN 与国际版通用）
 
 > 用途：10Router CodeBuddy 两渠道排查时先查这张表定位错误码性质——是**可修的代码问题**、**间歇风控**、还是**上游参数/格式缺陷**，避免一看到 400 就乱改配置。适用渠道：`codebuddy-cn`（alias `cbcn`，上游 `https://copilot.tencent.com`）与 `codebuddy-intl`（alias `cbai`，上游 `https://www.codebuddy.ai`）——**错误码空间两边共用**（`11102`/`11133`/`11134`/`11140` 均已在 intl 观测到），差异处文中单独标注。
-> 维护：2026-09-05 汇总历次修复；2026-09-12 补入 11140（intl 账号级风控）并确认全文对 intl 适用。每个码的完整修复细节见「相关文档」列的独立 fix doc。
+> 维护：2026-09-05 汇总历次修复；2026-09-12 补入 11140（intl 账号级风控）并确认全文对 intl 适用；2026-10-09 补入 11102 专节与「模型寻址」专节（UI 上的 `xt/ag/…-high` 不是可寻址 id，思考档走 `reasoning_effort`）。每个码的完整修复细节见「相关文档」列的独立 fix doc。
 
 ## 一、错误码速查表
 
 | Code | HTTP | 报错(节选) | 性质 | 归属 | 修复/出路 |
 |------|------|-----------|------|------|----------|
 | `11101` | 400 | Non-stream chat request is currently not supported | **可修(代码)** | executor | 强制 `stream=true`(CodeBuddy 只支持流式)；10router 为非流式客户端本地聚合 |
+| `11102` | 400 | model [xxx] service info not found | **目录错误（唯一的"id 不存在"判据）** | 上游目录 | 该 id 上游不认。**也是判定模型存在性的唯一可靠 oracle**：网关是 OpenAI 透传，未注册的 id 可直接打过去探。见下方专节 |
 | `11128` | 400 | Illegal API invocation from an unapproved channel | **渠道级风控（间歇）** | 服务端 | 10router 已改为**渠道级熔断**（不逐账号重试）；无配置可解，等熔断窗口或换渠道。见下方专节 |
 | `11133` | 400 | the request parameters were rejected by the model provider (`model_param_invalid`) | **多为客户端/上游缺陷** | mirasim/上游 | 二分请求侧 vs 响应侧定位；workaround 换 hy4。见相关文档 |
 | `11134` | 500 | the model provider is temporarily unavailable, please retry later or switch… | **上游临时不可用** | 上游 | 等上游自报的 reset 时间；**不是目录错误，勿因此下架模型**。见下方专节 |
@@ -18,7 +19,7 @@
 | `401` | 401 | 鉴权服务请求失败 | **token/网络** | 上游 | 多为一过性网络/鉴权超时，重试；持续则查 token 有效性 |
 | `402` | 402 | (billing) | **余额/额度** | 上游 | 账号余额或免费额度耗尽，充值/换号 |
 
-> 记忆口诀：**`11150`/`11101` = 代码可修；`11133` = 客户端序列化/上游格式（10router 多只能兜底）；`11134` = 上游暂时不服务（**认得 id，勿下架**）；`11128` = 服务端间歇风控（非 bug，单请求形态相关）；`11140` = 账号级风控（整渠道拦，等恢复/换号）；`6004`/`429` = 配额限流（等重置）。**
+> 记忆口诀：**`11150`/`11101` = 代码可修；`11102` = 上游不认这个 id（**唯一可用于判定模型存在性的码**）；`11133` = 客户端序列化/上游格式（10router 多只能兜底）；`11134` = 上游暂时不服务（**认得 id，勿下架**）；`11128` = 服务端间歇风控（非 bug，单请求形态相关）；`11140` = 账号级风控（整渠道拦，等恢复/换号）；`6004`/`429` = 配额限流（等重置）。**
 
 ## 二、各错误码详解与修复
 
@@ -28,6 +29,17 @@ CodeBuddy 上游只接受流式（HTTP 400 code 11101）。10Router 的 `CodeBud
 
 - 位置：`open-sse/executors/codebuddy-cn.js`
 - 性质：稳定可复现，代码已处理。
+
+### 11102 — 上游不认这个 id（唯一的存在性判据）
+
+原文：`{"code":11102,"msg":"model [xxx] service info not found","requestId":"…"}`，HTTP **400**。
+
+CodeBuddy 的两条渠道都是 **OpenAI 透传**——没有模型目录接口，但**未注册的 id 也能直接打过去**，上游只回这一句。所以：
+
+- **探一个 id 在不在，用 11102 判定**：`{"model":"<候选>","messages":[{"role":"system",…},{"role":"user",…}],"max_tokens":16,"stream":true}`。回 `11102` = 不存在；回 200 = 存在。**必须配一个瞎编的对照 id**（如 `__control_bogus__`）确认判定器本身正常——否则一旦请求形态有问题，会把"全都不存在"的假象当成结论。
+- **首条消息必须是 system**，否则全批请求会挂在 `11128`（文案是 "first message is not system prompt"，与本节的风控 11128 **完全是两码事**——见到这条先补 system 消息，别去查渠道风控）。
+- **与 `11133` 分清**：`11102` = 上游压根没这个 id（目录问题）；`11133` = id 认识、但参数被拒（`model_param_invalid`，见该专节）。`glm-5.3-flashx` 在国际线就是每个请求都 11133——**存在，但用不了**，故只留在 CN 注册表。
+- **别用它当"下线依据"**：国际版积分页按订阅档位过滤，免费档看不到新模型（Space-Bunny / Grok-4.7 / Gemini-3.8-Flash / GPT-6.1-Sol 全都不在页面上），但这些 id 在 API 上都回 200。**"某张表上没有"≠ 不存在**，要下架只能靠 11102。
 
 ### 11128 — unapproved channel 安全策略拦截（渠道级风控，勿乱改）
 
@@ -156,7 +168,41 @@ CodeBuddy 对 assistant 消息里带 reasoning 内容的校验报错。性质为
 
 账号某模型使用量超限返回 `6004`(HTTP 429)，带重置时间，到期自动恢复。属正常配额消耗，10router 多账号会自动 fallback 到下个账号。
 
-## 三、排查方法论（跨错误码可复用）
+## 三、模型寻址：UI 上的 id 不能抄进 `model`（2026-10-09 实测）
+
+聊天界面右下角的模型胶囊显示的是形如 **`xt/ag/gemini-3.8-flash-high`** 的串。它**不是** `/v2/chat/completions` 的 model id——那是 agent 会话侧的内部 id。
+
+CN 线上实测（2026-10-09，`codebuddy-cn` 在用账号），把前缀/后缀逐层拆开打：
+
+| 探测的 model 值 | 结果 |
+|---|---|
+| `xt/ag/gemini-3.8-flash-high`（截图原样） | `11102` |
+| `ag/gemini-3.8-flash-high`（去 `xt/`） | `11102` |
+| `xt/ag/gemini-3.8-flash`（去 effort 后缀） | `11102` |
+| `gemini-3.8-flash-high`（去整段前缀） | `11102` |
+| `xt/ag/glm-5.3-high` / `xt/ag/glm-5.3` / `xt/chat/glm-5.3-high` / `xt/glm-5.3-high` | 全 `11102` |
+| `xt/ag/glm-5.3-zzz`（非法档位，对照） | `11102` |
+| `__control_bogus__`（对照） | `11102` |
+
+全部与**瞎编的对照 id 同一判定**——即 OpenAI 透传网关根本不认这类带前缀/后缀的写法。
+
+**结论**：`model` 字段只能填注册表里那条裸 id（`glm-5.3`、`kimi-k3`、`space-bunny` …）。思考档位一律走 **`reasoning_effort`** 请求字段，不要编码进 model id。
+
+> 截图里那个具体的 `gemini-3.8-flash-high` 还有第二层问题：`gemini-3.8-flash` 在 CN **压根不存在**（裸 id 也是 `11102`），它是国际版独有的模型线。看到它出现在"国内"的截图里，说明那一屏的会话不是 CN 侧——**积分页是两边共用的**（一套积分系统），所以积分页上摆着 CN 的模型表，并不能证明当前会话在哪一侧。
+
+### 思考档位走 `reasoning_effort`，且校验只在 DeepSeek 系
+
+| model | `reasoning_effort` | 结果 |
+|---|---|---|
+| `glm-5.3` | `high` / `low` / `auto` / `none` / `max` / **乱填 `zzz`** / 整字段缺省 | **全部 200** |
+| `deepseek-v4.1-flash` | `auto` / `off` | `11150` |
+
+两点值得记住：
+
+1. **GLM 系不校验档位**——把档位名拼错（如 `hign`）不会报错，会被静默当成某个默认档跑完。排查"思考强度没按预期生效"时，GLM 上的第一嫌疑是**上游忽略了该值**，而不是值本身错了。
+2. **`11150` 是 DeepSeek 系的专属约束**，GLM / Kimi 不会触发。修复逻辑见 `11150` 专节与 `CodeBuddy-reasoning-effort-fix.md`。
+
+## 四、排查方法论（跨错误码可复用）
 
 1. **先分错误码**：看 10router.log 具体 code——`11150`/`11101` 可修，`11133` 多客户端/上游，`11128` 渠道级风控（成片命中看熔断），`11140` 账号级风控，`11134` 上游临时不服务，`6004` 等重置。别一看到 400/11128 就改连接。
 2. **同模型失败 vs 成功抽差异**：`FMT / MSG / TOOL / THINK / ACC` 五个字段对比，差异项即可疑触发点。
@@ -166,10 +212,11 @@ CodeBuddy 对 assistant 消息里带 reasoning 内容的校验报错。性质为
 6. **注明发起客户端**：不同客户端(NAS 直连 dsh / mirasim 内 dsh / codex / Claude Code)路径不同、根因可能不同，先问清/注明。
 7. **核对连接是不是真多账号**（intl 尤其重要）：Google/GitHub OAuth 同邮箱 = 同一 CodeBuddy 账号（JWT `sub`/`refreshToken` 相同）——"两条连接"不构成冗余，failover/轮询都在打同一个账号与风控状态。见 `11140` 专节。
 
-## 四、相关文档
+## 五、相关文档
 
 | 主题 | 文档 |
 |------|------|
+| 模型寻址 / UI id 不可用 / 思考档校验 | 本文三专节 |
 | 11150 reasoning_effort | `CodeBuddy-reasoning-effort-fix.md` (en/zh-CN) |
 | 11128 渠道级风控 + 熔断 | 本文 11128 专节；历史案例 skill: `llm-api-channel-health/references/10router-codebuddy-11128-unapproved-channel.md` |
 | 11133 流式空 name(响应侧) | skill: `10router-dev/references/codebuddy-streaming-toolcall-empty-name.md` |
