@@ -47,6 +47,15 @@ describe("Token Harbor provider", () => {
     expect(ids.every((id) => !id.includes("/"))).toBe(true);
   });
 
+  it("offers the free-tier Claude Haiku under its exact upstream id", () => {
+    // Token Harbor keeps the upstream id verbatim and only appends ":free", so
+    // this row must carry the dot-version + suffix — the canonical
+    // `claude-haiku-5-5` key cannot match it. Capabilities for this id are a
+    // separate concern (see PR #51); this row only makes it selectable offline.
+    const haiku = (PROVIDER_MODELS.tokenharbor || []).find((m) => m.id === "claude-haiku-5.5:free");
+    expect(haiku).toMatchObject({ id: "claude-haiku-5.5:free", name: "Claude Haiku 5.5 (Free)" });
+  });
+
   it("routes through the shared DefaultExecutor (no custom adapter)", () => {
     expect(getExecutor("tokenharbor")).toBeInstanceOf(DefaultExecutor);
   });

@@ -38,6 +38,11 @@ export default {
   models: [
     { id: "claude-opus-5.5", name: "Claude Opus 5.5" },
     { id: "claude-sonnet-5", name: "Claude Sonnet 5" },
+    // Dot-version + ":free" form. The canonical `claude-haiku-5-5` row (dash
+    // form) does not match it, so without a capability row it falls to the
+    // generic `*claude*haiku*` pattern (claude-budget, 200K/64K). That row is
+    // added in capabilities.js by PR #51; this entry only makes the id offered.
+    { id: "claude-haiku-5.5:free", name: "Claude Haiku 5.5 (Free)" },
     { id: "gpt-6-astra", name: "GPT-6 Astra" },
     { id: "gpt-6-sol", name: "GPT-6 Sol" },
     { id: "deepseek-v4.1-flash:free", name: "DeepSeek V4.1 Flash (Free)" },
