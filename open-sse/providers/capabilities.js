@@ -432,6 +432,9 @@ export const PROVIDER_CAPABILITIES = {
     // MiMo V2.6 全模态（text+image+audio+video）且与 canonical mimo-v2.6 系一致地
     // 不声明 reasoning（上游用非标准 thinking 字段，无法安全发档位）。
     "mimo-v2.6-flash:free":     { vision: true, audioInput: true, videoInput: true, contextWindow: 1048576, maxOutput: 131072 },
+    // tokenharbor 的 Haiku 5.5 id 为点号写法(claude-haiku-5.5:free),不命中全局 claude-haiku-5-5 键,
+    // 会落进 *claude*haiku* 兜底拿到 200K/claude-budget,导致 combo 被 min 拉成 200K。此处精确锁定 1M/adaptive。
+    "claude-haiku-5.5:free":    { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", contextWindow: 1000000, maxOutput: 128000 },
   },
   "codex": {
     "gpt-6-astra":               { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 272000, maxOutput: 128000 },
