@@ -85,8 +85,11 @@ export default {
     { id: "glm-5.3", name: "GLM-5.3", rateMultiplier: 0.79 },
     { id: "glm-5.3-flash", name: "GLM-5.3-Flash", rateMultiplier: 0.06 },
     // 2026-10-08 现网探测：glm-5.3-flashx 答 200（注意 x 前无连字符，glm-5.3-flash-x
-    // 才是 11102）。国际线同样有该 id。倍率待积分页核对。
-    { id: "glm-5.3-flashx", name: "GLM-5.3-FlashX" },
+    // 才是 11102）。0.14x 为 2026-10-09 积分页回填——它比同族的 glm-5.3-flash(0.06)
+    // 贵一倍以上，"-x = 付费档"在这条线上是成立的。**只属于 CN**：国际线虽有同名
+    // 服务条目，但该 id 在那边每个请求都被 11133 拒（model_param_invalid），故
+    // codebuddy-intl.js 不收。
+    { id: "glm-5.3-flashx", name: "GLM-5.3-FlashX", rateMultiplier: 0.14 },
     { id: "glm-5.2", name: "GLM-5.2", rateMultiplier: 0.79 },
     { id: "glm-5.1", name: "GLM-5.1", rateMultiplier: 0.79 },
     { id: "minimax-m3", name: "MiniMax-M3", rateMultiplier: 0.25 },
