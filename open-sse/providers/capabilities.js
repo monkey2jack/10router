@@ -97,6 +97,8 @@ export const MODEL_CAPABILITIES = {
   "big-pickle":                { reasoning: true, thinkingFormat: "openai", contextWindow: 262144, maxOutput: 65536 },
   "mimo-v2.5-free":            { reasoning: true, thinkingFormat: "openai", contextWindow: 1048576, maxOutput: 65536 },
   "ling-3.0-flash-fin-free":   { reasoning: true, thinkingFormat: "openai", contextWindow: 131072, maxOutput: 32768 },
+  // 3.1 窗口翻倍到 256K（models.dev opencode 262144/32768），仍纯文本进。
+  "ling-3.1-flash-free":       { reasoning: true, thinkingFormat: "openai", contextWindow: 262144, maxOutput: 32768 },
   "nemotron-3-ultra-free":     { reasoning: true, thinkingFormat: "openai", contextWindow: 262144, maxOutput: 65536 },
   "nemotron-3.5-lightning-free": { reasoning: true, thinkingFormat: "openai", contextWindow: 262144, maxOutput: 65536 },
   "claude-opus-5-thinking-agentic": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", contextWindow: 1000000, maxOutput: 128000 },
@@ -124,6 +126,10 @@ export const MODEL_CAPABILITIES = {
   "claude-sonnet-5-thinking": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", contextWindow: 1000000, maxOutput: 128000 },
   "claude-sonnet-5-agentic": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", contextWindow: 1000000, maxOutput: 128000 },
   "claude-sonnet-5-thinking-agentic": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", contextWindow: 1000000, maxOutput: 128000 },
+  // Haiku 5.5 与 Opus 5.x / Sonnet 5.x 同为 1M/128000 adaptive 第一方规格
+  // （models.dev anthropic/claude-haiku-5-5）。必须落到本键而不是下方
+  // `*claude*haiku*` 的 claude-budget 200K/64K——见上一条 sonnet-5 的说明。
+  "claude-haiku-5-5": { vision: true, reasoning: true, search: true, thinkingFormat: "claude-adaptive", contextWindow: 1000000, maxOutput: 128000 },
 
   // Gemini image-gen / OpenAI image / xai image variants
   "gpt-image-1":       { imageOutput: true, tools: false },
@@ -283,6 +289,9 @@ export const MODEL_CAPABILITIES = {
   // text+image+video、1048576 窗口、输入/输出各 524288。名字读不出多模态，
   // 必须显式声明，否则 vision 落 false 图片被剥。
   "space-bunny-free":           { vision: true, videoInput: true, reasoning: true, thinkingFormat: "openai", contextWindow: 1048576, maxOutput: 524288 },
+  // 付费版 Space-Bunny（opencode-go 目录；models.dev opencode-go 1048576/524288，
+  // text+image+video 进）。codebuddy-cn 的同名条目在 provider 层优先，不受影响。
+  "space-bunny":               { vision: true, videoInput: true, reasoning: true, thinkingFormat: "openai", contextWindow: 1048576, maxOutput: 524288 },
   // MiniMax Code（CreditDaddy MiniMax 线实测 + 官方客户端设置面板 2026-10-03）：
   //   - M3.1-Flash-Preview：思考深度五档（default/low/medium/high/xhigh/max，
   //     无 off → canDisable:false），thinking.effort 由 minimax 形态透传；
@@ -296,6 +305,9 @@ export const MODEL_CAPABILITIES = {
   // text+image 进、1M/131072、reasoning/tool_call 均 true——与 space-bunny-free
   // 同形（openai 转发，thinkingFormat: openai）。
   "fledge-alpha-free":          { vision: true, reasoning: true, thinkingFormat: "openai", contextWindow: 1048576, maxOutput: 131072 },
+  // Exo Free（opencode zen 目录；models.dev opencode 条目）：与 fledge-alpha-free
+  // 同形——text+image 进、1M/131072、reasoning/tool_call 均 true。
+  "exo-free":                   { vision: true, reasoning: true, thinkingFormat: "openai", contextWindow: 1048576, maxOutput: 131072 },
   "sensenova-6.8-flash-lite":   { vision: true, reasoning: true, thinkingFormat: "openai", contextWindow: 262144, maxOutput: 65536 }, // sensenova（第一方）
   "venice-uncensored-1-2":      { vision: true, contextWindow: 128000, maxOutput: 8192 }, // venice（第一方）；无 reasoning
   // Morph：第一方明说纯文本且 **不支持工具调用**（tools:false 必须显式写，

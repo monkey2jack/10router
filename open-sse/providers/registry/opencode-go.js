@@ -67,6 +67,7 @@ export default {
     // 文档端点表直接收录的免费 id（无家族可继承，表就是依据）；能力行见
     // capabilities.js（models.dev 的 opencode-go/opencode 条目给了完整规格）。
     { id: "space-bunny-free", name: "Space Bunny (Free)", supportedFormats: ["openai", "claude"] },
+    { id: "space-bunny", name: "Space Bunny", supportedFormats: ["openai", "claude"] },
     // V4.1-Flash 在 opencode-go 有两个 id：官方文档表主推的 deepseek-v4.1-flash，
     // 以及 /models 目录里同时列出的 deepseek-flash（与 DeepSeek 第一方同名）。
     // 文档表只把 /chat/completions 列为推荐端点，但这条通道三个端点在现网都可用

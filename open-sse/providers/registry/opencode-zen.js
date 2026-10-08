@@ -49,10 +49,12 @@ export default {
     { id: "claude-opus-4-7", name: "Claude Opus 4.7", supportedFormats: ["claude"] },
     { id: "claude-opus-4-6", name: "Claude Opus 4.6", supportedFormats: ["claude"] },
     { id: "claude-opus-4-5", name: "Claude Opus 4.5", supportedFormats: ["claude"] },
+    { id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", supportedFormats: ["claude"] },
     { id: "claude-sonnet-5", name: "Claude Sonnet 5", supportedFormats: ["claude"] },
     { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", supportedFormats: ["claude"] },
     { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", supportedFormats: ["claude"] },
     { id: "claude-sonnet-4", name: "Claude Sonnet 4", supportedFormats: ["claude"] },
+    { id: "claude-haiku-5-5", name: "Claude Haiku 5.5", supportedFormats: ["claude"] },
     { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", supportedFormats: ["claude"] },
     // Gemini (own path, via chat completions transport)
     { id: "gemini-3.8-flash", name: "Gemini 3.8 Flash", supportedFormats: ["openai"] },
@@ -64,6 +66,8 @@ export default {
     { id: "gemini-3-flash", name: "Gemini 3 Flash", supportedFormats: ["openai"] },
     // GPT / Grok / Muse Spark paid (responses)
     { id: "gpt-6-astra", name: "GPT 6 Astra", targetFormat: "openai-responses", supportedFormats: ["openai-responses"] },
+    { id: "gpt-6.1-sol", name: "GPT 6.1 Sol", targetFormat: "openai-responses", supportedFormats: ["openai-responses"] },
+    { id: "gpt-6-sol", name: "GPT 6 Sol", targetFormat: "openai-responses", supportedFormats: ["openai-responses"] },
     { id: "gpt-5.6-sol", name: "GPT 5.6 Sol", targetFormat: "openai-responses", supportedFormats: ["openai-responses"] },
     { id: "gpt-5.6-terra", name: "GPT 5.6 Terra", targetFormat: "openai-responses", supportedFormats: ["openai-responses"] },
     { id: "gpt-5.6-luna", name: "GPT 5.6 Luna", targetFormat: "openai-responses", supportedFormats: ["openai-responses"] },
@@ -115,12 +119,16 @@ export default {
     { id: "kimi-k2.6", name: "Kimi K2.6", supportedFormats: ["openai"] },
     { id: "kimi-k2.5", name: "Kimi K2.5", supportedFormats: ["openai"] },
     { id: "big-pickle", name: "Big Pickle", supportedFormats: ["openai"] },
+    { id: "mistral-large-4", name: "Mistral Large 4", supportedFormats: ["openai"] },
     { id: "union-alpha", name: "Union Alpha", supportedFormats: ["claude"] },
     // Free tier on the keyed lane (chat completions)
     { id: "deepseek-v4-flash-free", name: "DeepSeek V4 Flash Free", supportedFormats: ["openai"] },
     { id: "mimo-v2.6-flash-free", name: "MiMo V2.6 Flash Free", supportedFormats: ["openai"] },
     { id: "mimo-v2.5-free", name: "MiMo V2.5 Free", supportedFormats: ["openai"] },
     { id: "ling-3.0-flash-fin-free", name: "Ling 3.0 Flash Fin Free", supportedFormats: ["openai"] },
+    { id: "ling-3.1-flash-free", name: "Ling 3.1 Flash Free", supportedFormats: ["openai"] },
+    { id: "fledge-alpha-free", name: "Fledge Alpha Free", supportedFormats: ["openai"] },
+    { id: "exo-free", name: "Exo Free", supportedFormats: ["openai"] },
     { id: "nemotron-3-ultra-free", name: "Nemotron 3 Ultra Free", supportedFormats: ["openai"] },
     { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning Free", supportedFormats: ["openai"] },
     // Free tier on the keyed lane (responses)

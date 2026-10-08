@@ -7,6 +7,8 @@
 ### ✨ 新增
 
 - **免费线卡片新增 CreditDaddy 网关连通性检测与引导**(issue #49 关闭时承诺):ZCode Free / MiniMax Free / Trae Free 卡片的网关设置区现在会实时探测网关端口(服务端 TCP 探测,浏览器跨源探测不可靠)——在线显示绿色「网关在线」,不通则显示琥珀色提示并附 CreditDaddy 下载链接与开启网关的引导,支持手动「重新检测」、保存配置后自动重探。探测端点仅放行本机/局域网私有网段(公网地址 400),不构成端口扫描器。
+- **OpenCode 两条付费线补齐新上架模型**:Zen 线新增 Claude Haiku 5.5 / Sonnet 5.5、GPT 6 Sol / 6.1 Sol、Mistral Large 4 与 Exo Free / Fledge Alpha Free / Ling 3.1 Flash Free 三个免费 id;Go 线新增付费版 Space Bunny。id 依据官方 `/zen/v1/models` 与 `/zen/go/v1/models` 目录核对。
+- **Claude Haiku 5.5 能力声明修正为 1M / adaptive**:此前该 id 命中 `*claude*haiku*` 兜底,被按 200K / claude-budget 声明——与 Opus 5.x、Sonnet 5.x 同为 5 代的 Haiku 5.5 实为 1M / 128000 adaptive(models.dev 第一方),budget 会让翻译层伪造签名 thinking 占位。补精确键覆盖,同批修正 Exo Free、Ling 3.1 Flash Free 与 Space Bunny 的窗口/模态。
 
 ### 🐛 修复
 
