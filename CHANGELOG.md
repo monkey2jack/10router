@@ -2,11 +2,24 @@
 
 > 面向用户的精简更新见 [`public/i18n/changelog/`](https://github.com/techysy/10router/tree/main/public/i18n/changelog)（`en.md` / `zh-CN.md` / `zh-TW.md`，仪表盘「Change Log」按界面语言加载对应文件）。本文件为完整开发日志，按版本从上往下排列。
 
+## v1.3.6 (待定)
+
+### ✨ 新增
+
+- **免费线卡片新增 CreditDaddy 网关连通性检测与引导**(issue #49 关闭时承诺):ZCode Free / MiniMax Free / Trae Free 卡片的网关设置区现在会实时探测网关端口(服务端 TCP 探测,浏览器跨源探测不可靠)——在线显示绿色「网关在线」,不通则显示琥珀色提示并附 CreditDaddy 下载链接与开启网关的引导,支持手动「重新检测」、保存配置后自动重探。探测端点仅放行本机/局域网私有网段(公网地址 400),不构成端口扫描器。
+
+### 🐛 修复
+
+- **客户端在 `[DONE]` 之后立即断开,不再把完整答复记成失败**(issue #48,#50):流式答复已完整送达后,客户端提前断开连接会被记为一次失败。现在 `[DONE]` 之后的断开视为正常结束,详情页与用量统计按成功记录。
+- **GitHub Copilot 配额按类别分行,月度窗口不再并入资源包合计**:此前 Copilot 的 chat / completions 两类被当作同一资源包累加,与 Google 反重力等按窗口分列的口径不一致。现在按 `类别 · 每月` 拆成独立行,与 Antigravity 一致;新增 `Monthly` / `chat` / `completions` 三条中文文案,英文界面显示 `chat · Monthly` / `completions · Monthly`。
+- **自定义连接名称优先显示**:连接行不再冗余显示用户名或邮箱,用户为连接设置的名称直接可见。
+- **升级安装不再弹「无法关闭」——新安装器自带清理,不再执行旧版本卸载器**(Windows 桌面安装包已原位替换更新):electron-builder 的升级路径会把旧版本发布时冻结的卸载器拷出静默执行,其内部的进程检查即使没有任何 10Router 进程也会非零退出,于是弹出「无法关闭」或静默退出码 2。现在新安装器在覆盖前删除旧版卸载注册表项,升级框架便跳过旧卸载器;旧程序文件由新安装直接覆盖,用户数据(`%APPDATA%\router`)不受影响。
+- **升级强杀改为「先解释再提权」,UAC 被拒绝不再无声失败**:需要提权时先弹出说明,告知将弹出 UAC 以及应选择的选项;用户拒绝提权时安装器给出明确提示并记入安装日志,不再静默放弃升级。
+
 ## v1.3.5 (2026-10-05)
 
 ### ✨ 新增
 
-- **免费线卡片新增 CreditDaddy 网关连通性检测与引导**（issue #49 关闭时承诺）：ZCode Free / MiniMax Free / Trae Free 卡片的网关设置区现在会实时探测网关端口（服务端 TCP 探测，浏览器跨源探测不可靠）——在线显示绿色「网关在线」，不通则显示琥珀色提示并附 CreditDaddy 下载链接与开启网关的引导，支持手动「重新检测」、保存配置后自动重探。探测端点仅放行本机/局域网私有网段（公网地址 400），不构成端口扫描器。
 - **新增 Trae Free 供应商（CreditDaddy Trae 线，`trae-free`）**：与 ZCode / MiniMax 两条线同款的本地网关接线——CreditDaddy 桌面版「Trae 网关」接口（`/gateway/trae/v1/messages`，Anthropic Messages 形态，默认 `127.0.0.1:47860`；网关内部转译到 sol.trae.cn 的 SOLO agent 会话协议，账号多路 SWRR 轮换、401 凭据热对齐、429 限流冷却与局域网白名单均在 CreditDaddy 侧），noAuth 免登录卡片、主机/端口复用 CreditDaddy 网关配置、路径按线独立（设置键 `traeGatewayPath`）。模型面 12 款：Doubao-Seed-2.0-Code / Doubao-Seed-Code / MiniMax M2.7 / GLM 5.1 / GLM 5v-Turbo / GLM 5 / DeepSeek V4 Pro / V4 Flash / Kimi K2.6 / K2.5 / Qwen 3.6 Plus / 3.5，支持 thinking_delta 思考流与用量回报。五处接入点：注册表条目 + `registry/index.js` 自动列表（p149）、`executors/base.js` 网关 baseUrl 覆盖（三线同判）、`auth.js` noAuth 虚拟行与网关路径分支（三线同源，抽风格从二元改多分支）、`NoAuthProxyCard` 网关设置区与本地/局域网接入说明、`public/providers/trae-free.png` 官方图标（从 TRAE SOLO 客户端 exe 的 PE 资源提取的黑白标，256px RGBA）。
 
 ### 🐛 修复
@@ -58,8 +71,6 @@
 - **trae-free 的 CreditDaddy 网关 baseUrl 覆盖生效**（本版接入时的遗留）：接入时 `executors/base.js` 加了该线但漏了 `executors/default.js` 的同名分支，而 trae-free 没有专属 executor（`executors/index.js` 注册的 `trae` 是另一个 provider，走 `core-normal.trae.ai`），实际由 `DefaultExecutor` 承接——用户配置的局域网主机/端口对 trae-free 完全无效，请求仍打注册表默认 `127.0.0.1:47860`。两处现已同判，并补 `creditdaddy-gateway-url.test.js`（从注册表反推本地网关线，在两个重复实现上各断言 4 种情形；已验证回退 `default.js` 到缺 trae-free 的状态即红并点名该 provider）。
 - **Qoder 网页会话失效不再静默降级**（issue #44）：部分 Qoder 账号的 openapi quota/usage 聚合值归零，套餐积分只能靠 CreditDaddy 同步来的网页会话读取；会话一旦失效（cookie 过期 / owner 不匹配），10Router 会静默回落到 openapi 聚合值，用户只看到「订阅积分凭空消失」，没有任何提示。现在把整条失败路径点亮——`getQoderUsage` 在「会话存在但没产出可用数据」时返回 `webSessionExpired:true`；额度卡片显示琥珀色警告并指明去 CreditDaddy 重新登录网页；导入 qoder 连接后并发（≤6）探测各账号网页会话可用性，弹窗展示结果，有失效时取消自动关闭确保用户看到。
 - **Windows 升级安装不再卡在「10Router 无法关闭」**：assisted installer（`oneClick:false`）以普通用户运行，`taskkill` 只能杀同权限或更低权限的进程——而旧版 sidecar 由 10Router 以「以管理员身份运行」拉起（MITM 绑定 443 需要提权），安装器直接 `taskkill /IM` 被拒绝（access denied），`CHECK_APP_RUNNING` 弹「无法关闭」后放弃升级。现在 `customInit` 在普通 taskkill 之后追加一段 UAC 提权（PowerShell `-EncodedCommand` + `-Verb RunAs`，直连系统 `taskkill.exe` 避免 PATH 投毒）从高权限上下文强杀；用户拒绝提权时退化为普通 taskkill，最坏与之前一致。同时给 `nsisWeb` 目标补上 `include`（此前只有标准 Setup 有 customInit，Web-Setup 没有）。**这条修复同时覆盖 `10Router.Setup` 与 `10Router-Web-Setup` 两个安装包。**
-- **升级安装不再弹「无法关闭」——新安装器自带清理，不再执行旧版本卸载器（Windows 桌面四资产已原位替换更新）**：electron-builder 的升级路径会把【旧版本发布时冻结的卸载器】拷出静默执行，其内部的进程检查在本机/测试机实测**即使没有任何 10Router 进程也会非零退出**，外层重试 5 次后弹「无法关闭」（静默路径表现为 `Failed to uninstall old application files: 2`），v1.3.5 的解释性 UAC 只能缓解、无法根除。现在新安装器自带清理：customInit 删除旧版卸载注册表键（键名 = appId 派生的确定性 UUID，有测试守卫），使升级框架读不到 `UninstallString` 而整体跳过旧卸载器；旧程序文件由新安装直接覆盖，用户数据（`%APPDATA%router`）不受影响。**升级 1.3.5 覆盖安装已在本机应用运行状态下实测全流程无弹窗**。四个 Windows 桌面资产（Setup / Portable / Web-Setup / nsis.7z）按 1.3.1 先例**同版本号整组原位替换**，`SHA256SUMS-desktop.txt` 同步更新。
-- **Windows 升级「无法关闭」修复的早期修订**：首版的 UAC 提权是**静默**的——用户实测升级仍弹「无法关闭」：提权弹窗没有任何上下文，被随手拒绝后原样退回失败，而退出码被丢弃、无任何解释（Web-Setup 静默路径则表现为 `Failed to uninstall old application files: 2`——旧卸载器发现存活进程后自动取消的退出码）。现改为：普通强杀后先探测是否真有幸存者（`nsProcess`，绝大多数机器没有 → 不再凭空弹 UAC）；有幸存者才弹**解释性**提示（说明将弹 UAC、该选什么）；提权后复查并把结果写进安装日志。四个 Windows 桌面资产（Setup / Portable / Web-Setup / nsis.7z）按 1.3.1 先例**同版本号整组原位替换**，`SHA256SUMS-desktop.txt` 同步更新——已下载过旧资产的重新下载即可。
 - **桌面端更新下载加超时保护**：GitHub tags 拉取、安装包下载与 `checkUpdateViaGitHub` 此前无超时，网络挂起会让更新流程永久卡死。新增 `fetchWithTimeout`（AbortController）统一包裹，读流循环加 `try/catch` + `reader.cancel()`，`startUpdateDownload` 失败时清理已下载的临时文件。
 
 ## v1.3.3 (2026-10-04)

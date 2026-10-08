@@ -463,12 +463,16 @@ export function parseQuotaData(provider, data) {
     switch (provider.toLowerCase()) {
       case "github":
         if (data.quotas) {
+          // Monthly per-category allowances: each keeps its own window row and is
+          // never summed into the additive resource-pack total.
           Object.entries(data.quotas).forEach(([name, quota]) => {
+            if (!quota.unlimited && !(quota.total > 0)) return;
             normalizedQuotas.push({
-              name,
+              name: `${name} · Monthly`,
               used: quota.used || 0,
               total: quota.total || 0,
               resetAt: quota.resetAt || null,
+              recurring: true,
             });
           });
         }
