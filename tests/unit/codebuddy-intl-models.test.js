@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import entry from "../../open-sse/providers/registry/codebuddy-intl.js";
 import cnEntry from "../../open-sse/providers/registry/codebuddy-cn.js";
+import { getCapabilitiesForModel } from "../../open-sse/providers/capabilities.js";
 
 describe("CodeBuddy international static model catalog", () => {
   it("does not advertise models confirmed by the intl gateway as 11102", () => {
@@ -42,6 +43,7 @@ describe("CodeBuddy international static model catalog", () => {
   it("advertises the models the live intl gateway answers", () => {
     const ids = entry.models.map((model) => model.id);
     expect(ids).toEqual([
+      "auto",
       "hy4-preview",
       "hy3",
       "gpt-6-astra",
@@ -53,6 +55,10 @@ describe("CodeBuddy international static model catalog", () => {
       "gpt-5.5",
       "gpt-5.4",
       "gpt-5.3-codex",
+      "gpt-6.1-sol",
+      "gemini-3.8-flash",
+      "grok-4.7",
+      "space-bunny",
       "gemini-3.5-flash",
       "glm-5v-turbo",
       "glm-5.3",
@@ -61,7 +67,7 @@ describe("CodeBuddy international static model catalog", () => {
       "glm-5.1",
       "minimax-m3",
       "kimi-k3",
-      "kimi-k2.7",
+      "kimi-k2.8-preview",
       "kimi-k2.6",
       "deepseek-v4.1-flash",
     ]);
@@ -74,7 +80,18 @@ describe("CodeBuddy international static model catalog", () => {
     expect(byId["glm-5.1"]).toMatchObject({ name: "GLM-5.1", rateMultiplier: 0.79 });
     expect(byId["glm-5v-turbo"]).toMatchObject({ name: "GLM-5v-Turbo", rateMultiplier: 0.71 });
     expect(byId["minimax-m3"]).toMatchObject({ name: "MiniMax-M3", rateMultiplier: 0.25 });
-    expect(byId["kimi-k2.7"]).toMatchObject({ name: "Kimi-K2.7-Code", rateMultiplier: 0.57 });
+    expect(byId["kimi-k2.6"]).toMatchObject({ name: "Kimi-K2.6", rateMultiplier: 0.52 });
+  });
+
+  it("drops kimi-k2.7, absent from the intl credit page (CN keeps it)", () => {
+    // The 2026-10-09 intl credit page lists Kimi-K3 (1.62) and Kimi-K2.6 (0.52)
+    // but no Kimi-K2.7-Code, so the row was retired from intl even though a live
+    // probe had answered 200. CN still publishes it at 0.57 and keeps its row —
+    // the two catalogs are independent, so neither side inherits the other's
+    // availability, only its credit multiplier (see the parity case above).
+    const ids = entry.models.map((model) => model.id);
+    expect(ids).not.toContain("kimi-k2.7");
+    expect(cnEntry.models.map((model) => model.id)).toContain("kimi-k2.7");
   });
 
   it("pins gpt-6-astra's measured multiplier, not the superseded estimate", () => {
@@ -92,6 +109,41 @@ describe("CodeBuddy international static model catalog", () => {
     // it has a real multiplier, so it must never carry a permanent
     // "rides the free quota" claim nor a promo window
     expect(byId["gpt-6-astra"].promoFreeUntil).toBeUndefined();
+  });
+
+  it("lists auto as the gateway's own routing id, not a UI-only preset", () => {
+    // The intl credit page shows five agent presets: Auto 0.79 / Fast 0.34 /
+    // Balanced 0.59 / Primary 3.31 / Deep 3.33. Only `auto` is a real model id —
+    // it answers 200 and echoes back the model it picked. The other four 11102
+    // across 20 spellings (title case, auto-xxx, xxx-mode, cb-xxx), so the chat
+    // app resolves them before it sends anything. Only Auto belongs here; adding
+    // the rest would advertise ids the gateway rejects.
+    const byId = Object.fromEntries(entry.models.map((model) => [model.id, model]));
+    expect(byId["auto"]).toMatchObject({ name: "Auto", rateMultiplier: 0.79 });
+    for (const preset of ["fast", "balanced", "primary", "deep"]) {
+      expect(byId[preset]).toBeUndefined();
+    }
+    // 0.79 is the multiplier of the model auto actually resolves to (glm-5.2), so
+    // it is not a coincidence the price could be taken from the CN credit page.
+    expect(byId["auto"].rateMultiplier).toBe(byId["glm-5.2"].rateMultiplier);
+  });
+
+  it("records auto's capabilities as GLM-5.2's, not the canonical fallback", () => {
+    // A 2026-10-09 probe sent five different prompts (zh/en, code/math/physics)
+    // to model:"auto" and every response echoed model:"glm-5.2", so it is logged
+    // as GLM-5.2. The canonical fallback row says vision:false / 200000 /
+    // 131072 — under-reporting the window 5x and letting max_tokens past the
+    // 48000 clamp the gateway actually enforces. intl publishes no config
+    // endpoint of its own (10 candidate paths, all 404), so CN's glm-5.2 row is
+    // the source: one credit system, one model.
+    expect(getCapabilitiesForModel("codebuddy-intl", "auto")).toMatchObject({
+      vision: true,
+      reasoning: true,
+      thinkingFormat: "openai",
+      thinkingCanDisable: true,
+      contextWindow: 1000000,
+      maxOutput: 48000,
+    });
   });
 
   it("keeps a shared CN/intl model at the same credit multiplier", () => {

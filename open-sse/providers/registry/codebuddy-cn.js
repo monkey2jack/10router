@@ -80,15 +80,26 @@ export default {
     // 原生多模态输入、1M 上下文、编码向。0.03x 为 10/2–10/7 限时折扣价，窗口
     // 结束后按官方积分页回填正式倍率（deepseek-v4.1-flash 同期从 0.03 回调到
     // 0.11 的先例说明这类新模型首周价会动）。
-    { id: "space-bunny", name: "Space-Bunny", rateMultiplier: 0.03 },
+    { id: "space-bunny", name: "Space-Bunny", rateMultiplier: 0.08 },
     { id: "glm-5v-turbo", name: "GLM-5v-Turbo", rateMultiplier: 0.71 },
     { id: "glm-5.3", name: "GLM-5.3", rateMultiplier: 0.79 },
     { id: "glm-5.3-flash", name: "GLM-5.3-Flash", rateMultiplier: 0.06 },
+    // 2026-10-08 现网探测：glm-5.3-flashx 答 200（注意 x 前无连字符，glm-5.3-flash-x
+    // 才是 11102）。国际线同样有该 id。倍率待积分页核对。
+    { id: "glm-5.3-flashx", name: "GLM-5.3-FlashX" },
     { id: "glm-5.2", name: "GLM-5.2", rateMultiplier: 0.79 },
     { id: "glm-5.1", name: "GLM-5.1", rateMultiplier: 0.79 },
     { id: "minimax-m3", name: "MiniMax-M3", rateMultiplier: 0.25 },
+    // 2026-10-08 现网探测补一个：minimax-m2.7 返回 200 且回显自身 id（不是 M3 的
+    // 别名）；hy5-preview / glm-5.4 / kimi-k2.7-code / muse-spark-1.3 回 11102。
+    // deepseek-v4-flash 上游也答 200，但它已被 deepseek-v4.1-flash 取代，
+    // 不重复进选择器（见 unit/codebuddy-cn-models.test.js 的 retired-ids 用例）。
+    { id: "minimax-m2.7", name: "MiniMax-M2.7" },
     { id: "kimi-k3", name: "Kimi-K3", rateMultiplier: 1.62 },
     { id: "kimi-k2.7", name: "Kimi-K2.7-Code", rateMultiplier: 0.57 },
+    // 2026-10-08 积分页列出 Kimi-K2.8-Preview 0.77x，现网探测答 200（kimi-k2.8
+    // 与 kimi-k2-8-preview 都是 11102，id 带 .8-preview）。国际线同样有该 id。
+    { id: "kimi-k2.8-preview", name: "Kimi-K2.8-Preview", rateMultiplier: 0.77 },
     { id: "kimi-k2.6", name: "Kimi-K2.6", rateMultiplier: 0.52 },
     // 官方积分页 2026-10-02 已将此模型回调至 0.11x（曾为首周 0.03x 尝鲜价）。
     { id: "deepseek-v4.1-flash", name: "DeepSeek-V4.1-Flash", rateMultiplier: 0.11 },

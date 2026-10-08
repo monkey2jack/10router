@@ -138,6 +138,9 @@ export const MODEL_CAPABILITIES = {
   "glm-4.6v":          { vision: true, reasoning: true, thinkingFormat: "zai", contextWindow: 128000 },
   "GLM-4.6V-Flash":    { vision: true, reasoning: true, thinkingFormat: "zai", contextWindow: 200000 },
   "glm-5.3-flash":     { vision: true, videoInput: true, pdf: true, reasoning: true, thinkingFormat: "zai", contextWindow: 1000000, maxOutput: 131072 },
+  // x 变体与基础版同规格（models.dev zai 与 zhipuai 两条都报 text+image+video+pdf、
+  // 1M/131072）。不加这行会落到 `*glm-5*` 兜底：200K 窗口、无多模态。
+  "glm-5.3-flashx":    { vision: true, videoInput: true, pdf: true, reasoning: true, thinkingFormat: "zai", contextWindow: 1000000, maxOutput: 131072 },
 
   // Qwen plain coder/text (no vision) — registry "vision-model" / "coder-model" aliases
   "vision-model":      { vision: true, reasoning: true, thinkingFormat: "qwen", contextWindow: 1000000 },
@@ -538,6 +541,9 @@ export const PROVIDER_CAPABILITIES = {
     "glm-5v-turbo":       { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 200000, maxOutput: 64000 },
     "minimax-m3":         { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 512000, maxOutput: 128000 },
     "kimi-k2.7":          { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 256000, maxOutput: 32000 },
+    // K2.8 预览版：models.dev 尚无条目，形态暂取 k2.7 同档（256000/32000 同 hy3、
+    // glm-5.3-flashx 的既有做法），等 CN 网关 product-config 的 maxOutputTokens 回来校准。
+    "kimi-k2.8-preview":  { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 256000, maxOutput: 32000 },
     "kimi-k2.6":          { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 256000, maxOutput: 32000 },
     // Per-model values mirror the server's product-config payload (fetched
     // from copilot.tencent.com; the `models[]` entries carry
@@ -557,6 +563,9 @@ export const PROVIDER_CAPABILITIES = {
     "space-bunny":        { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 64000 },
     "glm-5.3":            { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1000000, maxOutput: 48000 },
     "glm-5.3-flash":      { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1000000, maxOutput: 32000 },
+    // x 变体同基础版形态；32000 是暂取（同 hy3「输出上限暂取同档」的既有做法）——
+    // CN 网关的 product-config 需要鉴权取不到，等它回来再校准。
+    "glm-5.3-flashx":     { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1000000, maxOutput: 32000 },
     "kimi-k3":            { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 32000 },
     // DeepSeek-V4-Pro：纯文本（模型卡 text→text；models.dev 124 条命中一致报
     // attach:false，火山方舟第一方 deepseek-v4-pro-ga-260813 亦然）。1M 输入 /
@@ -579,6 +588,30 @@ export const PROVIDER_CAPABILITIES = {
     // 下面这行同样是 CAN 侧的 provider 行覆盖：canonical 行已给出同一套数值，这里是
     // 因为 CN 网关走 openai 思考格式且允许关闭思考（provider 行优先于 canonical）。
     "deepseek-v4.1-flash": { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1000000, maxOutput: 128000 },
+  },
+  // codebuddy-intl 只在 canonical 行与 CN 行都不适用时才需要条目。Space-Bunny 就是
+  // 这种情况：canonical 行写的是 opencode 那份部署（1M/524288），CodeBuddy 自家
+  // 的服务是 1M/64000（同 codebuddy-cn 行），差 8 倍，输出夹子不能共用。
+  //
+  // ⚠️ 本块目前只有 2 行，其余 intl 模型都落到 canonical / 通配行，而那些行是按
+  // 各家第一方部署写的：intl 的 glm-5.2 因此报 vision:false / 200000 / 131072，
+  // CN 的同一模型是 vision:true / 1M / 48000。thinkingFormat 不受影响——registry
+  // transport 与 PROVIDERS 两处都写死 openai，而 resolveFormat 让 provider 覆盖
+  // 优先于 capability（translator/concerns/thinkingUnified.js:130），所以那些
+  // 落到 canonical 的 zai/kimi 是死值。
+  // 现状是有意为之（用户决定 2026-10-09）：不要拿 CN 那张表镜像过来补全。
+  // maxOutput 是真夹子（claude.js adjustMaxTokens），照抄另一条通道的数只会把
+  // 夹子挪到一个没有依据的位置；真要补得先拿到 intl 自己的 product-config
+  // （与 CN 同形的 maxInputTokens/maxOutputTokens/supportsImages 表），而
+  // 2026-10-09 扫过 /v2/{plugin,chat,billing}/{model,config,list} 等 10 个候选
+  // 路径，CN 与 intl 两边都是 404。
+  "codebuddy-intl": {
+    "space-bunny": { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 64000 },
+    // auto 是网关侧真 id，五个 prompt 一律回显 model:"glm-5.2"（2026-10-09 探测），
+    // 所以按 glm-5.2 记。intl 自己的上限表取不到，先沿用 CN 的 glm-5.2 行（同一
+    // 套积分系统、同一个模型），而不是 canonical 的 200000/131072——后者会少报
+    // 5 倍上下文、并把本该夹到 48000 的 max_tokens 放行到上游。
+    "auto": { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1000000, maxOutput: 48000 },
   },
   // Qoder — upstream exposes opaque internal ids (dfmodel, kmodel, …);
   // capability lookup matches on the raw id, while clients may also address

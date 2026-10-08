@@ -26,11 +26,14 @@ describe("CodeBuddy CN static model catalog", () => {
       "glm-5v-turbo",
       "glm-5.3",
       "glm-5.3-flash",
+      "glm-5.3-flashx",
       "glm-5.2",
       "glm-5.1",
       "minimax-m3",
+      "minimax-m2.7",
       "kimi-k3",
       "kimi-k2.7",
+      "kimi-k2.8-preview",
       "kimi-k2.6",
       "deepseek-v4.1-flash",
       "deepseek-v4-pro",
@@ -46,16 +49,23 @@ describe("CodeBuddy CN static model catalog", () => {
     expect(rates).toEqual({
       "hy4-preview": 0.29,
       hy3: 0,
-      // 10/2–10/7 限时折扣价（官方应用上架页标注）；窗口后按积分页回填。
-      "space-bunny": 0.03,
+      // 10/2–10/7 限时折扣价 0.03 已到期，2026-10-08 积分页回填正式价 0.08。
+      "space-bunny": 0.08,
       "glm-5v-turbo": 0.71,
       "glm-5.3": 0.79,
       "glm-5.3-flash": 0.06,
+      // 未公布：2026-10-08 积分页 CN 列表里没有这一行（x 档可能在别处，或尚未
+      // 挂价）。现网答 200，所以模型是真的，只是倍率未回填。
+      "glm-5.3-flashx": undefined,
       "glm-5.2": 0.79,
       "glm-5.1": 0.79,
       "minimax-m3": 0.25,
+      // 未公布：同 glm-5.3-flashx，服务端列表里本就没有这个 id（见 registry 注释
+      // "absent from the server list, though still answering 200"）。
+      "minimax-m2.7": undefined,
       "kimi-k3": 1.62,
       "kimi-k2.7": 0.57,
+      "kimi-k2.8-preview": 0.77,
       "kimi-k2.6": 0.52,
       // 2026-10-02 官方积分页已回调 0.03 → 0.11（首周尝鲜价结束）。
       "deepseek-v4.1-flash": 0.11,

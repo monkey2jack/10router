@@ -54,6 +54,11 @@ export default {
   //  (2) rateMultiplier is read off the CN credit page: CN and intl share one
   //      credit system, so a model present on both carries an identical
   //      multiplier (holds for every currently overlapping id).
+  //      Re-confirmed against the intl credit page itself on 2026-10-09:
+  //      gpt-5.6-terra 1.39 / gpt-5.6-luna 0.14 / gpt-5.5 3.31 / gpt-5.4 1.65 /
+  //      gpt-5.3-codex 1.25 / gemini-3.5-flash 0.99 / glm-5.3 0.79 / glm-5.2 0.79 /
+  //      kimi-k3 1.62 / kimi-k2.6 0.52 — all ten matched what CN had published.
+  //      That same list is what retired kimi-k2.7 here (see the kimi rows below).
   //  (3) no multiplier here is a guess any more. gpt-6-astra was the one
   //      exception: v1.1.0 shipped 17.35, derived by ratio from the OpenCode Go
   //      price table, and that estimate is now superseded by the measured 6.67
@@ -74,6 +79,13 @@ export default {
   // error. Only 11102 ("model service info not found") means the id is wrong.
   // Error-code reference: docs/zh-CN/codebuddy-cn-error-codes.md.
   models: [
+    // `auto` 是网关侧的真实 model id（2026-10-09 探测 200），不是纯前端标签：
+    // 五个不同 prompt（中/英文、代码/数学/物理）全部回显 "model":"glm-5.2"，
+    // 落点稳定，积分页公布的 0.79x 也正好是 glm-5.2 的倍率。同页的
+    // Fast 0.34 / Balanced 0.59 / Primary 3.31 / Deep 3.33 不是 id——大小写与
+    // auto-xxx / xxx-mode / cb-xxx 等 20 种写法一律 11102，是聊天端在发请求前
+    // 自己解析的预设，不要往这里加。
+    { id: "auto", name: "Auto", rateMultiplier: 0.79 },
     { id: "hy4-preview", name: "Hy4-Preview", rateMultiplier: 0 },
     { id: "hy3", name: "Hy3", rateMultiplier: 0 },
     // The GPT-6 ids this gateway answers (live-probed 2026-09-30): astra plus
@@ -107,6 +119,13 @@ export default {
     { id: "gpt-5.5", name: "GPT-5.5", rateMultiplier: 3.31 },
     { id: "gpt-5.4", name: "GPT-5.4", rateMultiplier: 1.65 },
     { id: "gpt-5.3-codex", name: "GPT-5.3-Codex", rateMultiplier: 1.25 },
+    // 2026-10-08 现网探测：gpt-6.1-sol / gemini-3.8-flash / grok-4.7 / space-bunny
+    // 均返回 200，而 gemini-3.6-flash 与 gemini-3.5-flash-lite 回 11102——Gemini
+    // 线从 3.5 直接跳到 3.8。倍率待 CodeBuddy 积分页核对，先按同族留空。
+    { id: "gpt-6.1-sol", name: "GPT-6.1-Sol" },
+    { id: "gemini-3.8-flash", name: "Gemini-3.8-Flash" },
+    { id: "grok-4.7", name: "Grok-4.7", rateMultiplier: 1.9 },
+    { id: "space-bunny", name: "Space-Bunny", rateMultiplier: 0.08 },
     { id: "gemini-3.5-flash", name: "Gemini-3.5-Flash", rateMultiplier: 0.99 },
     { id: "glm-5v-turbo", name: "GLM-5v-Turbo", rateMultiplier: 0.71 },
     { id: "glm-5.3", name: "GLM-5.3", rateMultiplier: 0.79 },
@@ -117,7 +136,9 @@ export default {
     { id: "glm-5.1", name: "GLM-5.1", rateMultiplier: 0.79 },
     { id: "minimax-m3", name: "MiniMax-M3", rateMultiplier: 0.25 },
     { id: "kimi-k3", name: "Kimi-K3", rateMultiplier: 1.62 },
-    { id: "kimi-k2.7", name: "Kimi-K2.7-Code", rateMultiplier: 0.57 },
+    // kimi-k2.7 (Kimi-K2.7-Code) 删于 2026-10-09：intl 模型下拉里 Kimi-K3 与
+    // Kimi-K2.6 都在，唯独 2.7 不在（用户核对截图）。CN 侧仍按积分页 0.57 保留。
+    { id: "kimi-k2.8-preview", name: "Kimi-K2.8-Preview", rateMultiplier: 0.77 },
     { id: "kimi-k2.6", name: "Kimi-K2.6", rateMultiplier: 0.52 },
     // Promo: free for the two weeks after the upstream V4.1-Flash launch
     // (2026-09-10 — DeepSeek's "set your model to deepseek-flash" announcement).
