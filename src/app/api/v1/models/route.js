@@ -479,6 +479,15 @@ export async function buildModelsList(kindFilter, options = {}) {
       };
       const comboCaps = aggregateComboCapabilities(combo.models, comboByName, resolvePinnedCaps);
       if (comboCaps) entry.capabilities = comboCaps;
+      // OpenAI/OpenRouter 约定字段：让 Hermes/Claude Code 等客户端读到真实窗口
+      // （之前 combo 缺 context_length，客户端兜底报 200K）。
+      if (comboCaps && Number.isFinite(comboCaps.contextWindow)) {
+        entry.context_length = comboCaps.contextWindow;
+        entry.context_window = comboCaps.contextWindow;
+      }
+      if (comboCaps && Number.isFinite(comboCaps.maxOutput)) {
+        entry.max_completion_tokens = comboCaps.maxOutput;
+      }
     }
     emit(entry, COMBO_RANK);
   }
