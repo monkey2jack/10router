@@ -469,7 +469,15 @@ export async function buildModelsList(kindFilter, options = {}) {
     } else {
       // LLM combos carry the aggregate of their members: union of modalities,
       // intersection of tools, min context / max output (combo-caps contract).
-      const comboCaps = aggregateComboCapabilities(combo.models, comboByName);
+      // Pass the dashboard-pinned caps as resolveCaps so a member's user override
+      // (e.g. a pinned 1M window) reaches the combo aggregate, not only the member row.
+      const resolvePinnedCaps = (fullId) => {
+        const slash = fullId.indexOf("/");
+        if (slash === -1) return null;
+        const pinned = capsOverrides[fullId.slice(0, slash)]?.[fullId.slice(slash + 1)];
+        return pinned && (pinned.contextWindow || pinned.maxOutput) ? pinned : null;
+      };
+      const comboCaps = aggregateComboCapabilities(combo.models, comboByName, resolvePinnedCaps);
       if (comboCaps) entry.capabilities = comboCaps;
     }
     emit(entry, COMBO_RANK);
