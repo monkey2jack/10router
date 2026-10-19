@@ -13,7 +13,7 @@ export default {
     textIcon: "OC",
     website: "https://opencode.ai/auth",
     notice: {
-      text: "OpenCode Go subscription: $5/mo (then  0/mo). Access to Kimi, GLM, Qwen, MiMo, MiniMax models.",
+      text: "OpenCode Go subscription: $5/mo (then  0/mo). Access to Kimi, GLM, Qwen, MiMo, MiniMax, DeepSeek, Grok, GPT and more.",
       apiKeyUrl: "https://opencode.ai/auth",
     },
   },
@@ -45,7 +45,9 @@ export default {
   models: [
     // /v1/responses only — any other client format is translated to the responses format,
     // because these ids are not served on /chat/completions or /messages.
+    { id: "grok-4.7", name: "Grok 4.7", targetFormat: "openai-responses", supportedFormats: ["openai-responses"] },
     { id: "grok-4.6", name: "Grok 4.6", targetFormat: "openai-responses", supportedFormats: ["openai-responses"] },
+    { id: "gpt-6-luna", name: "GPT 6 Luna", targetFormat: "openai-responses", supportedFormats: ["openai-responses"] },
     { id: "gpt-5.6-luna", name: "GPT 5.6 Luna", targetFormat: "openai-responses", supportedFormats: ["openai-responses"] },
     { id: "muse-spark-1.3-contributor", name: "Muse Spark 1.3 Contributor", targetFormat: "openai-responses", supportedFormats: ["openai-responses"] },
     { id: "muse-spark-1.2-contributor", name: "Muse Spark 1.2 Contributor", targetFormat: "openai-responses", supportedFormats: ["openai-responses"] },
@@ -61,6 +63,11 @@ export default {
     { id: "kimi-k2.6", name: "Kimi K2.6", supportedFormats: ["openai"] },
     { id: "kimi-k2.5", name: "Kimi K2.5", supportedFormats: ["openai"] },
     { id: "longcat-2.0", name: "LongCat 2.0", supportedFormats: ["openai"] },
+    { id: "longcat-2.5-preview-free", name: "LongCat 2.5 Preview (Free)", supportedFormats: ["openai"] },
+    // 文档端点表直接收录的免费 id（无家族可继承，表就是依据）；能力行见
+    // capabilities.js（models.dev 的 opencode-go/opencode 条目给了完整规格）。
+    { id: "space-bunny-free", name: "Space Bunny (Free)", supportedFormats: ["openai", "claude"] },
+    { id: "space-bunny", name: "Space Bunny", supportedFormats: ["openai", "claude"] },
     // V4.1-Flash 在 opencode-go 有两个 id：官方文档表主推的 deepseek-v4.1-flash，
     // 以及 /models 目录里同时列出的 deepseek-flash（与 DeepSeek 第一方同名）。
     // 文档表只把 /chat/completions 列为推荐端点，但这条通道三个端点在现网都可用
@@ -71,6 +78,8 @@ export default {
     { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", supportedFormats: ["openai", "claude", "openai-responses"] },
     { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", supportedFormats: ["openai", "claude", "openai-responses"] },
     { id: "deepseek-v4-flash-vision-exp", name: "DeepSeek V4 Flash Vision (Exp)", supportedFormats: ["openai", "claude", "openai-responses"] },
+    { id: "mimo-v2.6-flash", name: "MiMo V2.6 Flash", supportedFormats: ["openai"] },
+    { id: "mimo-v2.6-pro", name: "MiMo V2.6 Pro", supportedFormats: ["openai"] },
     { id: "mimo-v2.5", name: "MiMo V2.5", supportedFormats: ["openai"] },
     { id: "mimo-v2.5-pro", name: "MiMo V2.5 Pro", supportedFormats: ["openai"] },
     { id: "mimo-v2-pro", name: "MiMo V2 Pro", supportedFormats: ["openai"] },

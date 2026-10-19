@@ -7,6 +7,7 @@ import { resolveSessionId } from "../../utils/sessionManager.js";
 import { isValidClaudeSignature } from "../../utils/claudeSignature.js";
 import { PROVIDERS } from "../../providers/index.js";
 import { getCapabilitiesForModel } from "../../providers/capabilities.js";
+import { isDeepSeekModel } from "../../providers/models/helpers.js";
 import { DEFAULT_MAX_TOKENS } from "../../config/runtimeConfig.js";
 
 const CACHE_CONTROL_5M = { type: "ephemeral" };
@@ -15,6 +16,14 @@ const CACHE_CONTROL_1H = { type: "ephemeral", ttl: "1h" };
 // Check if message has valid non-empty content
 export function hasValidContent(msg) {
   if (typeof msg.content === "string" && msg.content.trim()) return true;
+  if (msg.content && typeof msg.content === "object" && !Array.isArray(msg.content)) {
+    const block = msg.content;
+    return !!((block.type === CLAUDE_BLOCK.TEXT && block.text?.trim()) ||
+      block.type === CLAUDE_BLOCK.TOOL_USE ||
+      block.type === CLAUDE_BLOCK.TOOL_RESULT ||
+      block.type === CLAUDE_BLOCK.IMAGE ||
+      block.type === CLAUDE_BLOCK.DOCUMENT);
+  }
   if (Array.isArray(msg.content)) {
     return msg.content.some(block =>
       (block.type === CLAUDE_BLOCK.TEXT && block.text?.trim()) ||
@@ -25,6 +34,19 @@ export function hasValidContent(msg) {
     );
   }
   return false;
+}
+
+// Content may arrive as a single content block object (spec allows string | array;
+// some clients send the bare object). Wrap it as a one-block array and strip any
+// client-placed cache_control: a bare-object marker must never survive
+// normalization, on any path, guard or no guard. (上游 8a81085a)
+function normalizeMessageContent(msg) {
+  const c = msg?.content;
+  if (c && typeof c === "object" && !Array.isArray(c)) {
+    delete c.cache_control;
+    msg.content = [c];
+  }
+  return msg;
 }
 
 // Fix tool_use/tool_result ordering for Claude API
@@ -93,7 +115,7 @@ function handlesThinkingBlocks(provider) {
   return provider === "claude" || provider?.startsWith("anthropic-compatible") || provider === "deepseek";
 }
 
-function buildThinkingPlaceholder(provider) {
+function buildThinkingPlaceholder(provider, unsigned = false) {
   const block = {
     type: CLAUDE_BLOCK.THINKING,
     thinking: ".",
@@ -101,7 +123,9 @@ function buildThinkingPlaceholder(provider) {
 
   // DeepSeek's Anthropic-compatible endpoint requires a thinking block in
   // thinking mode, but it does not need Anthropic's signed-thinking fallback.
-  if (provider !== "deepseek") {
+  // The same applies to DeepSeek models served through other providers'
+  // Claude transports (opencode-go /messages).
+  if (provider !== "deepseek" && !unsigned) {
     block.signature = DEFAULT_THINKING_CLAUDE_SIGNATURE;
   }
 
@@ -129,6 +153,10 @@ function hasForeignServerToolUseId(block) {
 export function normalizeClaudePassthrough(body, model = "") {
   if (!body || typeof body !== "object") return body;
 
+  // 客户端实际送入的末轮 role（任何清理把空轮删掉之前先记下来）：
+  // 下面的空消息清理想掉一个被清空的尾部 user 轮时，需要知道这是否客户端本意。
+  const originalLastRole = Array.isArray(body.messages) ? body.messages[body.messages.length - 1]?.role : undefined;
+
   // 1. Downgrade adaptive thinking for models that don't support it
   if (body.thinking?.type === "adaptive" && ADAPTIVE_THINKING_UNSUPPORTED.test(model)) {
     body.thinking = { type: "enabled", budget_tokens: 10000 };
@@ -138,6 +166,14 @@ export function normalizeClaudePassthrough(body, model = "") {
   if (ADAPTIVE_THINKING_UNSUPPORTED.test(model) && body.output_config?.effort != null) {
     delete body.output_config.effort;
     if (Object.keys(body.output_config).length === 0) delete body.output_config;
+  }
+
+  // 2. Wrap bare content-block objects as one-element arrays before folding.
+  // Some clients send content: {block} instead of content: [{block}]; the
+  // mid-conversation-system fold below assumes the array shape, so it must
+  // run first — a bare-object neighbor would otherwise be zeroed to [].
+  if (Array.isArray(body.messages)) {
+    for (const msg of body.messages) normalizeMessageContent(msg);
   }
 
   // 2. Fold mid-conversation system messages into the neighbouring turn.
@@ -233,9 +269,22 @@ export function normalizeClaudePassthrough(body, model = "") {
         !(block?.type === CLAUDE_BLOCK.TEXT && !String(block.text ?? "").trim()));
       return msg.content.length > 0;
     });
+    body.messages = ensureTrailingUserTurn(body.messages, originalLastRole);
   }
 
   return body;
+}
+
+// 新版 Claude 拒绝以 assistant 轮结尾的请求体（400 "does not support assistant
+// message prefill"）。上面的清理会删掉被清空的消息，于是一个被清空的尾部 user 轮
+// 会让上一轮 assistant 静默变成末轮。只有当客户端自己不是以 assistant 结尾时
+// 才补一个最小 user 轮——客户端有意的 prefill 保留不动。（上游 75834e96）
+const TRAILING_USER_PLACEHOLDER = "Continue.";
+
+export function ensureTrailingUserTurn(messages, originalLastRole) {
+  if (!Array.isArray(messages) || originalLastRole === ROLE.ASSISTANT) return messages;
+  if (messages[messages.length - 1]?.role !== ROLE.ASSISTANT) return messages;
+  return [...messages, { role: ROLE.USER, content: [{ type: CLAUDE_BLOCK.TEXT, text: TRAILING_USER_PLACEHOLDER }] }];
 }
 
 // Put a 5m breakpoint on the last cache-eligible block of a message.
@@ -252,6 +301,32 @@ function markLastCacheableBlock(msg) {
   return false;
 }
 
+// 统计全 body 现有的 cache_control 断点数（Anthropic 上限 4 个）。
+function countCacheBreakpoints(body) {
+  let count = 0;
+  for (const block of body?.system ?? []) if (block?.cache_control) count++;
+  for (const tool of body?.tools ?? []) if (tool?.cache_control) count++;
+  for (const msg of body?.messages ?? []) {
+    if (!Array.isArray(msg?.content)) continue;
+    for (const block of msg.content) if (block?.cache_control) count++;
+  }
+  return count;
+}
+
+// 工具循环的请求以「最后一轮 assistant 的工具结果」结尾——它们落在该 assistant 轮
+// 的断点之后，按未缓存全价计费，要等下一次请求（在其后追加内容）才被写进缓存。
+// 4 个断点的预算还有余量时，在这条尾部 user 轮的最后一个可缓存块上放一个 5m 断点：
+// 本轮即写缓存，下一步直接读到。末轮是用户手打消息的请求不受影响。（上游 49c761cd）
+function markFinalToolResults(body) {
+  const messages = body?.messages;
+  const last = Array.isArray(messages) ? messages[messages.length - 1] : null;
+  if (last?.role !== ROLE.USER || !Array.isArray(last.content)) return false;
+  if (!last.content.some((block) => block?.type === CLAUDE_BLOCK.TOOL_RESULT)) return false;
+  if (last.content.some((block) => block?.cache_control)) return false;
+  if (countCacheBreakpoints(body) >= 4) return false;
+  return markLastCacheableBlock(last);
+}
+
 // Anthropic rejects a tool carrying BOTH defer_loading:true and cache_control
 // ("Tools defer_loading cannot use prompt caching", #3567). MCP clients put
 // deferred tools at the tail, which is exactly where the cache anchor lands.
@@ -265,12 +340,16 @@ export function lastCacheableToolIndex(tools) {
 }
 
 // Re-anchor cache breakpoints on a Claude passthrough body (same policy as
-// prepareClaudeRequest): last tool + last system block at 1h, last assistant at 5m.
+// prepareClaudeRequest): last tool + last system block at 1h, last assistant at 5m,
+// plus a tool loop's final tool_result turn at 5m when the 4-marker budget has room.
 // The client's own markers point at pre-normalization offsets, so they are dropped.
 // Must run LAST, after every step that can reshape system/tools/messages
 // (normalize, tool dedupe, token savers) — otherwise the anchor drifts off the tail.
 export function anchorClaudeCache(body) {
   if (!body || typeof body !== "object") return body;
+  if (Array.isArray(body.messages)) {
+    for (const msg of body.messages) normalizeMessageContent(msg);
+  }
 
   if (Array.isArray(body.system)) {
     const last = body.system.length - 1;
@@ -309,6 +388,9 @@ export function anchorClaudeCache(body) {
         anchored = markLastCacheableBlock(body.messages[i]);
       }
     }
+
+    // ……以及工具循环的末轮工具结果，让循环的下一步直接读缓存。
+    markFinalToolResults(body);
   }
 
   return body;
@@ -326,12 +408,27 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
     delete body.output_config;
   }
 
+  // 部分模型的 API 对 thinking "disabled" 和强制 tool_choice（any/tool）直接 400
+  // （Sonnet 5.5，上游 49ba54b2 的翻译器半边）。这里对每条发往 Claude 的 body 统一
+  // 归一化，OpenAI 客户端、原生 passthrough 与 provider 级 "off" 覆盖都能走到。
+  const modelCaps = getCapabilitiesForModel(provider, body.model);
+  if (modelCaps.thinkingOffType && body.thinking?.type === "disabled") {
+    body.thinking = { type: modelCaps.thinkingOffType };
+    // between_tools 的 effort 最高只接受到 high。
+    const effort = body.output_config?.effort;
+    if (effort === "xhigh" || effort === "max") body.output_config.effort = "high";
+  }
+  if (modelCaps.forcedToolChoice === false && (body.tool_choice?.type === "any" || body.tool_choice?.type === "tool")) {
+    const { disable_parallel_tool_use } = body.tool_choice;
+    body.tool_choice = { type: "auto", ...(disable_parallel_tool_use !== undefined ? { disable_parallel_tool_use } : {}) };
+  }
+
   // Clamp max_tokens to the model's real output ceiling. Models whose caps
   // declare a higher maxOutput (e.g. Opus 4.8 / Sonnet 4.6 = 128000) are allowed
   // up to it, so max-effort thinking gets full budget; others fall back to the
   // conservative 64000 default.
   if (body.max_tokens) {
-    const ceiling = getCapabilitiesForModel(provider, body.model).maxOutput || DEFAULT_MAX_TOKENS;
+    const ceiling = modelCaps.maxOutput || DEFAULT_MAX_TOKENS;
     if (body.max_tokens > ceiling) body.max_tokens = ceiling;
 
     // Reconcile against thinking budget. applyThinking (thinkingUnified.js) runs
@@ -363,11 +460,15 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
   // 2. Messages: process in optimized passes
   if (body.messages && Array.isArray(body.messages)) {
     const len = body.messages.length;
+    // 客户端实际送入的末轮 role：Pass 1 会丢掉被清空的尾部 user 轮，需据此判断
+    // 清理后 assistant 结尾是「客户端有意 prefill」还是「误删了尾部 user 轮」。
+    const originalLastRole = body.messages[len - 1]?.role;
     let filtered = [];
 
     // Pass 1: remove cache_control + filter empty messages
     for (let i = 0; i < len; i++) {
       const msg = body.messages[i];
+      normalizeMessageContent(msg);
 
       // Remove cache_control from content blocks
       if (Array.isArray(msg.content)) {
@@ -386,6 +487,9 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
     // Pass 1.5: Fix tool_use/tool_result ordering
     // Each tool_use must have tool_result in the NEXT message (not same message with other content)
     filtered = fixToolUseOrdering(filtered);
+    // 被清空的尾部 user 轮会让 assistant 静默变成末轮，新版 Claude 对此直接 400；
+    // 客户端自己有意的 prefill 保持不动。
+    filtered = ensureTrailingUserTurn(filtered, originalLastRole);
 
     body.messages = filtered;
 
@@ -393,6 +497,14 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
     const lastMessage = filtered[filtered.length - 1];
     const lastMessageIsUser = lastMessage?.role === "user";
     const thinkingEnabled = body.thinking?.type === "enabled" && lastMessageIsUser;
+
+    // opencode-go 的 /messages 通道也托管 DeepSeek 模型，与官方 deepseek 供应商
+    // 一样要求 thinking 块回传（否则上游 400 "thinking must be passed back"），
+    // 走下方同一套「保留原样 / 补无签名占位」语义。门控按模型精确判定，避免误伤
+    // opencode-go 同样走 /messages 的 minimax/qwen 等其他模型族。
+    const deepSeekServed =
+      provider === "deepseek" ||
+      (provider === "opencode-go" && isDeepSeekModel(body?.model));
 
     // Pass 2 (reverse): add cache_control to last assistant + handle thinking for Anthropic
     let lastAssistantProcessed = false;
@@ -414,15 +526,15 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
         }
 
         // Handle thinking blocks for Anthropic-compatible endpoints.
-        if (handlesThinkingBlocks(provider)) {
+        if (handlesThinkingBlocks(provider) || deepSeekServed) {
           let hasToolUse = false;
           let hasKeptThinking = false;
 
           // Claude native: preserve valid signatures, drop invalid blocks.
           // anthropic-compatible: replace with default (safe fallback for lenient upstreams).
-          // DeepSeek: keep existing thinking as-is; add an unsigned placeholder only if missing.
+          // DeepSeek (官方 + opencode-go 托管): keep existing thinking as-is;
+          // add an unsigned placeholder only if missing.
           const isClaudeNative = provider === "claude";
-          const isDeepSeek = provider === "deepseek";
           const kept = [];
           for (const block of msg.content) {
             const isThinking = block.type === CLAUDE_BLOCK.THINKING || block.type === CLAUDE_BLOCK.REDACTED_THINKING;
@@ -432,7 +544,7 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
                   hasKeptThinking = true;
                   kept.push(block);
                 }
-              } else if (isDeepSeek) {
+              } else if (deepSeekServed) {
                 hasKeptThinking = true;
                 kept.push(block);
               } else {
@@ -449,7 +561,7 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
 
           // Add thinking block if thinking enabled + has tool_use but no thinking
           if (thinkingEnabled && !hasKeptThinking && hasToolUse) {
-            msg.content.unshift(buildThinkingPlaceholder(provider));
+            msg.content.unshift(buildThinkingPlaceholder(provider, deepSeekServed));
           }
         }
       }
@@ -493,6 +605,9 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
       delete body.tool_choice;
     }
   }
+
+  // 工具循环的末轮工具结果：本轮就写缓存，循环的下一步直接读到。
+  markFinalToolResults(body);
 
   // Apply cloaking for OAuth tokens (billing header + fake user ID)
   // session_id in user_id must match X-Claude-Code-Session-Id for fingerprint consistency

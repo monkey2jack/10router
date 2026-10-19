@@ -14,9 +14,11 @@ const STRIP_RULES = [
   { provider: "github", match: (m) => /claude/i.test(m) && !/claude.*(opus|sonnet).*4\.6/i.test(m), drop: ["thinking", "reasoning_effort"] },
   // Cloudflare Workers AI: content must be plain string, rejects OpenAI content-part array (#1926)
   { provider: "cloudflare-ai", flattenContent: true },
-  // MiMo Desktop Preview models (account-service route): content must be plain string,
-  // rejects OpenAI content-part array. Cloud models keep their parts (mimo-v2-omni is multi-modal).
-  { provider: "xiaomi-mimo", match: /preview/i, flattenContent: true },
+  // MiMo Desktop (account-service route): content must be plain string, rejects
+  // OpenAI content-part array. Scoped to the PROVIDER, not the model id — the
+  // account-session card is the only surface that takes this route, while the
+  // cloud card's models keep their parts (the V2.6 family is multi-modal).
+  { provider: "mimo-desktop", flattenContent: true },
   { provider: "volcengine-ark", match: /glm-5/i, clampToModelMaxOutput: true },
   // VolcEngine Ark caps the Kimi family at max_tokens <= 32768, but the model's
   // advertised ceiling is far higher (Kimi-K2.7-Code resolves to maxOutput 262144),
@@ -24,6 +26,15 @@ const STRIP_RULES = [
   // "integer above maximum value, expected <= 32768". Pin an explicit endpoint cap;
   // min() with the model ceiling still applies if a variant's own limit is lower.
   { provider: "volcengine-ark", match: /kimi/i, maxOutputCap: 32768, clampToModelMaxOutput: true },
+  // 严格的 OpenAI 兼容校验器会拒绝 assistant 消息里的未知字段：Groq 400
+  // （"property 'reasoning_content' is unsupported"）、Mistral 422
+  // （"extra_forbidden"）、Cerebras 400（"wrong_api_format"）。多轮 combo 里
+  // 客户端（如 Hermes）会把上一轮的 reasoning 回灌到每条 assistant 消息，
+  // 直接把这些供应商打出局。需要该字段的供应商（DeepSeek、Kimi）由
+  // reasoningContentInjector 处理，不在此列。
+  { provider: "groq", dropMessageFields: ["reasoning_content", "reasoning", "reasoning_details"] },
+  { provider: "mistral", dropMessageFields: ["reasoning_content", "reasoning", "reasoning_details"] },
+  { provider: "cerebras", dropMessageFields: ["reasoning_content", "reasoning", "reasoning_details"] },
 ];
 
 // Test a rule's match (regex or predicate) against the model id.
@@ -46,6 +57,15 @@ export function stripUnsupportedParams(provider, model, body) {
     if (!matches(rule, model)) continue;
     for (const key of rule.drop || []) {
       if (body[key] !== undefined) delete body[key];
+    }
+    // 按消息字段丢弃（仅 assistant 轮 —— 客户端回灌的 reasoning 都在那里）。
+    if (Array.isArray(rule.dropMessageFields) && Array.isArray(body.messages)) {
+      for (const msg of body.messages) {
+        if (!msg || msg.role !== "assistant") continue;
+        for (const key of rule.dropMessageFields) {
+          if (msg[key] !== undefined) delete msg[key];
+        }
+      }
     }
     // CF Workers AI oneOf root schema only accepts content as plain string (#1926)
     if (rule.flattenContent && Array.isArray(body.messages)) {

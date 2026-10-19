@@ -4,13 +4,14 @@ import {
   clearAccountError,
   extractApiKey,
   isValidApiKey,
+  checkApiKeyDailyLimit,
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
 import { getModelInfo } from "../services/model.js";
 import { handleVideoProxyCore, getVideoConfig, sanitizeSecrets } from "open-sse/handlers/videoCore.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
-import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
+import { checkAndRefreshToken, persistRefreshedCredentials, markConnectionNeedsReauth } from "../services/tokenRefresh.js";
 import * as log from "../utils/logger.js";
 
 // Video generation is xAI-only today; requests without a provider prefix
@@ -34,6 +35,11 @@ async function requireValidApiKey(request) {
     const valid = await isValidApiKey(apiKey);
     if (!valid) return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
   }
+  // Both video endpoints inherit the per-key daily quota through this one gate.
+  // No model context here: the body is read after auth (byte-preserving), so a
+  // refusal logs against "unknown" — the key + endpoint still identify it.
+  const limitResponse = await checkApiKeyDailyLimit(apiKey, { request });
+  if (limitResponse) return limitResponse;
   return null;
 }
 
@@ -142,13 +148,16 @@ export async function handleVideoCreate(request, action) {
       credentials: refreshedCredentials,
       signal: request.signal,
       log,
+      // Shared with every other handler — see persistRefreshedCredentials.
       onCredentialsRefreshed: async (newCreds) => {
-        await updateProviderCredentials(credentials.connectionId, {
-          accessToken: newCreds.accessToken,
-          refreshToken: newCreds.refreshToken,
-          providerSpecificData: newCreds.providerSpecificData,
-          testStatus: "active",
+        await persistRefreshedCredentials(credentials.connectionId, newCreds, {
+          providerSpecificData: credentials.providerSpecificData,
+          provider,
+          log,
         });
+      },
+      onCredentialsRefreshFailed: async (err) => {
+        await markConnectionNeedsReauth(credentials.connectionId, { provider, reason: err, log });
       },
     });
 
@@ -201,13 +210,16 @@ export async function handleVideoGet(request, requestId) {
     credentials: refreshedCredentials,
     signal: request.signal,
     log,
+    // Shared with every other handler — see persistRefreshedCredentials.
     onCredentialsRefreshed: async (newCreds) => {
-      await updateProviderCredentials(credentials.connectionId, {
-        accessToken: newCreds.accessToken,
-        refreshToken: newCreds.refreshToken,
-        providerSpecificData: newCreds.providerSpecificData,
-        testStatus: "active",
+      await persistRefreshedCredentials(credentials.connectionId, newCreds, {
+        providerSpecificData: credentials.providerSpecificData,
+        provider,
+        log,
       });
+    },
+    onCredentialsRefreshFailed: async (err) => {
+      await markConnectionNeedsReauth(credentials.connectionId, { provider, reason: err, log });
     },
   });
 

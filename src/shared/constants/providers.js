@@ -1,11 +1,12 @@
 // Provider definitions
 import REGISTRY from "open-sse/providers/registry/index.js";
-import { RISK_NOTICE } from "@/shared/constants/providersDisplay";
+import { RISK_NOTICE } from "@/shared/constants/providersDisplay.js";
 
 const MEDIA_ENTRY_KEYS = [
   "serviceKinds", "ttsConfig", "sttConfig", "embeddingConfig",
   "imageConfig", "imageToTextConfig", "videoConfig", "musicConfig",
-  "searchViaChat", "searchConfig", "fetchConfig", "credentialFallback",
+  "searchViaChat", "searchConfig", "fetchConfig", "credentialFallback", "systemoneConfig",
+  "rerankConfig",
   "modelsFetcher", "mediaPriority", "hiddenKinds",
 ];
 
@@ -31,8 +32,9 @@ function buildProviderEntry(r) {
     ...(r.regions ? { regions: r.regions, defaultRegion: r.defaultRegion } : {}),
     ...(r.hasProviderSpecificData ? { hasProviderSpecificData: true } : {}),
     ...(r.noAuth ? { noAuth: true } : {}),
+    ...(r.exposeStaticModels ? { exposeStaticModels: true } : {}),
     ...(r.passthroughModels ? { passthroughModels: true } : {}),
-    // Community welfare provider (公益站) — hidden by default on the providers
+    // Trial provider (体验) — hidden by default on the providers
     // page unless the "Show community providers" toggle is on.
     ...(r.community ? { community: true } : {}),
     ...(r.hasOAuth ? { hasOAuth: true } : {}),
@@ -83,6 +85,8 @@ export const MEDIA_PROVIDER_KINDS = [
   { id: "webFetch",    label: "Web Fetch",      icon: "language",          endpoint: { method: "POST", path: "/v1/web/fetch" } },
   { id: "video",       label: "Video",          icon: "movie",             endpoint: { method: "POST", path: "/v1/videos/generations" } },
   { id: "music",       label: "Music",          icon: "music_note",        endpoint: { method: "POST", path: "/v1/audio/music" } },
+  { id: "systemone",   label: "System One",     icon: "psychology",        endpoint: { method: "POST", path: "/v1/systemone" }, isNew: true },
+  { id: "rerank",      label: "Rerank",         icon: "sort",              endpoint: { method: "POST", path: "/v1/rerank" }, isNew: true },
 ];
 
 export const OPENAI_COMPATIBLE_PREFIX = "openai-compatible-";
@@ -167,3 +171,22 @@ export const USAGE_SUPPORTED_PROVIDERS = REGISTRY
 export const USAGE_APIKEY_PROVIDERS = REGISTRY
   .filter(r => r.features?.usageApikey)
   .map(r => r.id);
+
+export const USAGE_COOKIE_PROVIDERS = REGISTRY
+  .filter(r => r.features?.usageCookie)
+  .map(r => r.id);
+
+// Provider 主页(官网/控制台),供 UI 一键跳转(配额卡片图标等)。
+// 回退顺序与 providers/[id]/page.js 的官网链接一致:notice.webUrl →
+// apiKeyUrl → signupUrl → website。接受 id 或别名(与 resolveProviderId
+// 同一归一口径);注册表没有这个 provider(自定义连接)或没配任何 URL 时返回
+// null — 调用方据此不渲染链接,而不是硬造一个。
+export function getProviderWebsite(providerIdOrAlias) {
+  // 空值先挡住:resolveProviderId(undefined) 会被「没有 alias 的 provider」
+  // 匹配到(alias === undefined),把图标链到不相干的官网。
+  if (!providerIdOrAlias || typeof providerIdOrAlias !== "string") return null;
+  const p =
+    AI_PROVIDERS[providerIdOrAlias] || AI_PROVIDERS[resolveProviderId(providerIdOrAlias)];
+  if (!p) return null;
+  return p.notice?.webUrl || p.notice?.apiKeyUrl || p.notice?.signupUrl || p.website || null;
+}

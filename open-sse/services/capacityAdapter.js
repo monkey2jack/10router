@@ -12,7 +12,9 @@ import { getCapabilitiesForModel } from "../providers/capabilities.js";
 
 const CAPABILITY_KEYS = ["vision", "pdf", "audioInput", "videoInput"];
 const HARD_CAPS = new Set(CAPABILITY_KEYS);
-const DEFAULT_FALLBACK_MODEL = "oc/mimo-v2.5-free";
+// v2.5-free is the retiring generation; the live zen free list serves the
+// v2.6 flash id (full-multimodal, same 1M window) — upstream 6886915f.
+const DEFAULT_FALLBACK_MODEL = "oc/mimo-v2.6-flash-free";
 
 // Normalize a capability entry to { enabled, roundRobin, models }. Backward-compat:
 // accept the legacy array form [{model, enabled}] (treated as enabled, fallback).

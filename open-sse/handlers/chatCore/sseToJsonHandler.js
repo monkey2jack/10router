@@ -5,7 +5,10 @@ import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { FORMATS } from "../../translator/formats.js";
 import { PROVIDERS } from "../../config/providers.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
+import { usageOrEstimate } from "../../utils/usageTracking.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
+import { restoreToolNames } from "../../utils/opencodeFingerprint.js";
+import { upstreamResponseHeaders } from "../../utils/upstreamHeaders.js";
 
 // Responses-API providers (e.g. codex) may emit SSE without content-type + use Responses output shape
 const isResponsesProvider = (p) => PROVIDERS[p]?.format === FORMATS.OPENAI_RESPONSES;
@@ -191,7 +194,7 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
  * Handle case: provider forced streaming but client wants JSON.
  * Supports both Codex/Responses API SSE and standard Chat Completions SSE.
  */
-export async function handleForcedSSEToJson({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, trackDone, appendLog, reqTag, log }) {
+export async function handleForcedSSEToJson({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, toolNameMap, translateToClientFormat, trackDone, appendLog, reqTag, log }) {
   const contentType = providerResponse.headers.get("content-type") || "";
   const isSSE = contentType.includes("text/event-stream") || (contentType === "" && isResponsesProvider(provider));
   if (!isSSE) return null; // not handled here
@@ -214,30 +217,40 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       const jsonResponse = await convertResponsesStreamToJson(providerResponse.body);
       if (onRequestSuccess) await onRequestSuccess();
 
-      const usage = jsonResponse.usage || {};
+      // `jsonResponse` is handed to the client verbatim just below, so the
+      // estimated value stays in a separate variable — never written back.
+      // `upstreamUsage` is the only figure allowed onto the wire below.
+      const upstreamUsage = jsonResponse.usage || {};
+      const usage = usageOrEstimate(upstreamUsage, body, jsonResponse);
       appendLog({ tokens: usage, status: "200 OK" });
-      saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, usageKey: randomUUID(), silent: true });
-      if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime } }));
+      const totalLatency = Date.now() - requestStartTime;
+      saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, latency: { ttft: totalLatency, total: totalLatency }, usageKey: randomUUID(), silent: true });
+      if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: totalLatency } }));
 
       // Same cache-inclusive total for the recorded detail, so the DB and the
-      // client-facing usage can never disagree.
-      const inTokensForLog = (usage.input_tokens || 0)
+      // client-facing usage can never disagree. Read BOTH usage spellings:
+      // a real Responses payload uses input_tokens/output_tokens, but when the
+      // upstream reported nothing, usageOrEstimate substituted an OpenAI-shaped
+      // estimate (prompt_tokens/completion_tokens) — reading only the Responses
+      // fields here recorded 0/0 into the Details row while the Overview got
+      // the estimate, re-creating issue #48 on this path.
+      const inTokensForLog = (usage.prompt_tokens ?? usage.input_tokens ?? 0)
         + (usage.cache_read_input_tokens || usage.cached_tokens || 0)
         + (usage.cache_creation_input_tokens || 0);
+      const outTokensForLog = usage.completion_tokens ?? usage.output_tokens ?? 0;
       const { msgItem, textContent } = pickAssistantMessageForChatCompletion(jsonResponse.output);
-      const totalLatency = Date.now() - requestStartTime;
 
       saveRequestDetail(buildRequestDetail({
         ...ctx,
         latency: { ttft: totalLatency, total: totalLatency },
-        tokens: { prompt_tokens: inTokensForLog, completion_tokens: usage.output_tokens || 0 },
+        tokens: { prompt_tokens: inTokensForLog, completion_tokens: outTokensForLog },
         response: { content: textContent, thinking: null, finish_reason: jsonResponse.status || "unknown" },
         status: "success"
       }, { endpoint: clientRawRequest?.endpoint || null })).catch(() => {});
 
       // Client is Responses API → return as-is
       if (sourceFormat === FORMATS.OPENAI_RESPONSES) {
-        return { success: true, response: new Response(JSON.stringify(jsonResponse), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
+        return { success: true, response: new Response(JSON.stringify(restoreToolNames(jsonResponse, toolNameMap)), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
       }
 
       // Build client-format response.
@@ -246,10 +259,14 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       // where the real prompt was ~5344 with 5332 served from cache. Fold the cache
       // counters in, and keep them visible in prompt_tokens_details so a client can
       // tell a cache hit from a small prompt.
-      const cacheRead = usage.cache_read_input_tokens || usage.cached_tokens || 0;
-      const cacheCreate = usage.cache_creation_input_tokens || 0;
-      const inTokens = (usage.input_tokens || 0) + cacheRead + cacheCreate;
-      const outTokens = usage.output_tokens || 0;
+      //
+      // The reported usage must stay exactly what the provider said: the fold
+      // above is a fidelity correction, and mixing the ESTIMATED `usage` in here
+      // would present a guess to the client as a real spend. `usage` is DB-only.
+      const cacheRead = upstreamUsage.cache_read_input_tokens || upstreamUsage.cached_tokens || 0;
+      const cacheCreate = upstreamUsage.cache_creation_input_tokens || 0;
+      const inTokens = (upstreamUsage.input_tokens || 0) + cacheRead + cacheCreate;
+      const outTokens = upstreamUsage.output_tokens || 0;
       const cacheDetails = (cacheRead > 0 || cacheCreate > 0)
         ? { prompt_tokens_details: {
               ...(cacheRead > 0 ? { cached_tokens: cacheRead } : {}),
@@ -293,7 +310,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
         };
       }
 
-      return { success: true, response: new Response(JSON.stringify(finalResp), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
+      return { success: true, response: new Response(JSON.stringify(restoreToolNames(finalResp, toolNameMap)), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
     } catch (err) {
       console.error("[ChatCore] Responses API SSE→JSON failed:", err);
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Failed to convert streaming response to JSON");
@@ -314,12 +331,17 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
     if (onRequestSuccess) await onRequestSuccess();
 
-    const usage = parsed.usage || {};
+    // Two values on purpose. `upstreamUsage` is what the provider actually
+    // reported and is the only thing allowed onto the wire below — an estimate
+    // must never be presented to a client as a real spend. `usage` is what we
+    // record, falling back to an estimate so the DB rows are not left at 0 / 0.
+    const upstreamUsage = parsed.usage || {};
+    const usage = usageOrEstimate(upstreamUsage, body, parsed);
     appendLog({ tokens: usage, status: "200 OK" });
-    saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, usageKey: randomUUID(), silent: true });
-    if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime } }));
-
     const totalLatency = Date.now() - requestStartTime;
+    saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, latency: { ttft: totalLatency, total: totalLatency }, usageKey: randomUUID(), silent: true });
+    if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: totalLatency } }));
+
     saveRequestDetail(buildRequestDetail({
       ...ctx,
       latency: { ttft: totalLatency, total: totalLatency },
@@ -332,18 +354,21 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       status: "success"
     }, { endpoint: clientRawRequest?.endpoint || null })).catch(() => {});
 
-    // Re-attach usage explicitly. This handler already HAS the correct usage — it is
-    // the same object written to the usage DB, and for a cached Claude request that DB
-    // row reads cache_read_input_tokens: 11022 — yet the client was observed receiving
-    // no usage field at all (verified 2026-08-04 with a fingerprinted payload matched
-    // on both sides). Whatever drops it between assembly and serialisation, the client
-    // must not be left unable to account for its own token spend: a caller cannot tell
-    // a 90%-cached request from a cheap one without this.
-    if (usage && Object.keys(usage).length > 0) parsed.usage = usage;
+    // Re-attach usage explicitly. `upstreamUsage` is what the provider actually
+    // reported — and for a cached Claude request the same figure the DB row
+    // carries reads cache_read_input_tokens: 11022 — yet the client was observed
+    // receiving no usage field at all (verified 2026-08-04 with a fingerprinted
+    // payload matched on both sides). Whatever drops it between assembly and
+    // serialisation, the client must not be left unable to account for its own
+    // token spend: a caller cannot tell a 90%-cached request from a cheap one
+    // without this. An estimate is deliberately NOT attached here.
+    if (upstreamUsage && Object.keys(upstreamUsage).length > 0) parsed.usage = upstreamUsage;
 
     // Keep Gemini thought summaries on the forced-SSE-to-JSON path, matching
-    // the normal non-streaming path.
-    if (!shouldPreserveReasoningContent(model, parsed, sourceFormat, targetFormat) && parsed?.choices) {
+    // the normal non-streaming path. A Claude client is left alone for the same
+    // reason: the shared translation below turns reasoning_content into a
+    // thinking block, exactly as the normal non-streaming path does.
+    if (sourceFormat !== FORMATS.CLAUDE && !shouldPreserveReasoningContent(model, parsed, sourceFormat, targetFormat) && parsed?.choices) {
       for (const choice of parsed.choices) {
         if (choice?.message?.reasoning_content && choice.message.content) {
           delete choice.message.reasoning_content;
@@ -357,11 +382,28 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
     // lost on the non-streaming return path. Inlined (not imported from
     // nonStreamingHandler.js) to avoid a circular import: nonStreamingHandler
     // already imports parseSSEToOpenAIResponse from this module.
+    //
+    // Every other client dialect goes through the shared non-streaming
+    // translation, injected by chatCore. Without it a Claude client routed to a
+    // force-stream provider (CodeBuddy CN rejects non-stream requests) received
+    // the raw OpenAI body it cannot read — `content` undefined — which fails the
+    // same agent turns the stop-sequence guard exists to repair (issue #18).
     const finalBody = sourceFormat === FORMATS.OPENAI_RESPONSES
       ? chatCompletionToResponses(parsed, customToolNames)
-      : parsed;
+      : (typeof translateToClientFormat === "function" ? translateToClientFormat(parsed) : parsed);
 
-    return { success: true, response: new Response(JSON.stringify(finalBody), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
+    const headers = {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      ...upstreamResponseHeaders(providerResponse.headers)
+    };
+    if (sourceFormat === FORMATS.CLAUDE) {
+      if (!headers["request-id"] || !headers["request-id"].startsWith("req_")) {
+        headers["request-id"] = `req_${Date.now()}`;
+      }
+    }
+
+    return { success: true, response: new Response(JSON.stringify(restoreToolNames(finalBody, toolNameMap)), { headers }) };
   } catch (err) {
     console.error("[ChatCore] Chat Completions SSE→JSON failed:", err);
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Failed to convert streaming response to JSON");

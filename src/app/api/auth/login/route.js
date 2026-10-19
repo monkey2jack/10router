@@ -2,9 +2,10 @@ import { NextResponse } from "next/server";
 import { setDashboardAuthCookie, verifyDashboardPassword } from "@/lib/auth/dashboardSession";
 import { checkLock, recordFail, recordSuccess, getClientIp } from "@/lib/auth/loginLimiter";
 import { cookies } from "next/headers";
+import { applyPasswordResetFile } from "@/lib/auth/passwordReset";
 
 // Progressive lockout lives in loginLimiter (in-memory, resets on restart) —
-// the same limiter the SAML acs route uses. getClientIp trusts x-9r-real-ip
+// the same limiter the SAML acs route uses. getClientIp trusts x-10r-real-ip
 // only when custom-server.js stamped it, so remote clients cannot rotate
 // their own bucket.
 export async function POST(request) {
@@ -20,6 +21,9 @@ export async function POST(request) {
 
   try {
     const { password } = await request.json();
+    // A reset-password file dropped in the data dir takes effect right here —
+    // the locked-out operator should not have to restart the server too.
+    await applyPasswordResetFile().catch((e) => console.error("[auth] password reset file failed:", e));
     const isValid = await verifyDashboardPassword(password);
 
     if (isValid) {

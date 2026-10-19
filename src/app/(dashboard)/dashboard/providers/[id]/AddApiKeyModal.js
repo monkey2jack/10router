@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import PropTypes from "prop-types";
 import { Button, Badge, Input, Modal, Select } from "@/shared/components";
 import { AI_PROVIDERS } from "@/shared/constants/providers";
 import { planBulkAdd } from "@/shared/utils/bulkAdd";
+import { translate } from "@/i18n/runtime";
 
 const BULK_PLACEHOLDER = `name1|sk-key1\nname2|sk-key2\nsk-key-only-auto-named`;
 
@@ -39,7 +40,30 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
   });
   const [cloudflareData, setCloudflareData] = useState({ accountId: "" });
   const [region, setRegion] = useState(defaultRegion);
+  const [regionUserEdited, setRegionUserEdited] = useState(false);
+  const [autoDetectedRegionInfo, setAutoDetectedRegionInfo] = useState(null);
   const [validating, setValidating] = useState(false);
+
+  useEffect(() => {
+    if (isOpen && providerRegions && !regionUserEdited) {
+      let isMounted = true;
+      fetch("/api/network/egress-region")
+        .then((res) => res.json())
+        .then((data) => {
+          if (!isMounted) return;
+          const rec = data?.recommendedRegions?.[provider];
+          if (rec && providerRegions.some((r) => r.id === rec)) {
+            setRegion(rec);
+            setAutoDetectedRegionInfo({
+              country: data.country || data.countryCode,
+              regionId: rec,
+            });
+          }
+        })
+        .catch(() => {});
+      return () => { isMounted = false; };
+    }
+  }, [isOpen, provider, providerRegions, regionUserEdited]);
   const [validationResult, setValidationResult] = useState(null);
   const [validationError, setValidationError] = useState(null);
   const [validationMaintenance, setValidationMaintenance] = useState(false);
@@ -291,12 +315,25 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
           </p>
         )}
         {providerRegions && (
-          <Select
-            label="Region"
-            value={region}
-            onChange={(e) => setRegion(e.target.value)}
-            options={providerRegions.map((r) => ({ value: r.id, label: r.label }))}
-          />
+          <div>
+            <Select
+              label="Region"
+              value={region}
+              onChange={(e) => {
+                setRegion(e.target.value);
+                setRegionUserEdited(true);
+              }}
+              options={providerRegions.map((r) => ({ value: r.id, label: r.label }))}
+            />
+            {autoDetectedRegionInfo && !regionUserEdited && (
+              <p className="text-xs text-primary mt-1 flex items-center gap-1">
+                <span>🌐</span>
+                <span>
+                  {translate("Auto-matched region based on network location ({country})").replace("{country}", autoDetectedRegionInfo.country)}
+                </span>
+              </p>
+            )}
+          </div>
         )}
         {isCompatible && (
           <Input

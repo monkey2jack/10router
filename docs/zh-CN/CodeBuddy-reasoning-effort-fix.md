@@ -11,7 +11,7 @@
 
 | 错误码 | 消息 | 性质 |
 |--------|------|------|
-| `11128` | Illegal API invocation from an unapproved channel | CodeBuddy 服务端**间歇性**渠道风控，触发后自动恢复，非代码问题 |
+| `11128` | Illegal API invocation from an unapproved channel | CodeBuddy 服务端**渠道级**风控；v1.1.2 起 10router 会熔断整个渠道（不再逐账号重试放大），非本修复对象，详见 `codebuddy-cn-error-codes.md` |
 | `11150` | reasoning effort value is not supported by the current model | **稳定可复现**的代码问题，本次修复对象 |
 
 ## 根因
@@ -81,6 +81,6 @@ deepseek-v4-pro + reasoning_effort=low/medium/high/xhigh/max/none → ✅ 全部
 
 ## 相关注意事项
 
-1. **`11128`（unapproved channel）** 与本次修复无关，是 CodeBuddy 服务端的间歇性渠道风控，通常伴随账号频率限制（如 `429 code 6004` 使用量超限），自动恢复，无需代码处理。
+1. **`11128`（unapproved channel）** 与本次修复无关，是 CodeBuddy 服务端的**渠道级**风控（实测为多账号同秒连打同一模型触发，单发请求永远 200）。v1.1.2 起 10router 对其做渠道熔断：不加账号锁、不逐账号重试，60s 起步、复发升到 10min，成功即清除。详见 `codebuddy-cn-error-codes.md` 的 11128 专节。
 2. **GLM 系列 `429` 频率限制**：某账号的 glm-5.3 使用量超限时返回 `6004`，属正常配额消耗，会按 CodeBuddy 返回的重置时间自动恢复。
-3. **账号分配**：CodeBuddy 支持多账号 fallback，某账号某模型锁定时会自动切换到下一个账号（`[FALLBACK] ⇄` 日志）。
+3. **账号分配**：CodeBuddy 支持多账号 fallback，某账号某模型锁定时会自动切换到下一个账号（`[FALLBACK] ⇄` 日志）。注意 `11128` 是**渠道级**的例外——它不走逐账号 fallback，而是直接熔断整个渠道（v1.1.2 起），因为逐账号连发正是触发它的信号。

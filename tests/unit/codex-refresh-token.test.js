@@ -147,8 +147,10 @@ describe("Codex Refresh Token", () => {
     it("should return provider-specific lead time for OAuth providers", async () => {
       const { getRefreshLeadMs } = await import("../../open-sse/services/tokenRefresh.js");
 
-      // Synced with CLIProxyAPI refresh_registry
-      expect(getRefreshLeadMs("codex")).toBe(5 * 24 * 60 * 60 * 1000);   // 5 days
+      // codex: 10 minutes — OpenAI rotates the refresh token on EVERY refresh, so a
+      // 5-day lead rotated it on every call and reuse of the rotated token revoked
+      // the whole session (account logout). Refresh only near real expiry (upstream 0bc7f86e).
+      expect(getRefreshLeadMs("codex")).toBe(10 * 60 * 1000);            // 10 minutes
       expect(getRefreshLeadMs("claude")).toBe(4 * 60 * 60 * 1000);       // 4 hours
       expect(getRefreshLeadMs("iflow")).toBe(24 * 60 * 60 * 1000);       // 24 hours
       expect(getRefreshLeadMs("kimi")).toBe(5 * 60 * 1000);              // 5 minutes
@@ -163,10 +165,13 @@ describe("Codex Refresh Token", () => {
       expect(getRefreshLeadMs("openai")).toBe(TOKEN_EXPIRY_BUFFER_MS);
     });
 
-    it("codex lead should be greater than default buffer", async () => {
+    it("codex lead stays tight: longer than the default buffer, far below the old 5-day window", async () => {
       const { getRefreshLeadMs, TOKEN_EXPIRY_BUFFER_MS } = await import("../../open-sse/services/tokenRefresh.js");
 
       expect(getRefreshLeadMs("codex")).toBeGreaterThan(TOKEN_EXPIRY_BUFFER_MS);
+      // Regression guard for the refresh-token reuse fix: never go back to the
+      // multi-day lead that rotated the token on every call.
+      expect(getRefreshLeadMs("codex")).toBeLessThanOrEqual(60 * 60 * 1000);
     });
   });
 });

@@ -5,9 +5,11 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
 import { getProviderIconSrc, markProviderIconMissing } from "@/shared/utils/providerIcon";
-import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, XiaomiMimoAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, ConfirmModal, InviteCodeChip } from "@/shared/components";
+import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, ZedAuthModal, XiaomiMimoAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, ConfirmModal, InviteCodeChip, Tooltip } from "@/shared/components";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
+import { mergeQoderLivePricing } from "@/shared/utils/qoderLivePricing";
+import OffPeakBanner from "./OffPeakBanner";
 import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
@@ -15,6 +17,8 @@ import { translate } from "@/i18n/runtime";
 import { useNotificationStore } from "@/store/notificationStore";
 import { fetchSuggestedModels } from "@/shared/utils/providerModelsFetcher";
 import { getProviderCustomModelRows } from "@/shared/utils/providerCustomModels";
+import { extractAccountsVerificationUrl } from "@/shared/utils/validationUrl";
+import { translateQuotaError } from "@/shared/utils/quotaError";
 import ModelRow from "./ModelRow";
 import PassthroughModelsSection from "./PassthroughModelsSection";
 import CompatibleModelsSection from "./CompatibleModelsSection";
@@ -24,6 +28,7 @@ import EditCompatibleNodeModal from "./EditCompatibleNodeModal";
 import AddCustomModelModal from "./AddCustomModelModal";
 import BulkImportCodexModal from "./BulkImportCodexModal";
 import CodeBuddyImportModal from "./CodeBuddyImportModal";
+import OAuthTransferModal from "./OAuthTransferModal";
 
 const ONE_BY_ONE_DELAY_MS = 1000;
 
@@ -36,11 +41,30 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function formatModelTestError(error) {
+  if (!error) return "";
+  const quotaFriendly = translateQuotaError(error);
+  if (quotaFriendly && quotaFriendly !== error) return quotaFriendly;
+  const direct = translate(error);
+  if (direct && direct !== error) return direct;
+
+  const match = String(error).match(/^HTTP\s+\d+:\s*(?:\[(?:\d+|[A-Z0-9_]+)\]:\s*)?(.*)$/i);
+  if (match && match[1]) {
+    const inner = match[1].trim();
+    const translatedInner = translate(inner);
+    if (translatedInner && translatedInner !== inner) {
+      return translatedInner;
+    }
+  }
+
+  return translate(error);
+}
+
 export default function ProviderDetailPage() {
   const params = useParams();
   const router = useRouter();
   const providerId = params.id;
-  const { getCaps } = useModelCaps();
+  const { getCaps, getBaseCaps, overrides, refresh } = useModelCaps();
   const notify = useNotificationStore();
   const [connections, setConnections] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -59,13 +83,18 @@ export default function ProviderDetailPage() {
   const [selectedConnection, setSelectedConnection] = useState(null);
   const [modelAliases, setModelAliases] = useState({});
   const [customModels, setCustomModels] = useState([]);
-  const [codeBuddyOAuthImportEnabled, setCodeBuddyOAuthImportEnabled] = useState(false); // experimental toggle
+  const [oauthTransferEnabled, setOauthTransferEnabled] = useState(false); // per-provider toggle (falls back to legacy global)
   const [codeBuddyCheckinEnabled, setCodeBuddyCheckinEnabled] = useState(false); // experimental auto daily check-in toggle
+  const [codeBuddyCompensationEnabled, setCodeBuddyCompensationEnabled] = useState(false); // experimental auto compensation toggle
   // cbcn check-in manual trigger: running flag (per-account results go to the
   // summary toast + [CB_CN_CHECKIN] server log, not an inline list).
   const [cbCheckinRunning, setCbCheckinRunning] = useState(false);
+  const [cbCompRunning, setCbCompRunning] = useState(false);
+  const [qoderCheckinRunning, setQoderCheckinRunning] = useState(false);
   // cbcn export/import re-auth: { open, action: 'export'|'import', value }
   const [cbPw, setCbPw] = useState({ open: false, action: null, value: "" });
+  const [cbPwVerifying, setCbPwVerifying] = useState(false);
+  const [cbPwError, setCbPwError] = useState("");
   const [cbImportPassword, setCbImportPassword] = useState(""); // password for bulk-import (passed to modal)
   const [headerImgError, setHeaderImgError] = useState(false);
   const [modelTestResults, setModelTestResults] = useState({});
@@ -77,6 +106,7 @@ export default function ProviderDetailPage() {
   const [bulkUpdatingProxy, setBulkUpdatingProxy] = useState(false);
   const [providerStrategy, setProviderStrategy] = useState(null);
   const [providerStickyLimit, setProviderStickyLimit] = useState("");
+  const [earliestExpiryFirst, setEarliestExpiryFirst] = useState(false);
   const [thinkingMode, setThinkingMode] = useState("auto");
   const [autoPing, setAutoPing] = useState({ enabled: false, connections: {} });
   const [suggestedModels, setSuggestedModels] = useState([]);
@@ -88,6 +118,13 @@ export default function ProviderDetailPage() {
   const [showAgRiskModal, setShowAgRiskModal] = useState(false);
   const [oneByOneRunning, setOneByOneRunning] = useState(false);
   const [oneByOneStopping, setOneByOneStopping] = useState(false);
+  // Model sent with each one-by-one probe. The sentinel (not "") because Select
+  // always renders a disabled placeholder option on value="" — a real "" option
+  // would be shadowed by it. The test route treats an absent body.model as
+  // "provider default". Needed because some credentials only accept a subset of
+  // ids (e.g. mimo-desktop: its session reaches the desktop models only).
+  const ONE_BY_ONE_DEFAULT_MODEL = "__provider_default__";
+  const [oneByOneModel, setOneByOneModel] = useState(ONE_BY_ONE_DEFAULT_MODEL);
   const [oneByOneCurrentConnectionId, setOneByOneCurrentConnectionId] = useState(null);
   const [oneByOneResults, setOneByOneResults] = useState({});
   const [oneByOneSummary, setOneByOneSummary] = useState(null);
@@ -98,9 +135,10 @@ export default function ProviderDetailPage() {
   const AG_RISK_STORAGE_KEY = "ag_risk_confirmed";
 
   const openOAuthConnection = () => {
-    // Xiaomi MiMo supports both auth modes and has its own local-credential flow,
-    // so it gets a dedicated modal instead of the generic PKCE one.
-    if (providerId === "xiaomi-mimo") {
+    // Both Xiaomi MiMo cards support the same connect surface and share a local-credential
+    // flow, so they get this dedicated modal instead of the generic PKCE one. The modal is
+    // told which card it was opened for and creates the connection under that id.
+    if (providerId === "xiaomi-mimo" || providerId === "mimo-desktop") {
       setShowXiaomiMimoModal(true);
       return;
     }
@@ -136,15 +174,35 @@ export default function ProviderDetailPage() {
     triggerApiKeyConnection();
   };
 
-  // Password-confirm modal for cbcn export / import (both are sensitive).
+  // Password-confirm modal for the OAuth transfer export gate. The dashboard
+  // password is VERIFIED HERE (preflight), so a wrong password errors in this
+  // dialog — never two steps later inside the passphrase modal.
   const handleCbPwConfirm = async () => {
-    const { action, value } = cbPw;
-    setCbPw({ open: false, action: null, value: "" });
-    if (action === "export") {
-      await handleCodeBuddyExport(value);
-    } else if (action === "import") {
-      setCbImportPassword(value);
-      setShowCodeBuddyImport(true);
+    if (cbPwVerifying) return;
+    setCbPwVerifying(true);
+    setCbPwError("");
+    try {
+      const res = await fetch("/api/auth/verify-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: cbPw.value }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setCbPwError(data?.error || translate("Invalid password"));
+        return;
+      }
+      const { action, value: verifiedPassword } = cbPw;
+      setCbPw({ open: false, action: null, value: "" });
+      if (action === "export") {
+        setOauthTransferPassword(verifiedPassword);
+        setOauthTransferMode(action);
+        setShowOAuthTransfer(true);
+      }
+    } catch (error) {
+      setCbPwError(error.message || translate("Invalid password"));
+    } finally {
+      setCbPwVerifying(false);
     }
   };
 
@@ -153,40 +211,16 @@ export default function ProviderDetailPage() {
     setCbPw({ open: true, action, value: "" });
   };
 
-  // Export codebuddy-cn connections as the third-party (wb) JSON format.
-  const handleCodeBuddyExport = async (password) => {
-    try {
-      const res = await fetch("/api/oauth/codebuddy-cn/export", {
-        cache: "no-store",
-        headers: password ? { "x-9r-password": password } : {},
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        if (res.status === 401) throw new Error(translate("Invalid password"));
-        throw new Error(data?.error || `Request failed: ${res.status}`);
-      }
-      const list = Array.isArray(data) ? data : [];
-      if (list.length === 0) {
-        notify.warning(translate("No CodeBuddy CN connections to export"));
-        return;
-      }
-      const blob = new Blob([JSON.stringify(list, null, 2)], {
-        type: "application/json",
-      });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `codebuddy-cn-accounts-${new Date().toISOString().slice(0, 10)}.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      // Defer revoke so the download has started before the object URL is freed.
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      notify.success(`${list.length} ${translate("accounts exported")}`);
-    } catch (e) {
-      notify.error(translate("Export failed") + ": " + e.message);
-    }
-  };
+  // Generic encrypted OAuth credentials transfer (all OAuth providers, P2
+  // sibling of the codebuddy-cn wb-format routes which stay API-compatible).
+  const [showOAuthTransfer, setShowOAuthTransfer] = useState(false);
+  const [oauthTransferMode, setOauthTransferMode] = useState("export");
+  // The export route re-authenticates the dashboard password on every request
+  // (defense in depth: the JWT cookie alone must not dump tokens). The
+  // preflight dialog verifies the password first so a wrong one errors where
+  // it was typed; on success we hand the verified value to the modal —
+  // dropping this wiring makes EVERY export die with "Invalid password".
+  const [oauthTransferPassword, setOauthTransferPassword] = useState("");
 
   // Manual CodeBuddy CN daily check-in trigger (only shown when the auto
   // check-in experimental toggle is on). Per-account results surface via the
@@ -224,6 +258,48 @@ export default function ProviderDetailPage() {
     }
   };
 
+  // Manual CodeBuddy CN compensation & gift claim trigger.
+  const handleCodeBuddyCompensation = async () => {
+    setCbCompRunning(true);
+    try {
+      const res = await fetch("/api/oauth/codebuddy-cn/claim-compensation", {
+        method: "POST",
+        cache: "no-store",
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
+      const list = Array.isArray(data?.results) ? data.results : [];
+      if (list.length === 0) {
+        notify.warning(translate("No CodeBuddy CN connections found"));
+        return;
+      }
+      const claimedList = list.filter((r) => r.status === "claimed");
+      const alreadyList = list.filter((r) => r.status === "already");
+      const noneList = list.filter((r) => r.status === "no-activity");
+      const failedList = list.filter((r) => r.status === "failed");
+
+      const totalCredits = claimedList.reduce((acc, cur) => acc + (cur.claimedAmount || 0), 0);
+
+      if (claimedList.length > 0) {
+        notify.success(
+          `${translate("Claim successful")}: +${totalCredits} Credits (${claimedList.length} ${translate("accounts")})`
+        );
+      } else if (failedList.length > 0) {
+        notify.error(
+          `${translate("Claim failed")}: ${failedList.map(f => f.error).join(", ")}`
+        );
+      } else if (alreadyList.length > 0) {
+        notify.info(translate("Compensation credits already claimed"));
+      } else {
+        notify.info(translate("No claimable activity available for this account"));
+      }
+    } catch (e) {
+      notify.error(translate("Claim failed") + ": " + e.message);
+    } finally {
+      setCbCompRunning(false);
+    }
+  };
+
   // Check-in control block (button with hover note). Rendered in place of the
   // import/export buttons when the auto check-in toggle is on.
   const renderCbCheckinBlock = () => (
@@ -234,11 +310,86 @@ export default function ProviderDetailPage() {
         onClick={handleCodeBuddyCheckin}
         disabled={cbCheckinRunning}
         className="w-full sm:w-auto"
-        title={translate("CodeBuddy CN auto-checks in daily (00:00–06:00 local time)")}
+        title={translate("CodeBuddy CN auto-checks in daily (retries all day until confirmed)")}
       >
         {cbCheckinRunning ? translate("Checking in...") : translate("Check in now")}
       </Button>
+      <Button
+        size="sm"
+        icon="redeem"
+        variant="secondary"
+        onClick={handleCodeBuddyCompensation}
+        disabled={cbCompRunning}
+        className="w-full sm:w-auto"
+        title={translate("Claim extra compensation & gifts")}
+      >
+        {cbCompRunning ? translate("Claiming...") : translate("Claim Compensation")}
+      </Button>
     </div>
+  );
+
+  // Qoder daily credits claim manual trigger.
+  const handleQoderCheckin = async () => {
+    setQoderCheckinRunning(true);
+    try {
+      const endpoint = providerId === "qoder-cn" ? "/api/oauth/qoder-cn/checkin" : "/api/oauth/qoder/checkin";
+      const res = await fetch(endpoint, {
+        method: "POST",
+        cache: "no-store",
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
+      const list = Array.isArray(data?.results) ? data.results : [];
+      if (list.length === 0) {
+        notify.warning(translate("No active Qoder connections found"));
+        return;
+      }
+      const checkedInList = list.filter((r) => r.status === "checked-in");
+      const alreadyList = list.filter((r) => r.status === "already");
+      // Accounts the deployment offers no claim campaign for at all (intl Qoder
+      // currently returns only a "view details" promo). These are NOT failures
+      // and NOT an "already claimed" — saying either read as a lie.
+      const noneList = list.filter((r) => r.status === "no-activity");
+      const failedList = list.filter((r) => r.status === "failed");
+
+      const totalCredits = checkedInList.reduce((acc, cur) => acc + (cur.claimedAmount || 0), 0);
+
+      if (checkedInList.length > 0) {
+        notify.success(
+          `${translate("Claim successful")}: +${totalCredits} Credits (${checkedInList.length} ${translate("accounts")})`
+        );
+      } else if (failedList.length > 0) {
+        notify.error(
+          `${translate("Claim failed")}: ${failedList.map(f => f.error).join(", ")}`
+        );
+      } else if (noneList.length > 0) {
+        // Friendly, informational: nothing is broken and there is nothing to do.
+        const suffix = alreadyList.length > 0
+          ? ` / ${translate("Daily credits already claimed for today")} (${alreadyList.length} ${translate("accounts")})`
+          : ` (${noneList.length} ${translate("accounts")})`;
+        notify.info(translate("No claimable activity available for this account") + suffix);
+      } else {
+        notify.info(translate("Daily credits already claimed for today"));
+      }
+    } catch (e) {
+      notify.error(translate("Claim failed") + ": " + e.message);
+    } finally {
+      setQoderCheckinRunning(false);
+    }
+  };
+
+  const renderQoderCheckinBlock = () => (
+    <Button
+      size="sm"
+      icon="redeem"
+      variant="secondary"
+      onClick={handleQoderCheckin}
+      disabled={qoderCheckinRunning}
+      className="w-full sm:w-auto"
+      title={translate("Claim daily activity Credits")}
+    >
+      {qoderCheckinRunning ? translate("Claiming...") : translate("Claim Credits")}
+    </Button>
   );
 
   const handleAgRiskConfirm = () => {
@@ -269,15 +420,52 @@ export default function ProviderDetailPage() {
   const supportsApiKeyAuth = !!APIKEY_PROVIDERS[providerId] || authModes.includes("apikey");
   const isFreeNoAuth = !!FREE_PROVIDERS[providerId]?.noAuth;
   const isCodeBuddy = providerId === "codebuddy-cn";
-  // Experimental OAuth account transfer (import/export) — shown only for
-  // codebuddy-cn AND when the settings toggle is enabled.
-  const codeBuddyTransferOn = isCodeBuddy && codeBuddyOAuthImportEnabled;
-  // Experimental auto daily check-in — mutually exclusive display vs import/export.
-  const codeBuddyCheckinOn = isCodeBuddy && codeBuddyCheckinEnabled;
+  // Generic OAuth transfer: every provider whose registry declares an oauth
+  // auth mode (not just codebuddy). When CN check-in is on it hides the
+  // buttons in favor of the check-in block — surface a reminder then.
+  const oauthTransferOn = isOAuth && providerInfo?.authModes?.includes("oauth") && oauthTransferEnabled;
+  // Experimental auto daily check-in / compensation — mutually exclusive display vs import/export.
+  const codeBuddyCheckinOn = isCodeBuddy && (codeBuddyCheckinEnabled || codeBuddyCompensationEnabled);
+  /**
+   * The Export/Import button pair, hoisted out of the dual-auth-only branch.
+   *
+   * The transfer routes are provider-agnostic and `accountTransfer` carries
+   * each provider's session payload — for `mimo-desktop` that payload (the
+   * account session) IS the credential, and the Desktop card's authModes are a
+   * single "oauth", so keeping these buttons inside the dual-auth arm left the
+   * one card that most needs cross-machine migration with no transfer UI at
+   * all. The helper is the only place the pair is rendered now.
+   */
+  const renderOAuthTransferButtons = (className) =>
+    oauthTransferOn && !codeBuddyCheckinOn ? (
+      <>
+        <Button size="sm" icon="file_download" variant="secondary" onClick={() => openCbPassword("export")} className={className}>
+          {translate("Export")}
+        </Button>
+        <Button size="sm" icon="upload_file" variant="secondary" onClick={() => { setOauthTransferMode("import"); setShowOAuthTransfer(true); }} className={className}>
+          {translate("Import")}
+        </Button>
+      </>
+    ) : null;
+
   const staticModels = getModelsByProviderId(providerId);
+  // Qoder publishes credit multipliers + off-peak promos only on its live
+  // catalog (price_factor flips to 0 during a free window, the promotion
+  // object carries the 22:00–08:00 Asia/Singapore discount). Overlay them
+  // onto the static rows so the badges reflect the account's real pricing.
+  const isQoderFamily = providerId === "qoder" || providerId === "qoder-cn";
+  // "Fetch official catalog" import button scope: qoder family (live catalog)
+  // and xiaomi-mimo (public /v1/models). mimo-x client previews are filtered
+  // server-side in resolveMimoModels, so the import can never shadow them.
+  const supportsCatalogImport = providerId === "qoder" || providerId === "qoder-cn" || providerId === "xiaomi-mimo";
   const models = providerId === "cursor" && liveModels.length > 0
     ? liveModels
-    : staticModels;
+    : isQoderFamily
+      ? mergeQoderLivePricing(staticModels, liveModels)
+      : staticModels;
+  // One shared off-peak window for the whole list (Qoder attaches the same
+  // promotion object to every discounted model).
+  const offPeakPromotion = isQoderFamily ? (models.find((m) => m.promotion)?.promotion || null) : null;
   const providerAlias = getProviderAlias(providerId);
   
   const isOpenAICompatible = isOpenAICompatibleProvider(providerId);
@@ -460,6 +648,8 @@ export default function ProviderDetailPage() {
       const override = (settingsData.providerStrategies || {})[providerId] || {};
       setProviderStrategy(override.fallbackStrategy || null);
       setProviderStickyLimit(override.stickyRoundRobinLimit != null ? String(override.stickyRoundRobinLimit) : "1");
+      setEarliestExpiryFirst(override.earliestExpiryFirst === true);
+      setOauthTransferEnabled(settingsData.codeBuddyOAuthImport === true);
       // Load per-provider thinking config
       const thinkingCfg = (settingsData.providerThinking || {})[providerId] || {};
       setThinkingMode(thinkingCfg.mode || "auto");
@@ -491,6 +681,17 @@ export default function ProviderDetailPage() {
     }
   }, [providerId, isCompatible]);
 
+  // A provider's FIRST connection triggers the server-side default-disable of
+  // every built-in LLM model (connectionsRepo) — refresh connections AND the
+  // disabled list together, or the UI keeps claiming "all enabled" until a
+  // manual reload while /v1/models (same table) serves nothing. Issue #14-A.
+  // Must be declared AFTER fetchConnections: the deps array evaluates it on
+  // every render, and a forward reference is a TDZ crash (page wouldn't load).
+  const refreshAfterConnectionChange = useCallback(async () => {
+    await fetchConnections();
+    await fetchDisabledModels();
+  }, [fetchConnections, fetchDisabledModels]);
+
   const handleUpdateNode = async (formData) => {
     try {
       const res = await fetch(`/api/provider-nodes/${providerId}`, {
@@ -509,17 +710,31 @@ export default function ProviderDetailPage() {
     }
   };
 
-  const saveProviderStrategy = async (strategy, stickyLimit) => {
+  const saveProviderStrategy = async (
+    strategy,
+    stickyLimit,
+    earliestExpiry = earliestExpiryFirst,
+  ) => {
     try {
       const settingsRes = await fetch("/api/settings", { cache: "no-store" });
       const settingsData = settingsRes.ok ? await settingsRes.json() : {};
       const current = settingsData.providerStrategies || {};
 
       // Build override: null strategy means remove override, use global
-      const override = {};
+      const override = { ...(current[providerId] || {}) };
       if (strategy) override.fallbackStrategy = strategy;
+      else delete override.fallbackStrategy;
+
       if (strategy === "round-robin" && stickyLimit !== "") {
         override.stickyRoundRobinLimit = Number(stickyLimit) || 3;
+      } else {
+        delete override.stickyRoundRobinLimit;
+      }
+
+      if (earliestExpiry) {
+        override.earliestExpiryFirst = true;
+      } else {
+        delete override.earliestExpiryFirst;
       }
 
       const updated = { ...current };
@@ -544,12 +759,17 @@ export default function ProviderDetailPage() {
     const sticky = enabled ? (providerStickyLimit || "1") : providerStickyLimit;
     if (enabled && !providerStickyLimit) setProviderStickyLimit("1");
     setProviderStrategy(strategy);
-    saveProviderStrategy(strategy, sticky);
+    saveProviderStrategy(strategy, sticky, earliestExpiryFirst);
   };
 
   const handleStickyLimitChange = (value) => {
     setProviderStickyLimit(value);
-    saveProviderStrategy("round-robin", value);
+    saveProviderStrategy("round-robin", value, earliestExpiryFirst);
+  };
+
+  const handleEarliestExpiryToggle = (enabled) => {
+    setEarliestExpiryFirst(enabled);
+    saveProviderStrategy(providerStrategy, providerStickyLimit, enabled);
   };
 
   const saveThinkingConfig = async (mode) => {
@@ -609,11 +829,12 @@ export default function ProviderDetailPage() {
     fetch("/api/settings", { cache: "no-store" })
       .then((res) => res.json())
       .then((data) => {
-        if (typeof data.codeBuddyOAuthImport === "boolean") {
-          setCodeBuddyOAuthImportEnabled(data.codeBuddyOAuthImport);
-        }
+        setOauthTransferEnabled(data.codeBuddyOAuthImport === true);
         if (typeof data.codeBuddyCheckin === "boolean") {
           setCodeBuddyCheckinEnabled(data.codeBuddyCheckin);
+        }
+        if (typeof data.codeBuddyCompensation === "boolean") {
+          setCodeBuddyCompensationEnabled(data.codeBuddyCompensation);
         }
       })
       .catch((e) => console.log("Error reading settings:", e));
@@ -622,8 +843,12 @@ export default function ProviderDetailPage() {
   // Cursor's model availability is account-specific and changes frequently.
   // Load the active account's live catalog for the dashboard; the static
   // registry remains the fallback while the request is pending or unavailable.
+  // The Qoder family piggybacks on the same fetch: the live rows carry the
+  // promo-aware rateMultiplier / promotion objects the multiplier badges,
+  // green free badge and off-peak banner render from (server already
+  // rewrites price_factor into rateMultiplier — the client does no pricing).
   useEffect(() => {
-    if (providerId !== "cursor") {
+    if (providerId !== "cursor" && !isQoderFamily) {
       setLiveModels([]);
       return;
     }
@@ -686,10 +911,13 @@ export default function ProviderDetailPage() {
     }
   };
 
-  const handleAddCustomModel = async (modelId, type = "llm", providerAliasOverride = providerStorageAlias, caps = {}, enabled) => {
+  const handleAddCustomModel = async (modelId, type = "llm", providerAliasOverride = providerStorageAlias, caps = {}, enabled, transport) => {
     try {
       const body = { providerAlias: providerAliasOverride, id: modelId, type };
       if (enabled !== undefined) body.enabled = enabled;
+      // Realtime STT dispatch marker — the API whitelist only honours it on
+      // type "stt" records and silently drops unknown values.
+      if (transport) body.transport = transport;
       if (caps && typeof caps === "object") {
         for (const k of ["vision", "reasoning", "contextWindow", "maxOutput", "thinkingFormat"]) {
           if (caps[k] !== undefined) body[k] = caps[k];
@@ -709,6 +937,30 @@ export default function ProviderDetailPage() {
       }
     } catch (error) {
       console.log("Error adding custom model:", error);
+    }
+  };
+
+  // Per-model context-window / max-output pins (kept out of the catalog, in
+  // the modelCaps scope). The hook already folds overrides into getCaps, so
+  // badges update as soon as refresh() re-reads /api/models/caps.
+  const isCapsPinned = (modelId) =>
+    !!(overrides?.[providerStorageAlias]?.[modelId] || overrides?.[providerId]?.[modelId]);
+  const handleSaveModelCaps = async (modelId, caps) => {
+    try {
+      const res = await fetch("/api/models/caps", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: providerStorageAlias || providerId, modelId, ...(caps || {}) }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        notify.error(d?.error || "Failed to save model settings");
+        return;
+      }
+      refresh();
+    } catch (error) {
+      console.log("Error saving model caps:", error);
+      notify.error("Failed to save model settings");
     }
   };
 
@@ -742,12 +994,42 @@ export default function ProviderDetailPage() {
     }
   };
 
+  // Bulk enable/disable every custom model of this provider (P2). Both
+  // directions confirm first — enable exposes models to clients via /v1/models,
+  // disable hides them.
+  const handleBulkCustomModels = (enabled, type = "llm") => {
+    setConfirmState({
+      title: enabled ? translate("Enable all custom models?") : translate("Disable all custom models?"),
+      message: enabled
+        ? translate("All custom models of this provider will be listed in /v1/models and exposed to clients.")
+        : translate("All custom models of this provider will disappear from /v1/models until re-enabled. Clients will no longer see them."),
+      onConfirm: async () => {
+        setConfirmState(null);
+        try {
+          const res = await fetch("/api/models/custom/bulk", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ providerAlias: providerStorageAlias, type, enabled }),
+          });
+          if (res.ok) {
+            await fetchCustomModels();
+            if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("customModelChanged"));
+          }
+        } catch (error) {
+          console.log("Error bulk-updating custom models:", error);
+        }
+      },
+    });
+  };
+
   // Fetch Qoder model list and automatically add to available models
   const handleImportQoderModels = async () => {
     if (importingQoderModels) return;
     const activeConnection = connections.find((conn) => conn.isActive !== false);
     if (!activeConnection) {
-      notify.warning(translate("Please add an active Qoder connection first"))
+      notify.warning(providerId === "xiaomi-mimo"
+        ? translate("Please add an active MiMo connection first")
+        : translate("Please add an active Qoder connection first"))
       return;
     }
 
@@ -766,12 +1048,29 @@ export default function ProviderDetailPage() {
       }
 
       let importedCount = 0;
+      let mediaSkipped = 0;
       for (const model of models) {
         const modelId = model.id || model.name;
         if (!modelId) continue;
+        // Media-kind models (tts/stt/image/…) belong to the media-providers
+        // surface, never to this chat model list. MiMo's upstream catalog
+        // mixes them and the resolver tags them; qoder models arrive without
+        // a kind field and default to "llm", so qoder import is unchanged.
+        if ((model.kind || "llm") !== "llm") {
+          mediaSkipped += 1;
+          continue;
+        }
         
-        // Qoder model ID format may be "qoder/auto" or "auto", need to remove prefix
-        const cleanModelId = modelId.replace(/^qoder\//, "");
+        // Qoder model ID format may be "qoder/auto", "qoder-cn/auto" or
+        // "auto" — strip whichever provider prefix the route attached.
+        const cleanModelId = modelId.replace(/^qoder(-cn)?\//, "");
+        // Models already listed as official registry entries are NOT re-added
+        // as customs — the fetch button exists to pull in catalog newcomers
+        // (e.g. q37fmodel before it was registered), not to duplicate the
+        // whole catalog into the custom table (29 shadow rows observed 2026-09-19).
+        if (models.some((official) => official.id === cleanModelId)) {
+          continue;
+        }
         const alreadyExists = customModels.some(
           (entry) => entry.providerAlias === providerStorageAlias && entry.id === cleanModelId && (entry.kind || entry.type || "llm") === "llm"
         ) || Object.values(modelAliases).includes(`${providerStorageAlias}/${cleanModelId}`);
@@ -789,6 +1088,9 @@ export default function ProviderDetailPage() {
       } else {
         notify.success(translate("Successfully added") + ` ${importedCount} ` + translate("models"))
       }
+      if (mediaSkipped > 0) {
+        notify.info(translate("Media models skipped (use Media Providers)") + ` (${mediaSkipped})`)
+      }
     } catch (error) {
       console.log("Error importing Qoder models:", error);
       notify.error(translate("Error fetching models") + ": " + error.message)
@@ -801,7 +1103,7 @@ export default function ProviderDetailPage() {
   // OpenAI-compatible /models endpoint. Results stay in the page as suggestions
   // and are added explicitly by the user; they never become a second catalog or
   // override the global capability library.
-  const canRefreshOfficialModels = providerId === "opencode-go" || providerId === "bai";
+  const canRefreshOfficialModels = providerId === "opencode-go" || providerId === "bai" || providerId === "cline";
   const handleRefreshOfficialModels = async () => {
     if (officialModelsRefreshing) return;
     const connection = connections.find((item) => item.isActive !== false);
@@ -868,7 +1170,14 @@ export default function ProviderDetailPage() {
         }));
 
         try {
-          const res = await fetch(`/api/providers/${connection.id}/test`, { method: "POST" });
+          // Guard against a persisted selection drifting across provider
+          // navigation: only send the model if it is one of this provider's.
+          const probeModel = models.some((m) => m.id === oneByOneModel) ? oneByOneModel : null;
+          const res = await fetch(`/api/providers/${connection.id}/test`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(probeModel && probeModel !== ONE_BY_ONE_DEFAULT_MODEL ? { model: probeModel } : {}),
+          });
           const data = await res.json();
           const valid = !!data.valid;
 
@@ -913,6 +1222,9 @@ export default function ProviderDetailPage() {
       setOneByOneRunning(false);
       setOneByOneStopping(false);
       stopOneByOneRef.current = false;
+      // The test route has just rewritten testStatus/lastError in the DB —
+      // pull the fresh rows so the badges and red error text match reality.
+      fetchConnections();
     }
   };
 
@@ -967,6 +1279,12 @@ export default function ProviderDetailPage() {
   };
 
   const handleOAuthSuccess = () => {
+    // Fresh credentials supersede every stale test verdict on this page —
+    // consume the red error chips/banner instead of waiting for a reload.
+    setModelsTestError("");
+    setModelTestResults({});
+    setOneByOneResults({});
+    setOneByOneSummary(null);
     fetchConnections();
     setShowOAuthModal(false);
   };
@@ -993,7 +1311,11 @@ export default function ProviderDetailPage() {
       }
 
       if (res.ok) {
-        await fetchConnections();
+        // A first working credential retires the "no valid connections"-style
+        // banner and the red per-model icons from the previous attempt.
+        setModelsTestError("");
+        setModelTestResults({});
+        await refreshAfterConnectionChange();
         setShowAddApiKeyModal(false);
         return;
       }
@@ -1013,6 +1335,12 @@ export default function ProviderDetailPage() {
         body: JSON.stringify(formData),
       });
       if (res.ok) {
+        // Same rationale as handleOAuthSuccess: saved (possibly new)
+        // credentials make prior failure chips stale.
+        setModelsTestError("");
+        setModelTestResults({});
+        setOneByOneResults({});
+        setOneByOneSummary(null);
         await fetchConnections();
         setShowEditModal(false);
       }
@@ -1285,6 +1613,11 @@ export default function ProviderDetailPage() {
       setModelTestResults((prev) => ({ ...prev, [modelId]: "error" }));
       setModelsTestError("Network error");
     } finally {
+      // The chat pipeline persists/clears the connection row's lastError
+      // around the response (success cleanup is fire-and-forget) — refetch
+      // shortly after so the red error text on the row tracks the test
+      // result without needing a page reload.
+      setTimeout(() => { fetchConnections(); }, 600);
       setTestingModelIds((prev) => { const n = new Set(prev); n.delete(modelId); return n; });
     }
   };
@@ -1304,6 +1637,7 @@ export default function ProviderDetailPage() {
           onAddCustomModel={(modelId, enabled) => handleAddCustomModel(modelId, "llm", providerStorageAlias, {}, enabled)}
           onToggleCustomModel={handleToggleCustomModel}
           onDeleteCustomModel={(modelId) => handleDeleteCustomModel(modelId, "llm", providerStorageAlias)}
+          onBulkCustomModels={handleBulkCustomModels}
           connections={connections}
           isAnthropic={isAnthropicCompatible}
         />
@@ -1332,6 +1666,25 @@ export default function ProviderDetailPage() {
 
     return (
       <div className="flex flex-wrap gap-3">
+        {/* Off-peak countdown strip (Qoder) — one ticking banner for the
+            list; rows carry the static leaf badge. */}
+        {offPeakPromotion && <div className="w-full"><OffPeakBanner promotion={offPeakPromotion} /></div>}
+        {/* Custom models toolbar — bulk enable/disable (P2). Only with customs. */}
+        {(enabledCustomModelRows.length + disabledCustomModelRows.length) > 0 && (
+          <div className="w-full flex items-center gap-2 text-xs text-text-muted -mb-1">
+            <span>
+              {translate("Custom models")} ({enabledCustomModelRows.length + disabledCustomModelRows.length})
+            </span>
+            <span>·</span>
+            <button onClick={() => handleBulkCustomModels(true)} className="text-primary hover:underline">
+              {translate("Enable all")}
+            </button>
+            <span>·</span>
+            <button onClick={() => handleBulkCustomModels(false)} className="text-text-muted hover:text-red-500 hover:underline">
+              {translate("Disable all")}
+            </button>
+          </div>
+        )}
         {/* Custom models first — only enabled ones here; disabled customs are
             listed in the Disabled section below */}
         {enabledCustomModelRows.map((model) => (
@@ -1356,6 +1709,9 @@ export default function ProviderDetailPage() {
             isCustom
             isFree={false}
             caps={getCaps(`${providerId}/${model.id}`)}
+            baseCaps={getBaseCaps(`${providerId}/${model.id}`)}
+            onSaveCaps={(caps) => handleSaveModelCaps(model.id, caps)}
+            capsPinned={isCapsPinned(model.id)}
             thinkingSuffix={resolveThinkingSuffix(model.id)}
           />
         ))}
@@ -1382,6 +1738,9 @@ export default function ProviderDetailPage() {
               isFree={model.isFree}
               onDisable={() => handleDisableModel(model.id)}
               caps={getCaps(`${providerId}/${model.id}`)}
+              baseCaps={getBaseCaps(`${providerId}/${model.id}`)}
+              onSaveCaps={(caps) => handleSaveModelCaps(model.id, caps)}
+              capsPinned={isCapsPinned(model.id)}
               thinkingSuffix={resolveThinkingSuffix(model.id)}
             />
           );
@@ -1396,8 +1755,22 @@ export default function ProviderDetailPage() {
           Add Model
         </button>
 
-        {/* Import Qoder models button — only show for qoder provider */}
-        {providerId === "qoder" && connections.some((conn) => conn.isActive !== false) && (
+        {/* Import Cline models button — show for cline provider */}
+        {providerId === "cline" && connections.some((conn) => conn.isActive !== false) && (
+          <button
+            onClick={handleRefreshOfficialModels}
+            disabled={officialModelsRefreshing}
+            className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-blue-500/40 px-3 py-2 text-xs text-blue-600 dark:text-blue-400 transition-colors hover:border-blue-500 hover:bg-blue-500/5 sm:w-auto disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <span className="material-symbols-outlined text-sm" style={officialModelsRefreshing ? { animation: "spin 1s linear infinite" } : undefined}>
+              {officialModelsRefreshing ? "progress_activity" : "download"}
+            </span>
+            {officialModelsRefreshing ? translate("Importing...") : translate("Import from /models")}
+          </button>
+        )}
+
+        {/* Import fetched catalog button — qoder family + xiaomi-mimo */}
+        {supportsCatalogImport && connections.some((conn) => conn.isActive !== false) && (
           <button
             onClick={handleImportQoderModels}
             disabled={importingQoderModels}
@@ -1406,11 +1779,13 @@ export default function ProviderDetailPage() {
             <span className="material-symbols-outlined text-sm" style={importingQoderModels ? { animation: "spin 1s linear infinite" } : undefined}>
               {importingQoderModels ? "progress_activity" : "download"}
             </span>
-            {importingQoderModels ? translate("Fetching...") : translate("Fetch Qoder Models")}
+            {importingQoderModels
+              ? translate("Fetching...")
+              : translate(providerId === "xiaomi-mimo" ? "Fetch MiMo Models" : "Fetch Qoder Models")}
           </button>
         )}
 
-        {canRefreshOfficialModels && (
+        {canRefreshOfficialModels && providerId !== "cline" && (
           <button
             onClick={handleRefreshOfficialModels}
             disabled={officialModelsRefreshing || !connections.some((conn) => conn.isActive !== false)}
@@ -1456,32 +1831,51 @@ export default function ProviderDetailPage() {
           );
         })()}
 
-        {/* Disabled models — restorable (built-in catalog + fetched/imported customs) */}
+        {/* Disabled models — restorable (built-in catalog + fetched/imported customs).
+            Full ModelRow (name/caps/multiplier badges + Test + Copy), NOT bare chips:
+            the point of the default "all disabled" posture is to evaluate a model
+            BEFORE exposing it to clients, so a disabled row must be testable. #14-B */}
         {(disabledDisplayModels.length > 0 || disabledCustomModelRows.length > 0) && (
           <div className="w-full mt-2">
             <p className="text-xs text-text-muted mb-2">Disabled models ({disabledDisplayModels.length + disabledCustomModelRows.length}):</p>
-            <div className="flex flex-wrap gap-2">
-              {disabledDisplayModels.map((m) => (
-                <button
-                  key={m.id}
-                  onClick={() => handleEnableModel(m.id)}
-                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-dashed border-black/10 dark:border-white/10 text-xs text-text-muted hover:text-primary hover:border-primary/40 hover:bg-primary/5 transition-colors"
-                  title="Restore model"
-                >
-                  <span className="material-symbols-outlined text-[13px]">add</span>
-                  {m.id}
-                </button>
+            <div className="flex flex-wrap gap-3">
+              {disabledCustomModelRows.map((model) => (
+                <ModelRow
+                  key={`custom-${model.fullModel}`}
+                  model={{ id: model.id, name: model.name }}
+                  fullModel={`${providerDisplayAlias}/${model.id}`}
+                  copied={copied}
+                  onCopy={copy}
+                  testStatus={modelTestResults[model.id]}
+                  onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
+                  isTesting={testingModelIds.has(model.id)}
+                  onEnable={() => handleToggleCustomModel(model.id, true)}
+                  isCustom={false}
+                  isFree={false}
+                  caps={getCaps(`${providerId}/${model.id}`)}
+                  baseCaps={getBaseCaps(`${providerId}/${model.id}`)}
+                  onSaveCaps={(caps) => handleSaveModelCaps(model.id, caps)}
+                  capsPinned={isCapsPinned(model.id)}
+                />
               ))}
-              {disabledCustomModelRows.map((m) => (
-                <button
-                  key={`custom-${m.fullModel}`}
-                  onClick={() => handleToggleCustomModel(m.id, true)}
-                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-dashed border-black/10 dark:border-white/10 text-xs text-text-muted hover:text-primary hover:border-primary/40 hover:bg-primary/5 transition-colors"
-                  title="Restore model"
-                >
-                  <span className="material-symbols-outlined text-[13px]">add</span>
-                  {m.id}
-                </button>
+              {disabledDisplayModels.map((model) => (
+                <ModelRow
+                  key={model.id}
+                  model={model}
+                  fullModel={`${providerDisplayAlias}/${model.id}`}
+                  copied={copied}
+                  onCopy={copy}
+                  testStatus={modelTestResults[model.id]}
+                  onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
+                  isTesting={testingModelIds.has(model.id)}
+                  onEnable={() => handleEnableModel(model.id)}
+                  isFree={model.isFree}
+                  caps={getCaps(`${providerId}/${model.id}`)}
+                  baseCaps={getBaseCaps(`${providerId}/${model.id}`)}
+                  onSaveCaps={(caps) => handleSaveModelCaps(model.id, caps)}
+                  capsPinned={isCapsPinned(model.id)}
+                  thinkingSuffix={resolveThinkingSuffix(model.id)}
+                />
               ))}
             </div>
           </div>
@@ -1561,22 +1955,32 @@ export default function ProviderDetailPage() {
           <div className="min-w-0">
             <div className="flex items-center gap-3 flex-wrap">
               <h1 className="truncate text-2xl font-semibold tracking-tight sm:text-3xl">{providerInfo.name}</h1>
-              {(providerInfo.notice?.apiKeyUrl || providerInfo.notice?.signupUrl || providerInfo.website) && (
+              {(providerInfo.notice?.webUrl || providerInfo.notice?.apiKeyUrl || providerInfo.notice?.signupUrl || providerInfo.website) && (
                 <a
-                  href={providerInfo.notice?.apiKeyUrl || providerInfo.notice?.signupUrl || providerInfo.website}
+                  href={providerInfo.notice?.webUrl || providerInfo.notice?.apiKeyUrl || providerInfo.notice?.signupUrl || providerInfo.website}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-xs text-primary hover:underline inline-flex items-center gap-1"
                 >
                   <span className="material-symbols-outlined text-sm">open_in_new</span>
-                  {providerInfo.notice?.apiKeyUrl ? "Get API Key" : "Sign up / Learn more"}
+                  {providerInfo.notice?.webUrl
+                    ? "Web console"
+                    : providerInfo.notice?.apiKeyUrl
+                      ? "Get API Key"
+                      : "Sign up / Learn more"}
                 </a>
               )}
               <InviteCodeChip code={providerInfo.notice?.inviteCode} />
             </div>
-            <p className="text-text-muted">
-              {connections.length} connection{connections.length === 1 ? "" : "s"}
-            </p>
+            {/* noAuth 免授权供应商（opencode/mimo-free/zcode-free）永远没有连接行，
+                「0 connections」是噪音——直接不渲染 */}
+            {!isFreeNoAuth && (
+              <p className="text-text-muted">
+                {connections.length === 1
+                  ? translate("1 connection")
+                  : translate("{n} connections").replace("{n}", String(connections.length))}
+              </p>
+            )}
           </div>
         </div>
       </div>
@@ -1591,7 +1995,7 @@ export default function ProviderDetailPage() {
       {providerInfo.notice?.text && !providerInfo.deprecated && (
         <div className="flex flex-col gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-2 sm:flex-row sm:items-center">
           <span className="material-symbols-outlined text-[16px] text-blue-500 shrink-0">info</span>
-          <p className="min-w-0 flex-1 text-xs leading-relaxed text-blue-600 dark:text-blue-400">{providerInfo.notice.text}</p>
+          <p className="min-w-0 flex-1 text-xs leading-relaxed text-blue-600 dark:text-blue-400">{translate(providerInfo.notice.text)}</p>
           {providerInfo.notice.apiKeyUrl && (
             <a
               href={providerInfo.notice.apiKeyUrl}
@@ -1599,10 +2003,9 @@ export default function ProviderDetailPage() {
               rel="noopener noreferrer"
               className="inline-flex justify-center rounded bg-blue-500 px-2 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-600 sm:py-0.5"
             >
-              Get API Key →
+              {translate("Get API Key →")}
             </a>
           )}
-          <InviteCodeChip code={providerInfo.notice?.inviteCode} />
         </div>
       )}
 
@@ -1697,6 +2100,20 @@ export default function ProviderDetailPage() {
                       Delete Selected ({selectedConnectionIds.length})
                     </Button>
                   )}
+                  {connections.length > 0 && models.length > 1 && (
+                    <Select
+                      value={oneByOneModel}
+                      onChange={(e) => setOneByOneModel(e.target.value)}
+                      disabled={oneByOneRunning}
+                      options={[
+                        { value: ONE_BY_ONE_DEFAULT_MODEL, label: translate("Provider default") },
+                        ...models
+                          .filter((m) => { const k = getModelKind(m); return !k || k === "llm"; })
+                          .map((m) => ({ value: m.id, label: m.name || m.id })),
+                      ]}
+                      selectClassName="!py-2 !text-xs w-44"
+                    />
+                  )}
                   <Button
                     size="sm"
                     variant="secondary"
@@ -1719,6 +2136,20 @@ export default function ProviderDetailPage() {
                   )}
                 </>
               )}
+              {/* Earliest Expiry First toggle */}
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className="text-xs text-text-muted font-medium"
+                  title={translate("Prioritize accounts whose quota (packages, subscription windows, balances) expires soonest")}
+                >
+                  {translate("Earliest Expiry First")}
+                </span>
+                <Toggle
+                  checked={earliestExpiryFirst}
+                  onChange={handleEarliestExpiryToggle}
+                />
+              </div>
+
               {/* Round Robin toggle */}
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs text-text-muted font-medium">{translate("Round Robin")}</span>
@@ -1735,7 +2166,7 @@ export default function ProviderDetailPage() {
                       value={providerStickyLimit}
                       onChange={(e) => handleStickyLimitChange(e.target.value)}
                       placeholder="1"
-                      className="w-14 px-2 py-1 text-xs border border-border rounded-md bg-background focus:outline-none focus:border-primary"
+                      className="w-14 px-2 py-1 text-xs border border-border rounded-md bg-surface focus:outline-none focus:border-primary"
                     />
                   </div>
                 )}
@@ -1767,16 +2198,7 @@ export default function ProviderDetailPage() {
                     <Button size="sm" icon="key" onClick={triggerApiKeyConnection}>
                       {apiKeyConnectionLabel}
                     </Button>
-                    {codeBuddyTransferOn && !codeBuddyCheckinOn && (
-                      <>
-                        <Button size="sm" icon="file_download" variant="secondary" onClick={() => openCbPassword("export")}>
-                          {translate("Export")}
-                        </Button>
-                        <Button size="sm" icon="upload_file" variant="secondary" onClick={() => openCbPassword("import")}>
-                          {translate("Import")}
-                        </Button>
-                      </>
-                    )}
+                    {renderOAuthTransferButtons()}
                     {codeBuddyCheckinOn && renderCbCheckinBlock()}
                   </>
                 ) : (
@@ -1786,6 +2208,7 @@ export default function ProviderDetailPage() {
                         Cookie
                       </Button>
                     )}
+                    {(providerId === "qoder" || providerId === "qoder-cn") && renderQoderCheckinBlock()}
                     {providerId === "codex" && (
                       <Button size="sm" icon="playlist_add" variant="secondary" onClick={() => setShowBulkImportCodex(true)}>
                         {translate("Bulk Add")}
@@ -1796,8 +2219,16 @@ export default function ProviderDetailPage() {
                       icon="add"
                       onClick={triggerAddConnection}
                     >
-                      {isCompatible ? "Add API Key" : (providerId === "iflow" ? "OAuth" : "Add Connection")}
+                      {isCompatible ? "Add API Key" : (providerId === "iflow" ? "OAuth" : providerId === "mimo-desktop" ? (
+                        <span className="inline-flex items-center gap-1">
+                          {translate("Connect with Desktop Session")}
+                          <Tooltip text={translate("Requires sign-in to Xiaomi MiMo Desktop app first")} position="top">
+                            <span className="material-symbols-outlined text-[14px] opacity-60">info</span>
+                          </Tooltip>
+                        </span>
+                      ) : "Add Connection")}
                     </Button>
+                    {renderOAuthTransferButtons()}
                   </>
                 )}
               </div>
@@ -1879,39 +2310,22 @@ export default function ProviderDetailPage() {
                       >
                         {apiKeyConnectionLabel}
                       </Button>
-                      {codeBuddyTransferOn && !codeBuddyCheckinOn && (
-                        <>
-                          <Button
-                            size="sm"
-                            icon="file_download"
-                            variant="secondary"
-                            onClick={() => openCbPassword("export")}
-                            className="w-full sm:w-auto"
-                          >
-                            {translate("Export")}
-                          </Button>
-                          <Button
-                            size="sm"
-                            icon="upload_file"
-                            variant="secondary"
-                            onClick={() => openCbPassword("import")}
-                            className="w-full sm:w-auto"
-                          >
-                            {translate("Import")}
-                          </Button>
-                        </>
-                      )}
+                      {renderOAuthTransferButtons("w-full sm:w-auto")}
                       {codeBuddyCheckinOn && renderCbCheckinBlock()}
+                      {(providerId === "qoder" || providerId === "qoder-cn") && renderQoderCheckinBlock()}
                     </>
                   ) : (
-                    <Button
-                      size="sm"
-                      icon="add"
-                      onClick={triggerAddConnection}
-                      className="w-full sm:w-auto"
-                    >
-                      Add
-                    </Button>
+                    <>
+                      <Button
+                        size="sm"
+                        icon="add"
+                        onClick={triggerAddConnection}
+                        className="w-full sm:w-auto"
+                      >
+                        Add
+                      </Button>
+                      {renderOAuthTransferButtons("w-full sm:w-auto")}
+                    </>
                   )}
                 </div>
               )}
@@ -1932,7 +2346,7 @@ export default function ProviderDetailPage() {
                 value={thinkingMode}
                 onChange={(e) => handleThinkingModeChange(e.target.value)}
                 title="Appends (level) suffix to copied model names"
-                className="rounded-md border border-border bg-background px-2 py-1 text-xs focus:border-primary focus:outline-none"
+                className="rounded-md border border-border bg-surface px-2 py-1 text-xs focus:border-primary focus:outline-none"
               >
                 {providerThinkingLevels.map((opt) => (
                   <option key={opt} value={opt}>{`Thinking: ${opt.charAt(0).toUpperCase() + opt.slice(1)}`}</option>
@@ -1981,9 +2395,39 @@ export default function ProviderDetailPage() {
             );
           })()}
         </div>
-        {!!modelsTestError && (
-          <p className="text-xs text-red-500 mb-3 break-words">{modelsTestError}</p>
-        )}
+        {!!modelsTestError && (() => {
+          const verificationUrl = extractAccountsVerificationUrl(modelsTestError);
+          const displayError = formatModelTestError(modelsTestError);
+          return (
+            <p className="text-xs text-red-500 mb-3 break-words">
+              {displayError}{" "}
+              {verificationUrl && (
+                <>
+                  <a
+                    href={verificationUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={translate("Recommended: open in an incognito window and sign in with the affected account")}
+                    className="text-blue-500 underline hover:text-blue-400"
+                  >
+                    {translate("Verify your account")}
+                  </a>
+                  {" "}
+                  <button
+                    type="button"
+                    onClick={() => copy(verificationUrl, "verification")}
+                    className="text-text-muted underline hover:text-primary"
+                  >
+                    {copied === "verification" ? translate("Copied") : translate("Copy link")}
+                  </button>
+                  <span className="text-text-muted">
+                    {" "}（{translate("Recommended: open in an incognito window and sign in with the affected account")}）
+                  </span>
+                </>
+              )}
+            </p>
+          );
+        })()}
         {renderModelsSection()}
       </Card>
 
@@ -2003,6 +2447,13 @@ export default function ProviderDetailPage() {
           onSuccess={handleOAuthSuccess}
           onClose={() => setShowOAuthModal(false)}
         />
+      ) : providerId === "zed" ? (
+        <ZedAuthModal
+          isOpen={showOAuthModal}
+          providerInfo={providerInfo}
+          onSuccess={handleOAuthSuccess}
+          onClose={() => setShowOAuthModal(false)}
+        />
       ) : providerId === "gitlab" ? (
         <GitLabAuthModal
           isOpen={showOAuthModal}
@@ -2019,8 +2470,9 @@ export default function ProviderDetailPage() {
           onClose={() => setShowOAuthModal(false)}
         />
       )}
-      {providerId === "xiaomi-mimo" && (
+      {(providerId === "xiaomi-mimo" || providerId === "mimo-desktop") && (
         <XiaomiMimoAuthModal
+          provider={providerId}
           isOpen={showXiaomiMimoModal}
           onSuccess={handleOAuthSuccess}
           onClose={() => setShowXiaomiMimoModal(false)}
@@ -2046,7 +2498,7 @@ export default function ProviderDetailPage() {
         error={addConnectionError}
         existingNames={connections.map((c) => c.name).filter(Boolean)}
         onSave={handleSaveApiKey}
-        onBulkDone={fetchConnections}
+        onBulkDone={refreshAfterConnectionChange}
         onClose={() => {
           setAddConnectionError("");
           setShowAddApiKeyModal(false);
@@ -2073,8 +2525,8 @@ export default function ProviderDetailPage() {
           isOpen={showAddCustomModel}
           providerAlias={providerStorageAlias}
           providerDisplayAlias={providerDisplayAlias}
-          onSave={async (modelId) => {
-            await handleAddCustomModel(modelId, "llm", providerStorageAlias);
+          onSave={async (modelId, caps, modelType, transport) => {
+            await handleAddCustomModel(modelId, modelType || "llm", providerStorageAlias, caps || {}, undefined, transport);
             setShowAddCustomModel(false);
           }}
           onClose={() => setShowAddCustomModel(false)}
@@ -2098,6 +2550,17 @@ export default function ProviderDetailPage() {
         />
       )}
 
+      {/* Encrypted OAuth credentials transfer (all OAuth providers) */}
+      <OAuthTransferModal
+        isOpen={showOAuthTransfer}
+        mode={oauthTransferMode}
+        provider={providerId}
+        providerName={providerInfo?.name}
+        dashboardPassword={oauthTransferPassword}
+        onClose={() => { setShowOAuthTransfer(false); setOauthTransferPassword(""); }}
+        onSuccess={fetchConnections}
+      />
+
       {/* cbcn export/import password re-auth */}
       <Modal
         isOpen={cbPw.open}
@@ -2115,22 +2578,19 @@ export default function ProviderDetailPage() {
             <Button
               variant="primary"
               onClick={handleCbPwConfirm}
-              disabled={!cbPw.value}
+              disabled={!cbPw.value || cbPwVerifying}
             >
-              {translate("Confirm")}
+              {cbPwVerifying ? translate("Verifying...") : translate("Confirm")}
             </Button>
           </>
         }
       >
         <p className="text-text-muted mb-3 text-sm">
-          {translate(
-            cbPw.action === "export"
-              ? "Enter your current password to export CodeBuddy CN accounts."
-              : "Enter your current password to import CodeBuddy CN accounts."
-          )}
+          {translate("Enter your dashboard password to export OAuth accounts (the file will be encrypted with the transfer passphrase you pick next).")}
         </p>
         <Input
           type="password"
+          reveal
           autoFocus
           value={cbPw.value}
           onChange={(e) => setCbPw((p) => ({ ...p, value: e.target.value }))}
@@ -2139,6 +2599,7 @@ export default function ProviderDetailPage() {
           }}
           placeholder={translate("Password")}
         />
+        {cbPwError && <p className="text-xs text-red-500 mt-2">{cbPwError}</p>}
       </Modal>
 
       {/* AG Risk Confirmation Modal */}

@@ -3,9 +3,12 @@ import "open-sse/index.js";
 
 import { getProviderConnectionById, updateProviderConnection } from "@/lib/localDb";
 import { getUsageForProvider } from "open-sse/services/usage.js";
+import { extractEarliestPackageExpiry } from "open-sse/services/usage/expiryExtractor.js";
+import { isUnrecoverableRefreshError } from "open-sse/services/tokenRefresh.js";
+import { markConnectionNeedsReauth, NEEDS_REAUTH_MESSAGE } from "@/sse/services/tokenRefresh.js";
 import { getExecutor } from "open-sse/executors/index.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
-import { USAGE_APIKEY_PROVIDERS } from "@/shared/constants/providers";
+import { USAGE_APIKEY_PROVIDERS, USAGE_COOKIE_PROVIDERS } from "@/shared/constants/providers";
 
 // Detect auth-expired messages returned by usage providers instead of throwing
 const AUTH_EXPIRED_PATTERNS = ["expired", "authentication", "unauthorized", "401", "re-authorize"];
@@ -21,6 +24,11 @@ function isAuthExpiredMessage(usage) {
  * @returns Promise<{ connection, refreshed: boolean }>
  */
 export async function refreshAndUpdateCredentials(connection, force = false, proxyOptions = null) {
+  // 刷新前重读 DB 里的最新凭据：OpenAI 每次刷新都会轮换 refresh token，
+  // 拿快照旧值再去刷新属于"复用"，会吊销整个 session（账号被登出）——上游 0bc7f86e。
+  const latest = connection.id ? await getProviderConnectionById(connection.id) : null;
+  if (latest) connection = latest;
+
   const executor = getExecutor(connection.provider);
 
   // Build credentials object from connection
@@ -46,6 +54,18 @@ export async function refreshAndUpdateCredentials(connection, force = false, pro
 
   // Use executor's refreshCredentials method (with optional proxy)
   const refreshResult = await executor.refreshCredentials(credentials, console, proxyOptions);
+
+  // refresh token 已失效/被复用——整个 token 族已被吊销，绝不能拿死 token 继续用。
+  if (refreshResult && isUnrecoverableRefreshError(refreshResult)) {
+    // Usage 轮询是发现死账号的另一条路（请求路径由 checkAndRefreshToken 标记）。
+    // 标记 + 冷却在这里同样要落库，否则账号继续留在轮换里每 2 分钟被重试一次。
+    await markConnectionNeedsReauth(connection.id, {
+      provider: connection.provider,
+      reason: refreshResult,
+      log: console,
+    });
+    throw new Error(NEEDS_REAUTH_MESSAGE);
+  }
 
   if (!refreshResult) {
     // Refresh failed but we still have an accessToken — try with existing token
@@ -120,18 +140,32 @@ export async function refreshAndUpdateCredentials(connection, force = false, pro
  * GET /api/usage/[connectionId] - Get usage data for a specific connection
  */
 export async function GET(request, { params }) {
+  const { connectionId } = await params;
+  const force = new URL(request.url).searchParams.get("force") === "1";
+
+  // Get connection from database
   let connection;
   try {
-    const { connectionId } = await params;
-    const force = new URL(request.url).searchParams.get("force") === "1";
-
-
-    // Get connection from database
     connection = await getProviderConnectionById(connectionId);
-    if (!connection) {
-      return Response.json({ error: "Connection not found" }, { status: 404 });
-    }
+  } catch (error) {
+    console.warn(`[Usage] unknown: ${error.message}`);
+    return Response.json({ error: error.message }, { status: 500 });
+  }
+  if (!connection) {
+    return Response.json({ error: "Connection not found" }, { status: 404 });
+  }
+  const { status, body } = await computeConnectionUsage(connection, { force });
+  return Response.json(body, status === 200 ? undefined : { status });
+}
 
+/**
+ * Usage for one connection (refresh credentials if needed → provider usage API →
+ * persist earliest package expiry). Shared by GET /api/usage/[connectionId] and the
+ * aggregated GET /api/usage/quotas. Returns { status, body } — body is exactly what
+ * the per-connection endpoint has always returned.
+ */
+export async function computeConnectionUsage(connection, { force = false } = {}) {
+  try {
     // Allow OAuth connections, plus whitelisted apikey providers (glm/minimax/kiro/...)
     // Kiro's headless api-key flow persists authType "api_key" (underscore) while
     // generic apikey providers persist "apikey" — accept both spellings here.
@@ -140,9 +174,11 @@ export async function GET(request, { params }) {
       connection.authType === "apikey" || connection.authType === "api_key";
     const isApikeyEligible =
       isApikeyAuth && USAGE_APIKEY_PROVIDERS.includes(connection.provider);
+    const isCookieEligible =
+      connection.authType === "cookie" && USAGE_COOKIE_PROVIDERS?.includes(connection.provider);
 
-    if (!isOAuth && !isApikeyEligible) {
-      return Response.json({ message: "Usage not available for this connection" });
+    if (!isOAuth && !isApikeyEligible && !isCookieEligible) {
+      return { status: 200, body: { message: "Usage not available for this connection" } };
     }
 
     // Resolve connection proxy config; force strictProxy=false so quota/refresh fall back to direct on failure
@@ -162,9 +198,7 @@ export async function GET(request, { params }) {
         connection = result.connection;
       } catch (refreshError) {
         console.error("[Usage API] Credential refresh failed:", refreshError);
-        return Response.json({
-          error: `Credential refresh failed: ${refreshError.message}`
-        }, { status: 401 });
+        return { status: 401, body: { error: `Credential refresh failed: ${refreshError.message}` } };
       }
     }
 
@@ -183,10 +217,56 @@ export async function GET(request, { params }) {
       }
     }
 
-    return Response.json(usage);
+    // Persist earliest available package expiry for expire-first routing
+    try {
+      const expiryInfo = extractEarliestPackageExpiry(usage);
+      if (expiryInfo) {
+        await updateProviderConnection(connection.id, {
+          earliestPackageExpiry: expiryInfo.expiry || null,
+          earliestPackageName: expiryInfo.name || null,
+          earliestPackageRemaining:
+            typeof expiryInfo.remainingPercentage === "number" ? expiryInfo.remainingPercentage : null,
+          quotaCheckedAt: new Date().toISOString(),
+        });
+      } else if (usage && usage.quotas) {
+        await updateProviderConnection(connection.id, {
+          earliestPackageExpiry: null,
+          earliestPackageName: null,
+          earliestPackageRemaining: null,
+          quotaCheckedAt: new Date().toISOString(),
+        });
+      }
+    } catch (e) {
+      console.warn(`[Usage API] Failed to update package expiry for ${connection.id}:`, e.message);
+    }
+
+    // 同名认领（2026-10-14 定版）：CD 推送的余额快照（river / 小米 MiMo / ModelScope
+    // 等「余额只在网页会话侧」的供应商）归到连接卡展示——数字已在本地 _meta 快照，
+    // 无需任何凭据。连接改名（编辑连接 → 名称）与 CD 账号别名同名即认领；未认领的
+    // 给指路文案（这些供应商没有原生 usage handler，不指路就会漏出
+    // "Usage API not implemented for <provider>"——river 已因此被修过一次，
+    // modelscope 同设计，一并纳入）。
+    try {
+      const { buildExternalConnectionRows, findClaimedExternalRow } = await import("@/lib/externalQuota");
+      const claimed = findClaimedExternalRow(connection, await buildExternalConnectionRows());
+      const rows = claimed?.quota?.quotas || [];
+      const PUSH_ONLY_USAGE_PROVIDERS = new Set(["river", "modelscope", "longcat"]);
+      if (rows.length) {
+        const extQuotas = Object.fromEntries(rows.map((r) => [r.name, r]));
+        if (usage && usage.quotas && Object.keys(usage.quotas).length) {
+          usage = { ...usage, quotas: { ...usage.quotas, ...extQuotas } };   // 原生行 + 推送余额行
+        } else {
+          usage = { quotas: extQuotas, plan: claimed.quota.plan ?? usage?.plan ?? null };
+        }
+      } else if (PUSH_ONLY_USAGE_PROVIDERS.has(connection.provider) && usage && usage.message) {
+        usage = { message: "No pushed balance matched this connection — set the CreditDaddy account alias to this connection's name (same name claims the card)" };
+      }
+    } catch { /* 认领读取失败保留原 usage */ }
+
+    return { status: 200, body: usage };
   } catch (error) {
     const provider = connection?.provider ?? "unknown";
     console.warn(`[Usage] ${provider}: ${error.message}`);
-    return Response.json({ error: error.message }, { status: 500 });
+    return { status: 500, body: { error: error.message } };
   }
 }

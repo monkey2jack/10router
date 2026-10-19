@@ -4,6 +4,7 @@ import { trackPendingRequest, appendRequestLog } from "@/lib/usageDb.js";
 import { extractUsage, mergeUsage, hasValidUsage, estimateUsage, logUsage, addBufferToUsage, filterUsageForFormat, COLORS } from "./usageTracking.js";
 import { parseSSELine, hasValuableContent, fixInvalidId, formatSSE } from "./streamHelpers.js";
 import { getOpenAIResponsesEventName, isOpenAIResponsesTerminalEvent, formatIncompleteOpenAIResponsesStreamFailure } from "./responsesStreamHelpers.js";
+import { PENDING_COMPLETION_FLUSH_MS } from "../config/runtimeConfig.js";
 import { dbg, isDebugEnabled } from "./debugLog.js";
 
 import { SSE_DONE, SSE_HEADERS, SSE_HEADERS_NO_BUFFER } from "./sseConstants.js";
@@ -59,13 +60,32 @@ export function createSSEStream(options = {}) {
   const decoder = new TextDecoder("utf-8", { fatal: false });
 
   const state = mode === STREAM_MODE.TRANSLATE
-    ? { ...initState(sourceFormat), provider, toolNameMap, customToolNames: new Set(customToolNames || []), model }
+    ? { ...initState(sourceFormat), provider, toolNameMap, customToolNames: new Set(customToolNames || []), model,
+        // 本流的upstream格式。响应翻译器可能被直接命中（target === 注册源），
+        // 也可能作为 pivot 的第二跳——终态 null chunk 时 pivot 会丢弃第一跳的
+        // 返回，需要延迟收尾事件的翻译器知道自己在哪种情形里。缺省=未知，不延迟。
+        targetFormat }
     : null;
 
   let totalContentLength = 0;
   let accumulatedContent = "";
   let accumulatedThinking = "";
   let ttftAt = null;
+  let streamCompleted = false;
+  // Set when flush() has to manufacture a terminator the upstream never sent.
+  // The client still needs the sentinel — OpenClaw hangs until timeout without
+  // one — but this is what an upstream proxy cutting the connection mid-answer
+  // looks like, and it must not be recorded as a clean `status: "success"` with
+  // estimated (not real) usage. The stall watchdog only fires on byte gaps, not
+  // on an early clean FIN, so flush() is the only place that can tell.
+  let endedWithoutTerminal = false;
+  // A `data:` line that looked like payload but would not parse is dropped by
+  // the loops below. That is deliberate for HTML error pages injected mid
+  // stream, but the same swallow hides genuine corruption: the client gets a
+  // shorter answer than the model produced and the request still books as a
+  // clean success. Counting them makes the loss visible without changing the
+  // success semantics — one bad line is not proof the stream was cut.
+  let parseFailures = 0;
   let sseLineCount = 0;
   let sseEmittedCount = 0;
   const eventTypeCounts = {};
@@ -75,6 +95,79 @@ export function createSSEStream(options = {}) {
   let openAIResponsesTerminalSeen = false;
   let openAIResponsesDoneSent = false;
   let streamDoneSent = false;  // track duplicate [DONE] across transform + flush
+
+  // chat→responses 直连路由:finish_reason 后等 usage 尾部 chunk 而延迟的
+  // response.completed(见 state.completionPending),由 watchdog 兜底补发。
+  let completionFlushTimer = null;
+
+  const clearCompletionFlushTimer = () => {
+    if (completionFlushTimer) {
+      clearTimeout(completionFlushTimer);
+      completionFlushTimer = null;
+    }
+  };
+
+  // chat→responses 直连路由(openai:openai-responses)的完成延迟只在
+  // target=OPENAI / source=OPENAI_RESPONSES 时成立。
+  const defersResponsesCompletion = () =>
+    mode === STREAM_MODE.TRANSLATE &&
+    targetFormat === FORMATS.OPENAI &&
+    sourceFormat === FORMATS.OPENAI_RESPONSES &&
+    state?.completionPending === true;
+
+  // 立即补发被延迟的 response.completed 系列事件 —— 在 [DONE] 到达、或
+  // watchdog 放弃等待 usage 尾部 chunk 时调用。sendCompleted 按 completedSent
+  // 去重,先到的路径赢、另一条变为空转,不会双发。
+  const flushDeferredCompletion = (controller) => {
+    clearCompletionFlushTimer();
+    if (!defersResponsesCompletion()) return;
+    const flushed = translateResponse(targetFormat, sourceFormat, null, state);
+    for (const item of flushed || []) {
+      if (item === null || item === undefined) continue;
+      const output = formatSSE(item, sourceFormat);
+      reqLogger?.appendConvertedChunk?.(output);
+      controller.enqueue(sharedEncoder.encode(output));
+      sseEmittedCount++;
+    }
+  };
+
+  // 完成行(buildRequestDetail 落 status:"success" 的那一次)只允许发一次:
+  // 早发路径(见下)与 flush() 谁先到谁赢,后到的变空转。两条路径都可能在
+  // 同一轮里跑到——[DONE] 之后客户端立刻断开,cancel() 不会让 flush() 执行,
+  // 所以 [DONE] 处必须自己收尾。
+  const finishStream = () => {
+    if (streamCompleted) return;
+    streamCompleted = true;
+
+    // Translate 模式下 usage 记在 state 上,且尾部 usage chunk 已经把它补全
+    // (实现刻意保留原始值供日志)。注意用 provider 而非 state.provider:后者
+    // 可能是 translator 的中间格式名,落库该记真实上游。
+    const finalUsage = mode === STREAM_MODE.PASSTHROUGH ? usage : state?.usage;
+    if (!hasValidUsage(finalUsage) && totalContentLength > 0) {
+      const estimated = estimateUsage(body, totalContentLength, mode === STREAM_MODE.PASSTHROUGH ? FORMATS.OPENAI : sourceFormat);
+      if (mode === STREAM_MODE.PASSTHROUGH) usage = estimated;
+      else state.usage = estimated;
+    }
+
+    const settledUsage = mode === STREAM_MODE.PASSTHROUGH ? usage : state?.usage;
+    if (hasValidUsage(settledUsage)) {
+      logUsage(provider || targetFormat, settledUsage, model, connectionId, apiKey);
+    } else {
+      appendRequestLog({ model, provider, connectionId, tokens: null, status: "200 OK" }).catch(() => { });
+    }
+
+    if (onStreamComplete) {
+      onStreamComplete({
+        content: accumulatedContent,
+        thinking: accumulatedThinking,
+        // Additive: consumers that ignore these behave as before. `streaming`
+        // rows carry them so a truncated stream is not booked as a clean
+        // success, and so dropped content is not invisible.
+        incomplete: endedWithoutTerminal,
+        parseFailures,
+      }, settledUsage, ttftAt);
+    }
+  };
 
   return new TransformStream({
     transform(chunk, controller) {
@@ -105,6 +198,15 @@ export function createSSEStream(options = {}) {
         if (mode === STREAM_MODE.PASSTHROUGH) {
           let output;
           let injectedUsage = false;
+
+          if (trimmed === "data: [DONE]" || trimmed === "data:[DONE]") {
+            output = "data: [DONE]\n\n";
+            streamDoneSent = true;
+            reqLogger?.appendConvertedChunk?.(output);
+            controller.enqueue(sharedEncoder.encode(output));
+            finishStream();
+            continue;
+          }
 
           if (trimmed.startsWith("data:") && trimmed.slice(5).trim() !== "[DONE]") {
             try {
@@ -202,9 +304,13 @@ export function createSSEStream(options = {}) {
                 injectedUsage = true;
               }
             } catch {
-              // Skip non-JSON data lines silently — don't forward garbage to clients.
-              // Upstream providers sometimes return plain-text errors (HTML, rate-limit
-              // messages) in the SSE stream that would break downstream JSON decoders.
+              // Skip non-JSON data lines — don't forward garbage to clients.
+              // Upstream providers sometimes return plain-text errors (HTML,
+              // rate-limit messages) in the SSE stream that would break
+              // downstream JSON decoders. But do count them: the same swallow
+              // hides mid-stream corruption of real content, and the client
+              // then gets a shorter answer with no signal at all.
+              parseFailures++;
               continue;
             }
           }
@@ -226,7 +332,13 @@ export function createSSEStream(options = {}) {
         if (!trimmed) continue;
 
         const parsed = parseSSELine(trimmed, targetFormat);
-        if (!parsed) continue;
+        if (!parsed) {
+          // `null` also covers plain non-`data:` lines (comments, event names),
+          // which are legitimately ignorable. Only a `data:` line that would
+          // not parse is a lost chunk — see the note on `parseFailures`.
+          if (trimmed.startsWith("data:")) parseFailures++;
+          continue;
+        }
 
         // Responses API same-format passthrough: preserve event framing + track terminal state
         const isOpenAIResponsesStream = targetFormat === FORMATS.OPENAI_RESPONSES;
@@ -242,6 +354,10 @@ export function createSSEStream(options = {}) {
         // For Ollama: done=true is the final chunk with finish_reason/usage, must translate
         // For other formats: done=true is the [DONE] sentinel, skip
         if (parsed && parsed.done && targetFormat !== FORMATS.OLLAMA) {
+          // chat→responses 直连:[DONE] 到达时不再等尾部 usage chunk,
+          // 立即补发被延迟的 response.completed 并取消 watchdog。
+          flushDeferredCompletion(controller);
+
           // Synthesize response.failed if the Responses stream never sent a terminal event
           if (keepsOpenAIResponsesFormat && !openAIResponsesTerminalSeen) {
             const failedOutput = formatIncompleteOpenAIResponsesStreamFailure();
@@ -258,6 +374,11 @@ export function createSSEStream(options = {}) {
           }
           streamDoneSent = true;
           if (keepsOpenAIResponsesFormat) openAIResponsesDoneSent = true;
+          // [DONE] 之后客户端(OpenAI SDK / Hermes / 各类 card sidecar)会立刻
+          // 关闭连接,cancel() 不会触发 flush()——不在这里收尾,这一轮就永远
+          // 停在占位行上,再被 cancel 的 abort 路径改写成 status:"error"、
+          // 0/0 token,尽管答复已完整送达(issue #48)。收尾必须由 [DONE] 自己完成。
+          finishStream();
           continue;
         }
 
@@ -352,9 +473,29 @@ export function createSSEStream(options = {}) {
           }
         }
       }
+
+      // 兜底 watchdog:上游可能在 finish_reason 后 stall(无尾部 usage chunk、
+      // 无 [DONE]、连接不断开),被延迟的 response.completed 会无限挂起。
+      if (completionFlushTimer && !defersResponsesCompletion()) {
+        // 正常路径(带 usage 的 finish/尾部 usage chunk)已即时补发,取消 watchdog。
+        clearCompletionFlushTimer();
+      } else if (!completionFlushTimer && defersResponsesCompletion()) {
+        completionFlushTimer = setTimeout(() => {
+          completionFlushTimer = null;
+          if (!defersResponsesCompletion()) return;
+          try {
+            flushDeferredCompletion(controller);
+          } catch {
+            // 控制器可能已被关闭/取消(客户端断开),补发失败无需处理。
+          }
+        }, PENDING_COMPLETION_FLUSH_MS);
+        // 兜底定时器不该拖住 Node 进程退出。
+        completionFlushTimer.unref?.();
+      }
     },
 
     flush(controller) {
+      clearCompletionFlushTimer();
       const evtSummary = Object.entries(eventTypeCounts).map(([k, v]) => `${k}=${v}`).join(",") || "none";
       dbg("SSE", `flush | provider=${provider} | model=${model} | recvLines=${sseLineCount} | emitted=${sseEmittedCount} | events=[${evtSummary}]`);
       trackPendingRequest(model, provider, connectionId, false);
@@ -372,16 +513,6 @@ export function createSSEStream(options = {}) {
             controller.enqueue(sharedEncoder.encode(output));
           }
 
-          if (!hasValidUsage(usage) && totalContentLength > 0) {
-            usage = estimateUsage(body, totalContentLength, FORMATS.OPENAI);
-          }
-
-          if (hasValidUsage(usage)) {
-            logUsage(provider, usage, model, connectionId, apiKey);
-          } else {
-            appendRequestLog({ model, provider, connectionId, tokens: null, status: "200 OK" }).catch(() => { });
-          }
-          
           // IMPORTANT: In passthrough mode we still must terminate the SSE stream.
           // Some clients (e.g. OpenClaw) expect the OpenAI-style sentinel:
           //   data: [DONE]\n\n
@@ -389,17 +520,17 @@ export function createSSEStream(options = {}) {
           // Gemini-family clients (Antigravity, Vertex, Gemini) reject this sentinel with 400 syntax errors.
           const isGeminiFamily = provider === "antigravity" || provider === "gemini" || provider === "vertex";
           if (!streamDoneSent && !isGeminiFamily) {
+            // We are the ones inventing the terminator, so the upstream never
+            // finished. Say so — see the note on `endedWithoutTerminal`. Gemini
+            // family is exempt: it has no [DONE] sentinel, so `!streamDoneSent`
+            // is always true there and would flag every healthy stream.
+            endedWithoutTerminal = true;
             const doneOutput = "data: [DONE]\n\n";
             reqLogger?.appendConvertedChunk?.(doneOutput);
             controller.enqueue(sharedEncoder.encode(doneOutput));
           }
 
-          if (onStreamComplete) {
-            onStreamComplete({
-              content: accumulatedContent,
-              thinking: accumulatedThinking
-            }, usage, ttftAt);
-          }
+          finishStream();
           return;
         }
 
@@ -447,6 +578,10 @@ export function createSSEStream(options = {}) {
         // Synthesize response.failed if a Responses passthrough stream never reached a terminal event
         const keepsOpenAIResponsesFormat = targetFormat === FORMATS.OPENAI_RESPONSES && sourceFormat === FORMATS.OPENAI_RESPONSES;
         if (keepsOpenAIResponsesFormat && !openAIResponsesTerminalSeen) {
+          // Same situation as the passthrough case above: we are the ones
+          // inventing the terminal. The client is told `response.failed`, so
+          // booking this as `status: "success"` made the two disagree.
+          endedWithoutTerminal = true;
           const failedOutput = formatIncompleteOpenAIResponsesStreamFailure();
           reqLogger?.appendConvertedChunk?.(failedOutput);
           controller.enqueue(sharedEncoder.encode(failedOutput));
@@ -461,23 +596,18 @@ export function createSSEStream(options = {}) {
           streamDoneSent = true;
         }
 
-        if (!hasValidUsage(state?.usage) && totalContentLength > 0) {
-          state.usage = estimateUsage(body, totalContentLength, sourceFormat);
-        }
-
-        if (hasValidUsage(state?.usage)) {
-          logUsage(state.provider || targetFormat, state.usage, model, connectionId, apiKey);
-        } else {
-          appendRequestLog({ model, provider, connectionId, tokens: null, status: "200 OK" }).catch(() => { });
-        }
-        
-        if (onStreamComplete) {
-          onStreamComplete({
-            content: accumulatedContent,
-            thinking: accumulatedThinking
-          }, state?.usage, ttftAt);
-        }
+        finishStream();
       } catch (error) {
+        // Never swallow a flush failure: if we bail before finishStream the
+        // request-detail row is left at status "streaming" forever, or later
+        // rewritten as an error even though bytes were delivered. Finalize what
+        // we accumulated and mark it incomplete instead.
+        endedWithoutTerminal = true;
+        try {
+          finishStream();
+        } catch {
+          /* second failure is not recoverable; leave the row as it is */
+        }
         console.log("Error in flush:", error);
       }
     }

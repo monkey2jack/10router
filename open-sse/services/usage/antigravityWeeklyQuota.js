@@ -176,6 +176,10 @@ function parseBucket(group, bucket, familyName, windowKey, index) {
     resetAt,
     remainingPercentage: isUnlimited ? 100 : remainingFraction * 100,
     unlimited: isUnlimited,
+    // 5h / Weekly 都是滚动窗口——resetAt 未到时不算「耗尽」（否则被
+    // 「隐藏零余额」视图开关整卡藏掉，见 isConnectionDepleted 的 recurring
+    // 豁免分支），等窗口回血自然回来。
+    recurring: true,
     // used/total are a synthetic 0–100 percent scale (the RPC reports only a
     // fraction, not request counts) — the UI must not render them as counts.
     percentScale: true,

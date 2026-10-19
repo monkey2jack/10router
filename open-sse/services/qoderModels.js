@@ -27,6 +27,10 @@ import {
   QODER_CHAT_BASE_ALT,
   QODER_JOB_TOKEN_EXCHANGE_URL,
   QODER_USERINFO_URL,
+  QODER_CN_MODEL_LIST_URL,
+  QODER_CN_CHAT_BASE_ALT,
+  QODER_CN_JOB_TOKEN_EXCHANGE_URL,
+  QODER_CN_USERINFO_URL,
   QODER_IDE_VERSION,
   QODER_CLIENT_TYPE,
 } from "../shared/qoder/constants.js";
@@ -63,9 +67,10 @@ const inflight = new Map();
  * Exchange a Qoder PAT (pt-...) for a short-lived job token (jt-...).
  * This endpoint is plain JSON POST — NOT COSY-signed.
  */
-async function exchangeJobToken(pat, proxyOptions = null, signal = null) {
+async function exchangeJobToken(pat, proxyOptions = null, signal = null, deployment = "global") {
+  const exchangeUrl = deployment === "cn" ? QODER_CN_JOB_TOKEN_EXCHANGE_URL : QODER_JOB_TOKEN_EXCHANGE_URL;
   const res = await proxyAwareFetch(
-    QODER_JOB_TOKEN_EXCHANGE_URL,
+    exchangeUrl,
     {
       method: "POST",
       headers: {
@@ -101,10 +106,10 @@ async function exchangeJobToken(pat, proxyOptions = null, signal = null) {
  * Resolve the Qoder userId for a job token (needed for COSY signing).
  * Returns "" on any failure — callers fall back to the stored userId.
  */
-async function fetchUserIdForJobToken(jobToken, proxyOptions = null, signal = null) {
+async function fetchUserIdForJobToken(jobToken, proxyOptions = null, signal = null, deployment = "global") {
   try {
     const res = await proxyAwareFetch(
-      QODER_USERINFO_URL,
+      deployment === "cn" ? QODER_CN_USERINFO_URL : QODER_USERINFO_URL,
       {
         method: "GET",
         headers: {
@@ -127,14 +132,15 @@ async function fetchUserIdForJobToken(jobToken, proxyOptions = null, signal = nu
 /**
  * Resolve a PAT to a job-token credential, cached per-PAT.
  */
-async function resolvePatCredential(pat, proxyOptions = null, signal = null) {
-  const cached = patJobCache.get(pat);
+async function resolvePatCredential(pat, proxyOptions = null, signal = null, deployment = "global") {
+  const cacheId = `${deployment}:${pat}`;
+  const cached = patJobCache.get(cacheId);
   if (cached && cached.expiresAt - Date.now() > PAT_REFRESH_BUFFER_MS) return cached;
 
-  const { jobToken, expiresAt } = await exchangeJobToken(pat, proxyOptions, signal);
-  const userId = await fetchUserIdForJobToken(jobToken, proxyOptions, signal);
+  const { jobToken, expiresAt } = await exchangeJobToken(pat, proxyOptions, signal, deployment);
+  const userId = await fetchUserIdForJobToken(jobToken, proxyOptions, signal, deployment);
   const resolved = { accessToken: jobToken, userId, expiresAt };
-  patJobCache.set(pat, resolved);
+  patJobCache.set(cacheId, resolved);
   return resolved;
 }
 
@@ -146,7 +152,8 @@ async function resolvePatCredential(pat, proxyOptions = null, signal = null) {
 export async function resolveQoderCredentials(credentials, proxyOptions = null, signal = null) {
   const raw = credentials?.apiKey || credentials?.accessToken;
   if (isQoderPat(raw)) {
-    const resolved = await resolvePatCredential(raw, proxyOptions, signal);
+    const deployment = credentials?.provider === "qoder-cn" ? "cn" : "global";
+    const resolved = await resolvePatCredential(raw, proxyOptions, signal, deployment);
     return {
       ...credentials,
       accessToken: resolved.accessToken,
@@ -169,7 +176,8 @@ export async function resolveQoderCredentials(credentials, proxyOptions = null, 
 function cacheKey(credentials) {
   const psd = credentials?.providerSpecificData || {};
   const seed = psd.userId || credentials?.refreshToken || credentials?.accessToken || "anonymous";
-  return createHash("sha256").update(`qoder:${seed}`).digest("hex");
+  const deployment = credentials?.provider === "qoder-cn" ? "cn" : "global";
+  return createHash("sha256").update(`qoder:${deployment}:${seed}`).digest("hex");
 }
 
 /**
@@ -196,11 +204,12 @@ async function fetchQoderCatalogRaw(credentials, signal, proxyOptions = null) {
   const creds = cosyCredsFromConnection(credentials);
   if (!creds.userId || !creds.authToken) return null;
 
-  // Job-token traffic is rejected by api3 ("Login expired" 403) — the
-  // official qodercli serves it from api2 instead.
+  const isCn = credentials?.provider === "qoder-cn";
+  const primaryModelListUrl = isCn ? QODER_CN_MODEL_LIST_URL : QODER_MODEL_LIST_URL;
+  const altModelListBase = isCn ? QODER_CN_CHAT_BASE_ALT : QODER_CHAT_BASE_ALT;
   const modelListUrl = String(creds.authToken).startsWith("jt-")
-    ? `${QODER_CHAT_BASE_ALT}/algo/api/v2/model/list`
-    : QODER_MODEL_LIST_URL;
+    ? `${altModelListBase}/algo/api/v2/model/list`
+    : primaryModelListUrl;
 
   const headers = {
     Accept: "application/json",
@@ -266,6 +275,15 @@ async function fetchQoderCatalogRaw(credentials, signal, proxyOptions = null) {
       isReasoning: !!entry.is_reasoning,
       maxOutputTokens: Number(entry.max_output_tokens) || 0,
       description: entry.description || "",
+      // Credit pricing, server-published and promo-aware: price_factor is the
+      // CURRENT multiplier (Qwen3.8-Flash sits at 0 during its free window,
+      // original_price_factor holds the 0.1 it reverts to), and `promotion`
+      // carries the off-peak window (22:00–08:00 Asia/Singapore) with zh/en
+      // badge copy. The dashboard renders both via the shared ModelRow
+      // multiplier badge + OffPeakBanner; zero client-side price math — the
+      // server rewrites price_factor itself when a window opens or closes.
+      rateMultiplier: typeof entry.price_factor === "number" ? entry.price_factor : null,
+      promotion: entry.promotion && typeof entry.promotion === "object" ? entry.promotion : null,
     });
   }
 

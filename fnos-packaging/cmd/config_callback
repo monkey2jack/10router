@@ -1,3 +1,40 @@
 #!/bin/bash
-# 配置后置
+# 配置后置：App Center → 10Router → 应用设置 保存时运行（issue #33 找回密码入口）。
+# wizard/config 的字段值以裸环境变量传入（config 生命周期无 wizard_ 前缀）。
+# 填了新密码 → 写进 ${DATA_DIR}/reset-password（0600）。服务在下一次登录尝试或下一次
+# 启动时读取它、设为仪表盘密码并立即删除文件（src/lib/auth/passwordReset.js）。
+# 留空 → 什么都不做（不是「清空密码」：那需要手动放一个空的 reset-password 文件）。
+set -uo pipefail
+
+APP_NAME="${TRIM_APPNAME:-10router}"
+APP_DIR="${TRIM_APPDEST:-/var/apps/${APP_NAME}}"
+# 数据目录: 优先 TRIM_PKGVAR (fnOS 注入); 兜底从 APP_DIR 提取卷推导, 不写死 /vol4
+APP_VOL=""
+if [ -n "${TRIM_PKGVAR:-}" ]; then
+    DATA_DIR="${TRIM_PKGVAR}"
+else
+    if [ -L "${APP_DIR}/home" ]; then
+        APP_HOME="$(readlink -f "${APP_DIR}/home")"
+        APP_VOL="$(printf '%s' "${APP_HOME}" | sed -n 's#^\(/vol[^/]*\)/.*#\1#p')"
+    fi
+    if [ -z "${APP_VOL}" ]; then
+        APP_VOL="$(printf '%s' "${APP_DIR}" | sed -n 's#^\(/vol[^/]*\)/.*#\1#p')"
+    fi
+    if [ -n "${APP_VOL}" ]; then
+        DATA_DIR="${APP_VOL}/@appdata/${APP_NAME}"
+    else
+        DATA_DIR="${APP_DIR}/var"
+    fi
+fi
+LOG="${DATA_DIR}/install.log"
+mkdir -p "${DATA_DIR}"
+
+NEW_PW="${reset_dashboard_password:-}"
+if [ -n "${NEW_PW}" ]; then
+    ( umask 077; printf '%s
+' "${NEW_PW}" > "${DATA_DIR}/reset-password" )
+    # 只记事件，不记密码本身
+    echo "[$(date '+%F %T')] dashboard password reset requested from App Center settings" >> "${LOG}"
+fi
+
 exit 0

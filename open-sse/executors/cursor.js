@@ -95,13 +95,18 @@ function encodeHistoryMessage(message) {
   return agentMessage(1, agentMessage(1, agentMessage(1, text)));
 }
 
-function buildAgentRunFrame(messages, model) {
-  const system = messages
+function buildAgentRunFrame(messages, model, reasoningEffort = null) {
+  const cleanMessages = (messages || []).filter((msg) => {
+    if (!msg) return false;
+    const text = textFromContent(msg.content);
+    return Boolean(text || msg.tool_calls?.length || msg.role === "system");
+  });
+  const system = cleanMessages
     .filter((message) => message?.role === "system")
     .map((message) => textFromContent(message.content))
     .filter(Boolean)
     .join("\n\n");
-  const chatMessages = messages.filter((message) => message?.role !== "system");
+  const chatMessages = cleanMessages.filter((message) => message?.role !== "system");
   const currentIndex = [...chatMessages].map((message) => message?.role).lastIndexOf("user");
   const current = currentIndex >= 0 ? chatMessages[currentIndex] : chatMessages.at(-1);
   const history = chatMessages
@@ -123,7 +128,11 @@ function buildAgentRunFrame(messages, model) {
     ...(conversationHistory ? [agentMessage(7, conversationHistory)] : []),
   );
   const conversationAction = agentMessage(1, userAction);
-  const requestedModel = concatBuffers(agentString(1, model), agentBool(7, true));
+  const requestedModel = concatBuffers(
+    agentString(1, model),
+    agentBool(7, true),
+    ...(reasoningEffort ? [agentString(8, String(reasoningEffort))] : [])
+  );
   const runRequest = concatBuffers(
     // An empty ConversationStateStructure starts a fresh local agent session.
     agentMessage(1, new Uint8Array()),
@@ -158,7 +167,7 @@ function decodeAgentFrames(buffer, onFrame) {
 }
 
 function createRequestContextResponse() {
-  // AgentService asks every run for client context. 9router has no IDE file
+  // AgentService asks every run for client context. 10Router has no IDE file
   // context, so acknowledge with an empty RequestContext.
   const requestContextSuccess = agentMessage(1, new Uint8Array());
   const requestContextResult = agentMessage(1, requestContextSuccess);
@@ -493,7 +502,7 @@ export class CursorExecutor extends BaseExecutor {
     let session;
     try {
       session = this.openAgentHttp2Stream(url, headers, requestController.signal);
-      session.write(buildAgentRunFrame(body.messages || [], model));
+      session.write(buildAgentRunFrame(body.messages || [], model, body.reasoning_effort));
     } catch (error) {
       throw new Error(`Cursor AgentService request failed: ${error.message}`);
     }
@@ -567,14 +576,14 @@ export class CursorExecutor extends BaseExecutor {
             }
 
             // AgentService requests IDE context before producing a response.
-            // Return an empty context; 9router is not coupled to an editor.
+            // Return an empty context; 10Router is not coupled to an editor.
             if (serverMessage.has(2)) {
               const execRequest = decodeMessage(serverMessage.get(2)[0].value);
               if (execRequest.has(10)) {
                 session.write(createRequestContextResponse());
               } else {
                 // Every other ExecServerMessage variant is an editor-backed tool
-                // (shell, read, write, …) that 9router cannot service. Fail the
+                // (shell, read, write, …) that 10Router cannot service. Fail the
                 // turn rather than narrating protocol state as assistant text.
                 debugLog(`[CURSOR AGENT] Unsupported exec request fields: ${[...execRequest.keys()].join(",")}`);
                 finished = true;

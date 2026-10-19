@@ -9,8 +9,8 @@ const L = {
   base: ["none", "low", "medium", "high"],                          // qwen, step, hunyuan, gemini-budget
   onOff: ["none", "thinking"],                                      // zai (binary), minimax (adaptive)
   openai: ["none", "minimal", "low", "medium", "high", "xhigh"],    // GPT-5.x / o-series (no "max")
-  levelMax: ["none", "low", "medium", "high", "max"],               // claude-adaptive, kimi
-  budgetX: ["none", "low", "medium", "high", "xhigh", "max"],       // claude-budget
+  levelMax: ["none", "low", "medium", "high", "max"],               // kimi
+  budgetX: ["none", "low", "medium", "high", "xhigh", "max"],       // claude-budget, claude-adaptive
   gemini: ["minimal", "low", "medium", "high"],                     // gemini-3 thinkingLevel (no disable)
   hiMax: ["none", "high", "max"],                                   // deepseek (low/med→high, xhigh→max)
 };
@@ -18,7 +18,7 @@ const L = {
 // thinkingFormat → valid selectable levels (source of truth for UI options).
 const FORMAT_LEVELS = {
   openai: L.openai,
-  "claude-adaptive": L.levelMax,
+  "claude-adaptive": L.budgetX,
   "claude-budget": L.budgetX,
   "gemini-level": L.gemini,
   "gemini-budget": L.base,
@@ -33,13 +33,23 @@ const FORMAT_LEVELS = {
 
 const CODEX_GPT_5_6_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+// Opus/Sonnet 4.6 没有 xhigh 档（Anthropic 与 Kiro 均拒绝）——保持 low..max 五档。
+const CLAUDE_NO_XHIGH = ["none", "low", "medium", "high", "max"];
+
 // Model-name pattern overrides (glob, first match wins) — more precise than format default.
 const PATTERN_THINKING = [
+  { pattern: "*claude*4.6*", levels: CLAUDE_NO_XHIGH },
+  { pattern: "*claude*4-6*", levels: CLAUDE_NO_XHIGH },
   { provider: "codex", pattern: "*gpt-6*", levels: CODEX_GPT_5_6_LEVELS },
   { provider: "codex", pattern: "*gpt-5.6-sol*", levels: [...CODEX_GPT_5_6_LEVELS, "ultra"] },
   { provider: "codex", pattern: "*gpt-5.6-terra*", levels: [...CODEX_GPT_5_6_LEVELS, "ultra"] },
   { provider: "codex", pattern: "*gpt-5.6-luna*", levels: CODEX_GPT_5_6_LEVELS },
   { pattern: "*codex*", levels: ["low", "medium", "high", "xhigh"] }, // codex cannot disable thinking
+  { pattern: "*mimo*preview*", levels: ["none", "low", "medium", "high", "xhigh"] },
+  // opencode-go 的 mimo-v2.5-pro 实测拒绝 reasoning_effort "max"（v2.5 接受）。
+  // 本仓库的 deepseek 线上格式本就把 max 请求改写成 xhigh 发出，因此只需把
+  // 选择器收敛到该模型真正接受的档位。
+  { pattern: "*mimo*v2.5-pro*", levels: ["none", "low", "medium", "high", "xhigh"] },
   // AMD Token Factory per-model effort sets (AMD probed every value on the live
   // endpoint; its 2026-09-09 doc revision supersedes the earlier low/medium-only
   // reading). Both DeepSeek ids take all seven efforts and think only when asked;

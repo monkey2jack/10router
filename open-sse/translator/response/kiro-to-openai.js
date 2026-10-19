@@ -16,6 +16,14 @@ function chunkMeta(state) {
   return { id: state.responseId, created: state.created, model: state.model || "kiro" };
 }
 
+// Tool names come back under Kiro's sanitized spelling; state.toolNameMap is
+// the sanitized→original map chatCore threads from the translated request.
+function restoreToolName(state, name) {
+  const raw = name || "";
+  const map = state?.toolNameMap;
+  return map && typeof map.get === "function" && map.has(raw) ? map.get(raw) : raw;
+}
+
 /**
  * Parse Kiro SSE event and convert to OpenAI format
  * Kiro events: assistantResponseEvent, codeEvent, supplementaryWebLinksEvent, etc.
@@ -26,6 +34,15 @@ export function kiroToOpenAIResponse(chunk, state) {
 
   // If chunk is already in OpenAI format (from executor transform), return as-is
   if (chunk.object === "chat.completion.chunk" && chunk.choices) {
+    // The executor emits Kiro's sanitized tool names verbatim; restore the
+    // client's originals in place when the request renamed any.
+    if (state.toolNameMap?.size) {
+      for (const choice of chunk.choices) {
+        for (const tc of choice.delta?.tool_calls || []) {
+          if (tc.function?.name) tc.function.name = restoreToolName(state, tc.function.name);
+        }
+      }
+    }
     return chunk;
   }
   
@@ -109,7 +126,7 @@ export function kiroToOpenAIResponse(chunk, state) {
     state.hadToolUse = true;
     const toolUse = data.toolUseEvent || data;
     const toolCallId = toolUse.toolUseId || fallbackToolCallId();
-    const toolName = toolUse.name || "";
+    const toolName = restoreToolName(state, toolUse.name || "");
     const toolInput = toolUse.input || {};
 
     const openaiChunk = buildChunk(chunkMeta(state), {

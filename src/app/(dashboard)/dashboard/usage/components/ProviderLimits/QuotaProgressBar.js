@@ -2,6 +2,8 @@
 
 import { cn } from "@/shared/utils/cn";
 import { formatResetTime } from "./utils";
+import { translateQuotaName } from "./QuotaTable";
+import { translate } from "@/i18n/runtime";
 
 // Calculate color based on remaining percentage
 const getColorClasses = (remainingPercentage) => {
@@ -70,6 +72,7 @@ export default function QuotaProgressBar({
   total = 0,
   unlimited = false,
   percentScale = false,
+  displayRemaining = false,
   resetTime = null,
   recurring = true,
 }) {
@@ -88,8 +91,8 @@ export default function QuotaProgressBar({
     <div className="space-y-2">
       {/* Label and percentage */}
       <div className="flex items-center justify-between text-sm">
-        <span className="font-semibold text-text-primary">
-          {label}
+        <span className="font-semibold text-text">
+          {translateQuotaName(label)}
         </span>
         <div className="flex items-center gap-1.5">
           <span className="text-xs">{colors.emoji}</span>
@@ -113,12 +116,20 @@ export default function QuotaProgressBar({
       <div className="flex items-center justify-between text-xs text-text-muted">
         {/* percentScale rows normalize the provider's fraction to 0–100 — no real request count to show */}
         <span>
-          {!percentScale && `${used.toLocaleString()} / ${total.toLocaleString()} requests`}
+          {/* Credit packs (CodeBuddy): remaining/total counting down — a fresh
+              pack reads "100 / 100", not "0 / 100" under a 100% bar. */}
+          {!percentScale && !displayRemaining && `${used.toLocaleString()} / ${total.toLocaleString()} ${translate("requests")}`}
+          {!percentScale && displayRemaining &&
+            `${Number((total - used).toFixed(2)).toLocaleString()} / ${Number(total.toFixed(2)).toLocaleString()}`}
         </span>
         {countdown !== "-" && (
           <div className="flex items-center gap-1">
             <span>•</span>
-            <span className="font-medium">{resetWord} in {countdown}</span>
+            {/* One-shot packs: the countdown IS the expiry, so it carries no
+                "Expires in" prefix; the absolute date still renders below. */}
+            <span className="font-medium">
+              {recurring ? `${translate(resetWord)} in ${countdown}` : countdown}
+            </span>
           </div>
         )}
       </div>
@@ -126,7 +137,7 @@ export default function QuotaProgressBar({
       {/* Reset time display */}
       {resetDisplay && (
         <div className="text-xs text-text-muted/70">
-          {resetWord} at {resetDisplay}
+          {translate(resetWord)} at {resetDisplay}
         </div>
       )}
     </div>

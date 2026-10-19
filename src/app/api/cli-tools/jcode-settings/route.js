@@ -44,7 +44,7 @@ const readConfig = async () => {
   }
 };
 
-const has9RouterConfig = (config) => {
+const has10RouterConfig = (config) => {
   if (!config || !config.providers) return false;
 
   const providers = config.providers;
@@ -118,7 +118,7 @@ export async function GET() {
   }
 
   const config = await readConfig();
-  const has10Router = has9RouterConfig(config);
+  const has10Router = has10RouterConfig(config);
 
   return NextResponse.json({
     installed: true,

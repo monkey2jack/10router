@@ -14,8 +14,10 @@ import {
   refreshCodebuddyToken,
   refreshCodebuddyIntlToken,
   refreshTraeToken,
+  refreshClineToken,
   refreshZedToken,
   refreshWindsurfToken,
+  refreshMinimaxCodeToken,
   classifyOAuthRefreshError,
 } from "./tokenRefresh/providers.js";
 
@@ -33,8 +35,10 @@ export {
   refreshCodebuddyToken,
   refreshCodebuddyIntlToken,
   refreshTraeToken,
+  refreshClineToken,
   refreshZedToken,
   refreshWindsurfToken,
+  refreshMinimaxCodeToken,
   classifyOAuthRefreshError,
 };
 
@@ -49,6 +53,36 @@ export function isUnrecoverableRefreshError(result) {
       result.error === "invalid_request" ||
       result.error === "invalid_grant")
   );
+}
+
+/**
+ * Report a FAILED refresh to the app side when — and only when — the failure is
+ * unrecoverable (dead refresh token). The success side already has its sink
+ * (`onCredentialsRefreshed`); without this one the permanent case was a silent
+ * `else { log "refresh failed" }` and the dead account stayed in rotation,
+ * getting re-probed every cooldown window forever.
+ *
+ * Transient failures (network, 5xx, null result) return false and call nothing —
+ * those are the caller's normal retry/fallback path and must not mark anything.
+ *
+ * @param {object|null} newCredentials - what the refresh returned
+ * @param {function} [onCredentialsRefreshFailed] - receives the failure result
+ * @param {object} [log]
+ * @returns {Promise<boolean>} whether the failure was unrecoverable
+ */
+export async function notifyRefreshFailure(newCredentials, onCredentialsRefreshFailed, log = null) {
+  if (!isUnrecoverableRefreshError(newCredentials)) return false;
+  log?.warn?.("TOKEN_REFRESH", "Refresh token rejected — re-authorization required", {
+    code: newCredentials?.code || newCredentials?.error || null,
+  });
+  if (typeof onCredentialsRefreshFailed === "function") {
+    try {
+      await onCredentialsRefreshFailed(newCredentials);
+    } catch (error) {
+      log?.warn?.("TOKEN_REFRESH", `onCredentialsRefreshFailed failed: ${error?.message || error}`);
+    }
+  }
+  return true;
 }
 
 export function getRefreshLeadMs(provider) {
@@ -145,11 +179,17 @@ const REFRESH_HANDLERS = {
   "codebuddy-cn": (c, log) => refreshCodebuddyToken(c.refreshToken, log),
   "codebuddy-intl": (c, log) => refreshCodebuddyIntlToken(c.refreshToken, log),
   trae: (c, log) => refreshTraeToken(c.refreshToken, c, log),
+  // Cline/ClinePass: upstream demands camelCase JSON (issue #21), not the
+  // generic form-encoded OAuth2 body — dedicated handler, shared endpoints.
+  cline: (c, log) => refreshClineToken("cline", c.refreshToken, log),
+  clinepass: (c, log) => refreshClineToken("clinepass", c.refreshToken, log),
   zed: () => refreshZedToken(),
   windsurf: (c, log) => refreshWindsurfToken(c, log),
   // Kimi Code OAuth (merged into id `kimi`); legacy id still routes here
   kimi: (c, log) => refreshKimiToken(c.refreshToken, c, log),
   "kimi-coding": (c, log) => refreshKimiToken(c.refreshToken, c, log),
+  "minimax-code": (c, log) => refreshMinimaxCodeToken("minimax-code", c.refreshToken, log),
+  "minimax-code-global": (c, log) => refreshMinimaxCodeToken("minimax-code-global", c.refreshToken, log),
   vertex: vertexRefreshHandler,
   "vertex-partner": vertexRefreshHandler
 };

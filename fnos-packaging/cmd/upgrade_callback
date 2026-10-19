@@ -37,15 +37,27 @@ if [ -z "${SRC_DIR}" ]; then
     exit 0
 fi
 
-# 确保初始密码不是开发占位值 change-me (修正 server 内 .env / .env.example), 无论是否重建都执行
-for envf in "${SRC_DIR}/.env" "${SRC_DIR}/.env.example"; do
-    if [ -f "$envf" ]; then
-        if grep -q '^INITIAL_PASSWORD=change-me' "$envf" 2>/dev/null; then
-            sed -i 's/^INITIAL_PASSWORD=change-me.*/INITIAL_PASSWORD=123456/' "$envf" 2>/dev/null || true
-            echo "[$(date '+%F %T')] fixed INITIAL_PASSWORD=change-me -> 123456 in $envf" >> "${LOG}"
-        fi
+# 初始登录密码：只在 ${DATA_DIR}/initial-password 不存在时才生成（0600，跨升级保留）。
+# 关键点就在这里：升级时该文件已由首装留下 → 跳过 → 保留原密码，不再像旧逻辑那样每次
+# 升级都往被替换的 ${SRC_DIR}/.env 里重写一个新随机口令、把依赖引导密码的用户静默锁死
+# （issue #9 后续）。不再换成 123456：公开口令 + 0.0.0.0 监听 = 局域网内任何人一步
+# 拿到管理员权限和全部上游凭据（issue #9）。main 从同一文件读回并作为 env 传给 node。
+gen_initial_password() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -base64 12 2>/dev/null | tr -d '/+=' | cut -c1-16
+    else
+        head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n'
     fi
-done
+}
+PW_FILE="${DATA_DIR}/initial-password"
+if [ ! -f "${PW_FILE}" ]; then
+    newpw="$(gen_initial_password)"
+    if [ -n "$newpw" ]; then
+        ( umask 077; printf '%s\n' "${newpw}" > "${PW_FILE}" )
+        echo "[$(date '+%F %T')] generated INITIAL_PASSWORD in ${PW_FILE}" >> "${LOG}"
+        echo "[$(date '+%F %T')] dashboard password for the first login: ${newpw}" >> "${LOG}"
+    fi
+fi
 
 # 若已含构建产物, 跳过在线构建（多路径检测）
 BUILT=0

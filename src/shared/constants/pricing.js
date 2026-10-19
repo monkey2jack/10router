@@ -516,6 +516,25 @@ export const DEFAULT_PRICING = {
       reasoning: 3.00,
       cache_creation: 0.50
     }
+  },
+
+  // River AI (river / rv) — 官方价目 docs.river.ai/guides/inference-models（USD/1Mtok）；
+  // 推理 token 按输出计费，缓存命中输入按 cached 价。
+  river: {
+    "deepseek-ai/DeepSeek-V4.1-Flash": {
+      input: 0.12,
+      output: 0.48,
+      cached: 0.0024,
+      reasoning: 0.48,
+      cache_creation: 0.12
+    },
+    "zai-org/GLM-5.3-Flash": {
+      input: 0.12,
+      output: 0.40,
+      cached: 0.024,
+      reasoning: 0.40,
+      cache_creation: 0.12
+    }
   }
 };
 

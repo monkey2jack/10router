@@ -73,7 +73,7 @@ export default function CodeBuddyImportModal({ isOpen, onClose, onSuccess, passw
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(password ? { "x-9r-password": password } : {}),
+          ...(password ? { "x-10r-password": password } : {}),
         },
         body: JSON.stringify({ accounts }),
       });

@@ -5,6 +5,7 @@ import {
   clearAccountError,
   extractApiKey,
   isValidApiKey,
+  checkApiKeyDailyLimit,
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
 import { getModelInfo } from "../services/model.js";
@@ -12,7 +13,7 @@ import { handleEmbeddingsCore } from "open-sse/handlers/embeddingsCore.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import * as log from "../utils/logger.js";
-import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
+import { checkAndRefreshToken, persistRefreshedCredentials, markConnectionNeedsReauth } from "../services/tokenRefresh.js";
 import { saveRequestUsage } from "@/lib/usageDb.js";
 
 function exactEmbeddingUsage(raw) {
@@ -31,6 +32,7 @@ function exactEmbeddingUsage(raw) {
  * @param {Request} request
  */
 export async function handleEmbeddings(request) {
+  const requestStartTime = Date.now();
   let body;
   try {
     body = await request.json();
@@ -65,6 +67,9 @@ export async function handleEmbeddings(request) {
       return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
     }
   }
+
+  const limitResponse = await checkApiKeyDailyLimit(apiKey, { request, model: modelStr });
+  if (limitResponse) return limitResponse;
 
   if (!modelStr) {
     log.warn("EMBEDDINGS", "Missing model");
@@ -123,12 +128,16 @@ export async function handleEmbeddings(request) {
       modelInfo: { provider, model },
       credentials: refreshedCredentials,
       log,
+      // Shared with every other handler — see persistRefreshedCredentials.
       onCredentialsRefreshed: async (newCreds) => {
-        await updateProviderCredentials(credentials.connectionId, {
-          ...newCreds,
-          existingProviderSpecificData: credentials.providerSpecificData,
-          testStatus: "active"
+        await persistRefreshedCredentials(credentials.connectionId, newCreds, {
+          providerSpecificData: credentials.providerSpecificData,
+          provider,
+          log,
         });
+      },
+      onCredentialsRefreshFailed: async (err) => {
+        await markConnectionNeedsReauth(credentials.connectionId, { provider, reason: err, log });
       },
       onRequestSuccess: async () => {
         await clearAccountError(credentials.connectionId, credentials, model);
@@ -147,6 +156,10 @@ export async function handleEmbeddings(request) {
           usageKey: randomUUID(),
           tokens: usage,
           status: "success",
+          // Latency observation for the same meta-travel pipeline as chat
+          // (health/speed survives the requestDetails ring and gateway sync).
+          // Embeddings are non-streaming: no TTFT, duration = total.
+          meta: { latencyMs: Date.now() - requestStartTime },
         }).catch(() => {});
       }
       return result.response;

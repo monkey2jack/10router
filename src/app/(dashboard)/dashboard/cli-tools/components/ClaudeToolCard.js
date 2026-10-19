@@ -1,11 +1,13 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useMemo, useState, useEffect, useRef } from "react";
 import { Card, Button, ModelSelectModal, ManualConfigModal, Tooltip } from "@/shared/components";
 import Image from "next/image";
 import BaseUrlSelect from "./BaseUrlSelect";
 import ApiKeySelect from "./ApiKeySelect";
 import { matchKnownEndpoint } from "./cliEndpointMatch";
+import { matchProfileByEnv } from "@/lib/cliToolProfiles";
+import { translate } from "@/i18n/runtime";
 
 const CLOUD_URL = process.env.NEXT_PUBLIC_CLOUD_URL;
 
@@ -51,6 +53,14 @@ export default function ClaudeToolCard({
   const [ccFilterNaming, setCcFilterNaming] = useState(false);
   const [exaMcpEnabled, setExaMcpEnabled] = useState(false);
   const [maxContextTokens, setMaxContextTokens] = useState("");
+  // Named combo profiles (issue #17): the whole form saved server-side and
+  // switched with one click. profileId is the user's explicit pick; when they
+  // have not picked one, the profile the on-disk settings currently equal is
+  // matched for display (save/delete then target it too).
+  const [profiles, setProfiles] = useState([]);
+  const [profileId, setProfileId] = useState("");
+  const [profileName, setProfileName] = useState("");
+  const profileNameRef = useRef(null);
   const hasInitializedModels = useRef(false);
 
   const getConfigStatus = () => {
@@ -85,6 +95,10 @@ export default function ClaudeToolCard({
     if (isExpanded) {
       if (!claudeStatus) checkClaudeStatus();
       fetchModelAliases();
+      // Profiles must load here, not in the toggle handler: the dedicated
+      // [toolId] page mounts the card ALREADY expanded, so a click-based load
+      // never fires and the dropdown stays "no saved profiles" forever.
+      fetchProfiles();
     }
   }, [isExpanded]);
 
@@ -113,6 +127,24 @@ export default function ClaudeToolCard({
       console.log("Error fetching model aliases:", error);
     }
   };
+
+  const fetchProfiles = async () => {
+    try {
+      const res = await fetch("/api/cli-tools/claude-profiles");
+      if (!res.ok) return;
+      const data = await res.json();
+      setProfiles(Array.isArray(data.profiles) ? data.profiles : []);
+    } catch (error) {
+      console.log("Error fetching combo profiles:", error);
+    }
+  };
+
+  const matchedProfileId = useMemo(() => {
+    if (profileId || profiles.length === 0 || !claudeStatus?.settings?.env) return "";
+    return profiles.find((p) => matchProfileByEnv(p, claudeStatus.settings.env))?.id || "";
+  }, [profiles, claudeStatus, profileId]);
+  const effectiveProfileId = profileId || matchedProfileId;
+  const effectiveProfile = profiles.find((p) => p.id === effectiveProfileId) || null;
 
   useEffect(() => {
     if (claudeStatus?.installed && !hasInitializedModels.current) {
@@ -160,35 +192,46 @@ export default function ClaudeToolCard({
     return url.endsWith("/v1") ? url : `${url}/v1`;
   };
 
+  // The env block Apply writes — also what a saved combo profile snapshots.
+  const buildEnvFromForm = () => {
+    const env = { ANTHROPIC_BASE_URL: getEffectiveBaseUrl() };
+
+    // Get key from dropdown, fallback to first key or sk_10router for localhost
+    const keyToUse = selectedApiKey?.trim()
+      || (apiKeys?.length > 0 ? apiKeys[0].key : null)
+      || (!cloudEnabled ? "sk_10router" : null);
+
+    if (keyToUse) {
+      env.ANTHROPIC_AUTH_TOKEN = keyToUse;
+    }
+
+    tool.defaultModels.forEach((model) => {
+      const targetModel = modelMappings[model.alias];
+      if (targetModel && model.envKey) env[model.envKey] = targetModel;
+    });
+    if (maxContextTokens) {
+      env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = maxContextTokens;
+    }
+    return env;
+  };
+
+  const postClaudeSettings = async (env, exa = exaMcpEnabled, ctx = maxContextTokens) => {
+    const res = await fetch("/api/cli-tools/claude-settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ env, exaMcpEnabled: exa, maxContextTokens: ctx }),
+    });
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, data };
+  };
+
   const handleApplySettings = async () => {
     setApplying(true);
     setMessage(null);
     try {
-      const env = { ANTHROPIC_BASE_URL: getEffectiveBaseUrl() };
-
-      // Get key from dropdown, fallback to first key or sk_10router for localhost
-      const keyToUse = selectedApiKey?.trim()
-        || (apiKeys?.length > 0 ? apiKeys[0].key : null)
-        || (!cloudEnabled ? "sk_10router" : null);
-
-      if (keyToUse) {
-        env.ANTHROPIC_AUTH_TOKEN = keyToUse;
-      }
-
-      tool.defaultModels.forEach((model) => {
-        const targetModel = modelMappings[model.alias];
-        if (targetModel && model.envKey) env[model.envKey] = targetModel;
-      });
-      if (maxContextTokens) {
-        env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = maxContextTokens;
-      }
-      const res = await fetch("/api/cli-tools/claude-settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ env, exaMcpEnabled, maxContextTokens }),
-      });
-      const data = await res.json();
-      if (res.ok) {
+      const env = buildEnvFromForm();
+      const { ok, data } = await postClaudeSettings(env);
+      if (ok) {
         setMessage({ type: "success", text: "Settings applied successfully!" });
         setClaudeStatus(prev => ({ ...prev, hasBackup: true, settings: { ...prev?.settings, env }, exaMcpEnabled }));
       } else {
@@ -213,6 +256,7 @@ export default function ClaudeToolCard({
         setSelectedApiKey("");
         setExaMcpEnabled(false);
         setMaxContextTokens("");
+        setProfileId("");
       } else {
         setMessage({ type: "error", text: data.error || "Failed to reset settings" });
       }
@@ -226,6 +270,115 @@ export default function ClaudeToolCard({
   const openModelSelector = (alias) => {
     setCurrentEditingAlias(alias);
     setModalOpen(true);
+  };
+
+  // ----- Combo profiles (issue #17) -----
+
+  // Refill the form from a profile. The applied payload goes to the writer
+  // straight from the profile (not from state, which re-renders async); the
+  // form refill is so the next manual Apply keeps writing the same thing.
+  const fillFormFromProfile = (profile) => {
+    const env = profile.env || {};
+    setCustomBaseUrl(String(env.ANTHROPIC_BASE_URL || "").replace(/\/v1$/, ""));
+    tool.defaultModels.forEach((model) => {
+      onModelMappingChange(model.alias, model.envKey ? env[model.envKey] || "" : "");
+    });
+    const token = env.ANTHROPIC_AUTH_TOKEN;
+    setSelectedApiKey(token && apiKeys?.some((k) => k.key === token) ? token : "");
+    setMaxContextTokens(profile.maxContextTokens || "");
+    setExaMcpEnabled(profile.exaMcpEnabled === true);
+  };
+
+  const handleSelectProfile = async (id) => {
+    setProfileId(id);
+    const profile = profiles.find((p) => p.id === id);
+    if (!profile) return;
+    setProfileName(profile.name);
+    fillFormFromProfile(profile);
+    setMessage(null);
+    try {
+      const { ok, data } = await postClaudeSettings(profile.env, profile.exaMcpEnabled, profile.maxContextTokens);
+      if (ok) {
+        setClaudeStatus(prev => ({
+          ...prev,
+          hasBackup: true,
+          settings: { ...(prev?.settings || {}), env: profile.env },
+          exaMcpEnabled: profile.exaMcpEnabled === true,
+        }));
+        setMessage({ type: "success", text: translate(`Switched to profile "{name}" — restart Claude Code to pick it up`).replace("{name}", profile.name) });
+      } else {
+        setMessage({ type: "error", text: data.error || translate("Failed to apply profile") });
+      }
+    } catch (error) {
+      setMessage({ type: "error", text: error.message });
+    }
+  };
+
+  // Save targets the name in the box (CC-Switch semantics): a name that
+  // already exists updates that profile, a new name saves a new one. An empty
+  // box updates the selected/matched profile keeping its own name — with
+  // nothing selected there is nothing to call it, so ask for a name. Anchoring
+  // on the NAME (not on which profile the on-disk settings equal) is what
+  // keeps repeated saves of one combo from piling up duplicate entries.
+  const handleSaveProfile = async () => {
+    setMessage(null);
+    const trimmed = profileName.trim();
+    const target = trimmed
+      ? profiles.find((p) => p.name === trimmed)
+      : effectiveProfile;
+    if (!target && !trimmed) {
+      setMessage({ type: "error", text: translate("Enter a profile name to save") });
+      profileNameRef.current?.focus();
+      return;
+    }
+    try {
+      const res = await fetch("/api/cli-tools/claude-profiles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: target?.id || undefined,
+          name: target && !trimmed ? target.name : trimmed,
+          env: buildEnvFromForm(),
+          exaMcpEnabled,
+          maxContextTokens,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setMessage({ type: "error", text: data.error || translate("Failed to save profile") });
+        return;
+      }
+      const saved = data.profile;
+      setProfiles((prev) => [...prev.filter((p) => p.id !== saved.id), saved]);
+      setProfileId(saved.id);
+      setProfileName(saved.name);
+      setMessage({
+        type: "success",
+        text: target
+          ? translate(`Profile "{name}" updated`).replace("{name}", saved.name)
+          : translate(`Saved profile "{name}"`).replace("{name}", saved.name),
+      });
+    } catch (error) {
+      setMessage({ type: "error", text: error.message });
+    }
+  };
+
+  const handleDeleteProfile = async () => {
+    if (!effectiveProfileId) return;
+    setMessage(null);
+    try {
+      const res = await fetch(`/api/cli-tools/claude-profiles?id=${encodeURIComponent(effectiveProfileId)}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setMessage({ type: "error", text: data.error || translate("Failed to delete profile") });
+        return;
+      }
+      setProfiles((prev) => prev.filter((p) => p.id !== effectiveProfileId));
+      setProfileId("");
+      setMessage({ type: "success", text: translate("Profile deleted") });
+    } catch (error) {
+      setMessage({ type: "error", text: error.message });
+    }
   };
 
   const handleModelSelect = (model) => {
@@ -322,6 +475,53 @@ export default function ClaudeToolCard({
           {!checkingClaude && claudeStatus?.installed && (
             <>
               <div className="flex flex-col gap-2">
+                {/* Combo profiles (issue #17): the whole form as named snapshots;
+                    picking one writes ~/.claude/settings.json immediately. */}
+                <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-[8rem_auto_1fr_auto] sm:items-center sm:gap-2">
+                  <span className="text-xs font-semibold text-text-main sm:text-right sm:text-sm">{translate("Profiles")}</span>
+                  <span className="material-symbols-outlined hidden text-text-muted text-[14px] sm:inline">arrow_forward</span>
+                  <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                    <select
+                      value={effectiveProfileId}
+                      onChange={(e) => handleSelectProfile(e.target.value)}
+                      disabled={profiles.length === 0}
+                      className="min-w-0 flex-1 sm:flex-none px-2 py-2 bg-surface rounded border border-border text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 sm:py-1.5 disabled:opacity-50"
+                    >
+                      <option value="">{profiles.length ? translate("Switch profile…") : translate("No saved profiles")}</option>
+                      {profiles.map((p) => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                    <input
+                      type="text"
+                      ref={profileNameRef}
+                      value={profileName}
+                      onChange={(e) => setProfileName(e.target.value)}
+                      placeholder={effectiveProfile ? translate(`Rename "{name}"…`).replace("{name}", effectiveProfile.name) : translate("Profile name")}
+                      className="min-w-0 flex-1 sm:w-40 sm:flex-none pl-2 pr-2 py-2 bg-surface rounded border border-border text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 sm:py-1.5"
+                    />
+                  </div>
+                  <div className="flex gap-1.5">
+                    <button
+                      onClick={handleSaveProfile}
+                      disabled={!hasActiveProviders}
+                      className="rounded border border-border bg-surface px-2 py-2 text-xs transition-colors sm:py-1.5 hover:border-primary disabled:opacity-50"
+                      title={effectiveProfile ? translate("Update the selected profile with the current form") : translate("Save the current settings as a profile")}
+                    >
+                      <span className="material-symbols-outlined text-[14px] align-middle">{effectiveProfile ? "sync" : "save"}</span>
+                    </button>
+                    {effectiveProfile && (
+                      <button
+                        onClick={handleDeleteProfile}
+                        className="rounded border border-border bg-surface px-2 py-2 text-xs transition-colors sm:py-1.5 hover:border-red-500 hover:text-red-500"
+                        title={translate("Delete the selected profile")}
+                      >
+                        <span className="material-symbols-outlined text-[14px] align-middle">delete</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
                 {/* Endpoint (selector) */}
                 <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-[8rem_auto_1fr] sm:items-center sm:gap-2">
                   <span className="text-xs font-semibold text-text-main sm:text-right sm:text-sm">Select Endpoint</span>

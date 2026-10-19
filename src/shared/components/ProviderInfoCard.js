@@ -3,6 +3,7 @@
 import Card from "./Card";
 import InviteCodeChip from "./InviteCodeChip";
 import { fmtCost } from "@/shared/utils/currency";
+import { translate } from "@/i18n/runtime";
 
 // Only show fields user actually cares about
 const FIELD_SCHEMA = {
@@ -34,6 +35,9 @@ export default function ProviderInfoCard({ config, provider, title = "Provider I
     }));
 
   const signupUrl = provider?.notice?.apiKeyUrl || provider?.website;
+  // Channels that declare a web console (e.g. CodeBuddy, whose keys don't flow
+  // through an auto-auth "Get API Key" funnel) get a console button instead.
+  const webUrl = provider?.notice?.webUrl;
   const noticeText = provider?.notice?.text;
 
   return (
@@ -41,7 +45,17 @@ export default function ProviderInfoCard({ config, provider, title = "Provider I
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-lg font-semibold">{title}</h2>
         <div className="flex items-center gap-2">
-          {signupUrl && (
+          {webUrl ? (
+            <a
+              href={webUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-primary hover:underline inline-flex items-center gap-1"
+            >
+              <span className="material-symbols-outlined text-sm">open_in_new</span>
+              Web console
+            </a>
+          ) : signupUrl && (
             <a
               href={signupUrl}
               target="_blank"
@@ -78,7 +92,9 @@ export default function ProviderInfoCard({ config, provider, title = "Provider I
         {noticeText && (
           <div className="flex items-start gap-3 min-w-0 sm:col-span-2">
             <span className="text-xs text-text-muted w-28 shrink-0 mt-0.5">Notice</span>
-            <span className="text-sm text-text-main leading-relaxed">{noticeText}</span>
+            {/* translate() falls back to the original string when no literal
+                entry exists, so registries without a translation are unaffected. */}
+            <span className="text-sm text-text-main leading-relaxed">{translate(noticeText)}</span>
           </div>
         )}
       </div>

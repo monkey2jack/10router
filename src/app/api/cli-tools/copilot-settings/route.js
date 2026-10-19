@@ -30,12 +30,12 @@ const readConfig = async () => {
   }
 };
 
-const has9RouterConfig = (config) => {
+const has10RouterConfig = (config) => {
   if (!Array.isArray(config)) return false;
   return config.some((entry) => entry.name === "10Router");
 };
 
-const get9RouterEntry = (config) => {
+const get10RouterEntry = (config) => {
   if (!Array.isArray(config)) return null;
   return config.find((entry) => entry.name === "10Router") || null;
 };
@@ -44,12 +44,12 @@ const get9RouterEntry = (config) => {
 export async function GET() {
   try {
     const config = await readConfig();
-    const entry = get9RouterEntry(config);
+    const entry = get10RouterEntry(config);
 
     return NextResponse.json({
       installed: true,
       config,
-      has10Router: has9RouterConfig(config),
+      has10Router: has10RouterConfig(config),
       configPath: getConfigPath(),
       currentModel: entry?.models?.[0]?.id || null,
       currentUrl: entry?.models?.[0]?.url || null,

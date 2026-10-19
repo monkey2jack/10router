@@ -1,7 +1,18 @@
 import { NextResponse } from "next/server";
 import { getCustomModels, addCustomModel, deleteCustomModel } from "@/models";
+import { isSttTransport } from "@/shared/constants/models";
 
 export const dynamic = "force-dynamic";
+
+// Accepted STT transport markers live in the shared whitelist
+// (src/shared/constants/models STT_TRANSPORT_META) — the dashboard transport
+// select and this validator must agree on one set, so neither owns a copy.
+// Unknown or mistyped values are silently dropped (same policy as the flat
+// capability fields this route already forwards).
+function sanitizeTransport(transport, type) {
+  if (type !== "stt" || !isSttTransport(transport)) return null;
+  return transport.trim();
+}
 
 // GET /api/models/custom - List all custom models
 export async function GET() {
@@ -17,11 +28,13 @@ export async function GET() {
 // POST /api/models/custom - Add custom model
 export async function POST(request) {
   try {
-    const { providerAlias, id, type, name, vision, reasoning, contextWindow, maxOutput, thinkingFormat, enabled } = await request.json();
+    const { providerAlias, id, type, name, vision, reasoning, contextWindow, maxOutput, thinkingFormat, enabled, transport } = await request.json();
     if (!providerAlias || !id) {
       return NextResponse.json({ error: "providerAlias and id required" }, { status: 400 });
     }
-    const added = await addCustomModel({ providerAlias, id, type: type || "llm", name, vision, reasoning, contextWindow, maxOutput, thinkingFormat, enabled });
+    const cleanType = type || "llm";
+    const cleanTransport = sanitizeTransport(transport, cleanType);
+    const added = await addCustomModel({ providerAlias, id, type: cleanType, name, vision, reasoning, contextWindow, maxOutput, thinkingFormat, enabled, ...(cleanTransport ? { transport: cleanTransport } : {}) });
     return NextResponse.json({ success: true, added });
   } catch (error) {
     console.log("Error adding custom model:", error);

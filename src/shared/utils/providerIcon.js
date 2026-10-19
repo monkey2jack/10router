@@ -7,13 +7,28 @@ const ICON_ALIASES = {
   "vercel-ai-gateway": "vercel",
   "b.ai": "bai",
   "b-ai": "bai",
+  "siliconflow-cn": "siliconflow",
+  "longcat-intl": "longcat",
+  "stepfun-cn": "stepfun",
+  "stepfun-plan": "stepfun",
+  "stepfun-plan-cn": "stepfun",
+  "step-cn": "stepfun",
+  "stepp-cn": "stepfun",
+  "stepp": "stepfun",
+  "step": "stepfun",
+  "sfp-cn": "stepfun",
+  "sfp": "stepfun",
+  "sfpcn": "stepfun",
+  "sf-cn": "stepfun",
+  "sfcn": "stepfun",
+  "sf": "stepfun",
+  "step-plan-cn": "stepfun",
+  "step-plan": "stepfun",
 };
 
 // Providers whose asset ships as SVG (everything else is .png).
 const ICON_EXTENSIONS = {
   bai: ".svg",
-  gorouter: ".svg",
-  tabiauto: ".svg",
 };
 
 // Runtime only — first 404 remembers id for the whole session

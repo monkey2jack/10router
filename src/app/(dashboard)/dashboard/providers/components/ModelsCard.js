@@ -6,6 +6,7 @@ import { Card, Button, Modal } from "@/shared/components";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { getProviderAlias } from "@/shared/constants/providers";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
+import { translate } from "@/i18n/runtime";
 
 // ── ModelRow ───────────────────────────────────────────────────
 export function ModelRow({ model, fullModel, copied, onCopy, testStatus, isCustom, isFree, onDeleteAlias, onTest, isTesting }) {
@@ -14,13 +15,13 @@ export function ModelRow({ model, fullModel, copied, onCopy, testStatus, isCusto
 
   return (
     <div className={`group px-3 py-2 rounded-lg border ${borderColor} hover:bg-sidebar/50`}>
-      <div className="flex items-center gap-2">
-        <span className="material-symbols-outlined text-base" style={iconColor ? { color: iconColor } : undefined}>
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="material-symbols-outlined text-base shrink-0" style={iconColor ? { color: iconColor } : undefined}>
           {testStatus === "ok" ? "check_circle" : testStatus === "error" ? "cancel" : "smart_toy"}
         </span>
-        <div className="flex flex-col gap-1">
-          <code className="text-xs text-text-muted font-mono bg-sidebar px-1.5 py-0.5 rounded">{fullModel}</code>
-          {model.name && <span className="text-[9px] text-text-muted/70 italic pl-1">{model.name}</span>}
+        <div className="flex flex-col gap-1 min-w-0 flex-1">
+          <code className="text-xs text-text-muted font-mono bg-sidebar px-1.5 py-0.5 rounded truncate max-w-full" title={fullModel}>{fullModel}</code>
+          {model.name && <span className="text-[9px] text-text-muted/70 italic pl-1 truncate max-w-full">{model.name}</span>}
         </div>
         {onTest && (
           <div className="relative group/btn">
@@ -43,6 +44,14 @@ export function ModelRow({ model, fullModel, copied, onCopy, testStatus, isCusto
           </span>
         </div>
         {isFree && <span className="text-[10px] font-bold text-green-500 bg-green-500/10 px-1.5 py-0.5 rounded">FREE</span>}
+        {model.requiresSession && (
+          <span
+            className="text-[10px] font-bold text-amber-600 dark:text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded cursor-help"
+            title={translate("Requires MiMo Desktop sign-in — API key alone cannot reach this model")}
+          >
+            {translate("Desktop sign-in")}
+          </span>
+        )}
         {isCustom && (
           <button onClick={onDeleteAlias} className="p-0.5 hover:bg-red-500/10 rounded text-text-muted hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity ml-auto" title="Remove custom model">
             <span className="material-symbols-outlined text-sm">close</span>
@@ -82,7 +91,7 @@ function AddCustomModelModal({ isOpen, onSave, onClose }) {
         <div>
           <label className="text-xs text-text-muted mb-1 block">Model ID</label>
           <input
-            className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
+            className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-surface focus:outline-none focus:border-primary"
             value={modelId}
             onChange={(e) => setModelId(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleSave()}

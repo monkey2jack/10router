@@ -79,10 +79,24 @@ function applyProxyEnv(settings) {
       process.env.ALL_PROXY = validated;
       process.env.NINE_ROUTER_PROXY_URL = validated;
       managed = true;
+      // Loopback must NEVER ride the outbound proxy — the proxy resolves
+      // 127.0.0.1 on ITS OWN host, so server-internal self-calls (the model-
+      // test ping) would hit whatever listens on the proxy machine and come
+      // back as a foreign instance's "401 Invalid API key". Always merge
+      // loopback into NO_PROXY; the user's entries ride along additively.
+      // Mirror of src/lib/network/outboundProxy.js — keep both in sync.
+      const merged = [
+        ...new Set([
+          ...noProxy.split(",").map((s) => s.trim()).filter(Boolean),
+          "127.0.0.1", "localhost", "::1",
+        ]),
+      ].join(",");
+      process.env.NO_PROXY = merged;
+      process.env.NINE_ROUTER_NO_PROXY = merged;
     }
   }
 
-  if (noProxy) {
+  if (noProxy && !process.env.NO_PROXY) {
     process.env.NO_PROXY = noProxy;
     process.env.NINE_ROUTER_NO_PROXY = noProxy;
     managed = true;

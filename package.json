@@ -1,6 +1,6 @@
 {
   "name": "10router-app",
-  "version": "1.0.8",
+  "version": "1.5.1",
   "description": "10Router web dashboard",
   "private": true,
   "scripts": {
@@ -16,13 +16,15 @@
     "start:bun": "bun ./.next/standalone/custom-server.js",
     "test": "npm --prefix tests test",
     "cli:pack": "npm --prefix cli run pack:cli",
-    "cli:publish": "npm --prefix cli run publish:cli"
+    "cli:publish": "npm --prefix cli run publish:cli",
+    "test-version": "node scripts/test-build-version.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/modifiers": "^9.0.0",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
+    "@lobehub/icons": "^5.18.0",
     "@monaco-editor/react": "^4.7.0",
     "@next/third-parties": "^16.2.9",
     "@node-saml/node-saml": "^5.1.0",
@@ -61,6 +63,8 @@
     "@tailwindcss/postcss": "^4.1.18",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
+    "happy-dom": "^20.14.5",
+    "jsdom": "^30.1.1",
     "postcss": "^8.5.6",
     "tailwindcss": "^4"
   }

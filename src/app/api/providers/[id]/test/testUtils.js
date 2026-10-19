@@ -1,10 +1,16 @@
 import { getProviderConnectionById, updateProviderConnection } from "@/lib/localDb";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { testProxyUrl } from "@/lib/network/proxyTest";
-import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
+import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, USAGE_SUPPORTED_PROVIDERS } from "@/shared/constants/providers";
 import { getDefaultModel } from "open-sse/config/providerModels.js";
 import { CODEX_CLI_VERSION } from "open-sse/config/appConstants.js";
+import { GROK_CLI_PAGER_USER_AGENT, GROK_CLI_VERSION } from "open-sse/config/grokCli.js";
 import { resolveOllamaLocalHost, PROVIDERS } from "open-sse/config/providers.js";
+import { getUsageForProvider } from "open-sse/services/usage.js";
+import { extractEarliestPackageExpiry } from "open-sse/services/usage/expiryExtractor.js";
+import { resolveQoderModels } from "open-sse/services/qoderModels.js";
+import { QODER_USERINFO_URL, QODER_CN_USERINFO_URL } from "open-sse/shared/qoder/constants.js";
+import { MODEL_LOCK_PREFIX } from "open-sse/services/accountFallback.js";
 import {
   refreshProviderCredentials,
   shouldRefreshCredentials,
@@ -19,6 +25,7 @@ import {
   KIMCHI_CONFIG,
 } from "@/lib/oauth/constants/oauth";
 import { buildClineHeaders } from "@/shared/utils/clineAuth";
+import { buildAccountValidationMessage } from "open-sse/utils/error.js";
 
 // OAuth provider test endpoints
 const OAUTH_TEST_CONFIG = {
@@ -63,17 +70,9 @@ const OAUTH_TEST_CONFIG = {
     noAuth: true,
   },
   kiro: { checkExpiry: true, refreshable: true },
-  qoder: {
-    // Test by hitting Qoder's userinfo endpoint with the device token.
-    // refreshable: false because the device-flow refresh endpoint returns
-    // 403 for our flow (users re-login when expired). No checkExpiry —
-    // we want the actual URL probe to run so revoked tokens surface.
-    url: "https://openapi.qoder.sh/api/v1/userinfo",
-    method: "GET",
-    authHeader: "Authorization",
-    authPrefix: "Bearer ",
-    refreshable: false,
-  },
+  // qoder / qoder-cn are handled by testQoderConnection (short-circuited at the
+  // top of testOAuthConnection): the one-by-one picker can select a model, and
+  // verifying it needs the account's live catalog, not a plain userinfo probe.
   kimi: { checkExpiry: true, refreshable: true },
   "kimi-coding": { checkExpiry: true, refreshable: true },
   cursor: { tokenExists: true },
@@ -92,6 +91,12 @@ const OAUTH_TEST_CONFIG = {
     authPrefix: "Bearer ",
   },
   "codebuddy-cn": { tokenExists: true },
+  // Same shape as CN: the connection carries an OAuth access token and the
+  // gateway exposes no cheap token-validation endpoint, so presence of the
+  // token *is* the probe. Missing this entry made the dashboard's Test button
+  // answer "Provider test not supported" for an otherwise healthy intl account
+  // (routing was never affected — only this test path).
+  "codebuddy-intl": { tokenExists: true },
   kimchi: {
     url: KIMCHI_CONFIG.validationUrl || "https://api.cast.ai/v1/llm/openai/supported-providers",
     method: "GET",
@@ -112,10 +117,10 @@ const OAUTH_TEST_CONFIG = {
     extraHeaders: {
       Accept: "application/json",
       ...(PROVIDERS["grok-cli"]?.headers || {
-        "User-Agent": "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)",
+        "User-Agent": GROK_CLI_PAGER_USER_AGENT,
         "x-xai-token-auth": "xai-grok-cli",
         "x-grok-client-identifier": "grok-pager",
-        "x-grok-client-version": "0.2.93",
+        "x-grok-client-version": GROK_CLI_VERSION,
       }),
     },
     refreshable: true,
@@ -125,6 +130,52 @@ const OAUTH_TEST_CONFIG = {
     softFailMessage: {
       402: "Connected, but Grok Build credits are exhausted (spending limit). Add credits or upgrade SuperGrok.",
     },
+  },
+  // Muse Code 订阅 —— 用铸造的 LLM|… key 探 /v1/models（无 refresh，401 即重新登录）
+  "muse": {
+    url: "https://api.meta.ai/v1/models",
+    method: "GET",
+    authHeader: "Authorization",
+    authPrefix: "Bearer ",
+    extraHeaders: { "x-api-version": "1.0.0" },
+    refreshable: false,
+  },
+  // MiniMax Code (mcode) 订阅 —— 探 mavis 端点轻量 ping，带自动 refresh
+  "minimax-code": {
+    url: "https://agent.minimax.cn/mavis/api/v1/llm/v1/messages",
+    method: "POST",
+    authHeader: "Authorization",
+    authPrefix: "Bearer ",
+    extraHeaders: {
+      "Content-Type": "application/json",
+      "User-Agent": "MiniMaxAgent",
+      "X-Mavis-Agent-Id": "main",
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "MiniMax-M3.1-Flash-Preview",
+      max_tokens: 1,
+      messages: [{ role: "user", content: "ping" }],
+    }),
+    refreshable: true,
+  },
+  "minimax-code-global": {
+    url: "https://agent.minimax.io/mavis/api/v1/llm/v1/messages",
+    method: "POST",
+    authHeader: "Authorization",
+    authPrefix: "Bearer ",
+    extraHeaders: {
+      "Content-Type": "application/json",
+      "User-Agent": "MiniMaxAgent",
+      "X-Mavis-Agent-Id": "main",
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "MiniMax-M3.1-Flash-Preview",
+      max_tokens: 1,
+      messages: [{ role: "user", content: "ping" }],
+    }),
+    refreshable: true,
   },
 };
 
@@ -191,6 +242,21 @@ function parseProviderErrorMessage(bodyText, fallback) {
   return bodyText.trim() || fallback;
 }
 
+/**
+ * Error message for a failed cloudcode-pa probe (antigravity / gemini-cli).
+ *
+ * Google gates a risk-flagged account with 403 VALIDATION_REQUIRED and puts the
+ * one-click "Verify your account" URL inside the response body. Surface that URL —
+ * the bare error.message ("Verify your account to continue.") leaves the user with
+ * no next step. Exported for unit tests.
+ */
+export function buildCloudCodeProbeError(bodyText, fallbackStatus) {
+  return (
+    buildAccountValidationMessage(bodyText) ||
+    parseProviderErrorMessage(bodyText, `API returned ${fallbackStatus}`)
+  );
+}
+
 async function probeCloudCodeAssistAccess(connection, accessToken, effectiveProxy = null) {
   const userAgent = connection.provider === "antigravity"
     ? "google-api-nodejs-client/9.15.1 vscode-antigravity/1.107.0"
@@ -211,7 +277,7 @@ async function probeCloudCodeAssistAccess(connection, accessToken, effectiveProx
   const bodyText = await res.text().catch(() => "");
   return {
     valid: false,
-    error: parseProviderErrorMessage(bodyText, `API returned ${res.status}`),
+    error: buildCloudCodeProbeError(bodyText, res.status),
     status: res.status,
   };
 }
@@ -239,7 +305,7 @@ async function refreshOAuthToken(connection) {
       return { accessToken: data.access_token, expiresIn: data.expires_in, refreshToken: data.refresh_token || refreshToken };
     }
 
-    if (provider === "codex" || provider === "grok-cli" || provider === "xai") {
+    if (provider === "codex" || provider === "grok-cli" || provider === "xai" || provider === "minimax-code" || provider === "minimax-code-global") {
       return await refreshProviderCredentials(provider, connection, console);
     }
 
@@ -318,7 +384,86 @@ function isTokenExpired(connection) {
   return shouldRefreshCredentials(connection.provider, connection);
 }
 
-async function testOAuthConnection(connection, effectiveProxy = null) {
+/**
+ * Qoder / Qoder CN connection test.
+ *
+ * Qoder's inference endpoint is a proprietary COSY-signed protocol, so a chat
+ * probe would be heavy and would spend credits. Instead we fetch the account's
+ * live model catalog (a COSY-signed GET /model/list — no inference, no credits),
+ * which both proves the credential works AND enumerates the models this account
+ * may call. A selected model is validated by its ALIAS (the catalog key, e.g.
+ * "qmodel_38max"), never its display name — sending the display name is exactly
+ * what used to 400 upstream.
+ *
+ * `options.model` is the one-by-one picker's selection (a registry id / alias).
+ * With no selection, a non-empty catalog is a passing token check. On a
+ * catalog-fetch failure we fall back to the cheap userinfo probe so a transient
+ * blip does not mark a good credential broken.
+ */
+// Aggregator / virtual ids route to a real model server-side, so they never
+// appear as their own key in the raw /model/list catalog — for these, a
+// non-empty catalog IS the availability check.
+const QODER_VIRTUAL_MODELS = new Set(["auto", "efficient"]);
+
+async function testQoderConnection(connection, effectiveProxy = null, options = {}) {
+  const { model } = options;
+
+  let catalog = null;
+  try {
+    // forceRefresh: a Test button must reflect the account NOW, not the 1h cache.
+    catalog = await resolveQoderModels(connection, { proxyOptions: effectiveProxy, forceRefresh: true });
+  } catch {
+    catalog = null;
+  }
+
+  if (catalog && Array.isArray(catalog.models)) {
+    const nonEmpty = catalog.models.length > 0;
+    if (model && !QODER_VIRTUAL_MODELS.has(model)) {
+      const available = catalog.models.some((m) => m.id === model);
+      return available
+        ? { valid: true, error: null, refreshed: false }
+        : { valid: false, error: `Model "${model}" is not available on this Qoder account`, refreshed: false };
+    }
+    // No model, or a virtual/aggregator id: a non-empty catalog proves the account.
+    return nonEmpty
+      ? { valid: true, error: null, refreshed: false }
+      : { valid: false, error: "No models available on this Qoder account", refreshed: false };
+  }
+
+  // Catalog unavailable (COSY signing needs a userId, or a transient failure):
+  // fall back to the userinfo probe so a good token is not marked broken.
+  if (!connection.accessToken) return { valid: false, error: "No access token", refreshed: false };
+  const userinfoUrl = connection.provider === "qoder-cn" ? QODER_CN_USERINFO_URL : QODER_USERINFO_URL;
+  try {
+    const res = await fetchWithConnectionProxy(
+      userinfoUrl,
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${connection.accessToken}`, Accept: "application/json", "User-Agent": "qodercli/1.0.0" },
+      },
+      effectiveProxy,
+    );
+    if (!res.ok) {
+      const revoked = res.status === 401 || res.status === 403;
+      return { valid: false, error: revoked ? "Token invalid or expired" : `Qoder userinfo error (${res.status})`, refreshed: false };
+    }
+    // Token is good, but the catalog was unreachable so the picked model could
+    // not be verified — pass with a warning rather than a hard failure.
+    return model
+      ? { valid: true, warning: "Credential OK, but model availability could not be verified (catalog unavailable)", error: null, refreshed: false }
+      : { valid: true, error: null, refreshed: false };
+  } catch (err) {
+    return { valid: false, error: `Qoder test failed: ${err.message}`, refreshed: false };
+  }
+}
+
+async function testOAuthConnection(connection, effectiveProxy = null, options = {}) {
+  // Qoder's test is model-aware and needs the live catalog — handled here, not
+  // via OAUTH_TEST_CONFIG (which qoder-cn was never in, so it answered "Provider
+  // test not supported" for an otherwise healthy account).
+  if (connection.provider === "qoder" || connection.provider === "qoder-cn") {
+    return testQoderConnection(connection, effectiveProxy, options);
+  }
   const config = OAUTH_TEST_CONFIG[connection.provider];
   if (!config) return { valid: false, error: "Provider test not supported", refreshed: false };
   if (!connection.accessToken) return { valid: false, error: "No access token", refreshed: false };
@@ -472,7 +617,8 @@ async function fetchWithConnectionProxy(url, options = {}, effectiveProxy = null
   });
 }
 
-async function testApiKeyConnection(connection, effectiveProxy = null) {
+async function testApiKeyConnection(connection, effectiveProxy = null, options = {}) {
+  const { model } = options;
   if (isOpenAICompatibleProvider(connection.provider)) {
     const modelsBase = connection.providerSpecificData?.baseUrl;
     if (!modelsBase) return { valid: false, error: "Missing base URL" };
@@ -493,7 +639,9 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
       modelsBase = modelsBase.replace(/\/$/, "");
       if (modelsBase.endsWith("/messages")) modelsBase = modelsBase.slice(0, -9);
       const messagesUrl = `${modelsBase}/v1/messages`;
-      const model = connection.defaultModel || "claude-3-haiku-20240307";
+      // Selection (options.model) wins over the connection's configured default.
+      // Do not name this `model` — the destructured option is in scope.
+      const probeModel = model || connection.defaultModel || "claude-3-haiku-20240307";
       const res = await fetchWithConnectionProxy(messagesUrl, {
         method: "POST",
         headers: {
@@ -503,7 +651,7 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
           "Authorization": `Bearer ${connection.apiKey}`,
         },
         body: JSON.stringify({
-          model,
+          model: probeModel,
           max_tokens: 1,
           messages: [{ role: "user", content: "test" }],
         }),
@@ -523,10 +671,11 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
         const accountId = psd.accountId;
         if (!accountId) return { valid: false, error: "Missing Account ID" };
         const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1/chat/completions`;
+        const testModel = model || getDefaultModel("cloudflare-ai");
         const res = await fetchWithConnectionProxy(url, {
           method: "POST",
           headers: { "Authorization": `Bearer ${connection.apiKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model: getDefaultModel("cloudflare-ai"), messages: [{ role: "user", content: "test" }], max_tokens: 1 }),
+          body: JSON.stringify({ model: testModel, messages: [{ role: "user", content: "test" }], max_tokens: 1 }),
         }, effectiveProxy);
         const valid = res.status !== 401 && res.status !== 403 && res.status !== 404;
         return { valid, error: valid ? null : "Invalid API token or Account ID" };
@@ -539,6 +688,7 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
         const url = `${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=${apiVersion}`;
         const headers = { "api-key": connection.apiKey, "Content-Type": "application/json" };
         if (psd.organization) headers["OpenAI-Organization"] = psd.organization;
+        // For Azure, model selection is handled via deployment name; no need for test model param
         const res = await fetchWithConnectionProxy(url, {
           method: "POST", headers,
           body: JSON.stringify({ messages: [{ role: "user", content: "test" }], max_completion_tokens: 1 }),
@@ -555,10 +705,11 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
         return { valid: res.ok, error: res.ok ? null : "Invalid API key" };
       }
       case "anthropic": {
+        const testModel = model || "claude-3-haiku-20240307";
         const res = await fetchWithConnectionProxy("https://api.anthropic.com/v1/messages", {
           method: "POST",
           headers: { "x-api-key": connection.apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-          body: JSON.stringify({ model: "claude-3-haiku-20240307", max_tokens: 1, messages: [{ role: "user", content: "test" }] }),
+          body: JSON.stringify({ model: testModel, max_tokens: 1, messages: [{ role: "user", content: "test" }] }),
         }, effectiveProxy);
         const valid = res.status !== 401;
         return { valid, error: valid ? null : "Invalid API key" };
@@ -572,19 +723,21 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
         return { valid: res.ok, error: res.ok ? null : "Invalid API key" };
       }
       case "glm": {
+        const testModel = model || "glm-4.7";
         const res = await fetchWithConnectionProxy("https://api.z.ai/api/anthropic/v1/messages", {
           method: "POST",
           headers: { "x-api-key": connection.apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-          body: JSON.stringify({ model: "glm-4.7", max_tokens: 1, messages: [{ role: "user", content: "test" }] }),
+          body: JSON.stringify({ model: testModel, max_tokens: 1, messages: [{ role: "user", content: "test" }] }),
         }, effectiveProxy);
         const valid = res.status !== 401 && res.status !== 403;
         return { valid, error: valid ? null : "Invalid API key" };
       }
       case "glm-cn": {
+        const testModel = model || "glm-4.7";
         const res = await fetchWithConnectionProxy("https://open.bigmodel.cn/api/coding/paas/v4/chat/completions", {
           method: "POST",
           headers: { "Authorization": `Bearer ${connection.apiKey}`, "content-type": "application/json" },
-          body: JSON.stringify({ model: "glm-4.7", max_tokens: 1, messages: [{ role: "user", content: "test" }] }),
+          body: JSON.stringify({ model: testModel, max_tokens: 1, messages: [{ role: "user", content: "test" }] }),
         }, effectiveProxy);
         const valid = res.status !== 401 && res.status !== 403;
         return { valid, error: valid ? null : "Invalid API key" };
@@ -592,19 +745,21 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
       case "minimax":
       case "minimax-cn": {
         const endpoints = { minimax: "https://api.minimax.io/anthropic/v1/messages", "minimax-cn": "https://api.minimaxi.com/anthropic/v1/messages" };
+        const testModel = model || "minimax-m2";
         const res = await fetchWithConnectionProxy(endpoints[connection.provider], {
           method: "POST",
           headers: { "x-api-key": connection.apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-          body: JSON.stringify({ model: "minimax-m2", max_tokens: 1, messages: [{ role: "user", content: "test" }] }),
+          body: JSON.stringify({ model: testModel, max_tokens: 1, messages: [{ role: "user", content: "test" }] }),
         }, effectiveProxy);
         const valid = res.status !== 401 && res.status !== 403;
         return { valid, error: valid ? null : "Invalid API key" };
       }
       case "kimi": {
+        const testModel = model || "kimi-latest";
         const res = await fetchWithConnectionProxy("https://api.kimi.com/coding/v1/messages", {
           method: "POST",
           headers: { "x-api-key": connection.apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-          body: JSON.stringify({ model: "kimi-latest", max_tokens: 1, messages: [{ role: "user", content: "test" }] }),
+          body: JSON.stringify({ model: testModel, max_tokens: 1, messages: [{ role: "user", content: "test" }] }),
         }, effectiveProxy);
         const valid = res.status !== 401 && res.status !== 403;
         return { valid, error: valid ? null : "Invalid API key" };
@@ -618,20 +773,22 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
           : connection.provider === "alims-intl"
           ? "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
           : "https://coding.dashscope.aliyuncs.com/v1/chat/completions";
+        const testModel = model || getDefaultModel(connection.provider);
         const res = await fetchWithConnectionProxy(aliBaseUrl, {
           method: "POST",
           headers: { "Authorization": `Bearer ${connection.apiKey}`, "content-type": "application/json" },
-          body: JSON.stringify({ model: getDefaultModel(connection.provider), max_tokens: 1, messages: [{ role: "user", content: "test" }] }),
+          body: JSON.stringify({ model: testModel, max_tokens: 1, messages: [{ role: "user", content: "test" }] }),
         }, effectiveProxy);
         const valid = res.status !== 401 && res.status !== 403;
         return { valid, error: valid ? null : "Invalid API key" };
       }
       case "volcengine-ark":
       case "byteplus": {
+        const testModel = model || getDefaultModel(connection.provider);
         const res = await fetchWithConnectionProxy(PROVIDERS[connection.provider]?.baseUrl, {
           method: "POST",
           headers: { "Authorization": `Bearer ${connection.apiKey}`, "content-type": "application/json" },
-          body: JSON.stringify({ model: getDefaultModel(connection.provider), max_tokens: 1, messages: [{ role: "user", content: "test" }] }),
+          body: JSON.stringify({ model: testModel, max_tokens: 1, messages: [{ role: "user", content: "test" }] }),
         }, effectiveProxy);
         const valid = res.status !== 401 && res.status !== 403;
         return { valid, error: valid ? null : "Invalid API key" };
@@ -761,12 +918,111 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
         return { valid, error: valid ? null : "Invalid API key" };
       }
       case "xiaomi-mimo":
+      case "mimo-desktop":
       case "xiaomi-tokenplan": {
-        const baseUrls = { "xiaomi-mimo": "https://api.xiaomimimo.com/v1", "xiaomi-tokenplan": "https://token-plan-sgp.xiaomimimo.com/v1" };
-        const res = await fetchWithConnectionProxy(`${baseUrls[connection.provider]}/models`, {
+        // Xiaomi has TWO credential families and the test must exercise the one
+        // this connection actually holds:
+        //   • Desktop session (QR login, no sk-) → real request to a Preview
+        //     model over the account-service route. That is the ONLY way to
+        //     prove the session works end-to-end (a quota read can succeed
+        //     while the chat route still rejects).
+        //   • sk- key (manual / browser sign-in) → GET /models, as before.
+        // A connection that has BOTH prefers the key (cheaper, and its failure
+        // mode is clearer); the session path is the fallback.
+        const authMethod = connection.providerSpecificData?.authMethod;
+        const hasPlaceholderKey =
+          typeof connection.apiKey === "string" && connection.apiKey.startsWith("mimo-desktop-session");
+        const hasRealKey =
+          typeof connection.apiKey === "string" && connection.apiKey.startsWith("sk-") && !hasPlaceholderKey;
+        const isSessionConnection =
+          (connection.provider === "xiaomi-mimo" || connection.provider === "mimo-desktop") &&
+          !hasRealKey &&
+          (authMethod === "desktop-session" || hasPlaceholderKey || Boolean(connection.providerSpecificData?.mimoPassToken));
+
+        if (isSessionConnection) {
+          try {
+            const { getMimoAccountCookie } = await import("open-sse/shared/mimoAccount.js");
+            const cookie = await getMimoAccountCookie(connection.providerSpecificData, effectiveProxy);
+            if (!cookie) {
+              return { valid: false, error: "Desktop session unavailable — sign in to MiMo Desktop once, then re-import" };
+            }
+            // Minimal real call against the Desktop card's live model. This must
+            // name a model that exists: the retired mimo-x-*-preview pair would make
+            // every session test fail with a 404-shaped upstream error that looks
+            // like a bad cookie. The picker on the Desktop page offers exactly the
+            // session models, so a selected id is always safe to probe; flash stays
+            // the default because it is the cheapest.
+            const probe = await fetchWithConnectionProxy(
+              "https://mimo-server-cn.xiaomimimo.com/api/route/chat/completions",
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Cookie: cookie,
+                  Accept: "text/event-stream",
+                },
+                body: JSON.stringify({
+                  model: model || "mimo-v2.6-flash",
+                  stream: true,
+                  max_tokens: 8,
+                  messages: [
+                    { role: "system", content: "You are CodeBuddy Code." },
+                    // Plain string: the account-service route rejects OpenAI
+                    // content-part arrays (same rule as translator/concerns/paramSupport.js).
+                    { role: "user", content: "hi" },
+                  ],
+                }),
+              },
+              effectiveProxy,
+            );
+            if (probe.status === 401 || probe.status === 403) {
+              let overseasHint = "";
+              try {
+                const { getEgressRegion } = await import("@/lib/network/egressRegion");
+                const egress = await getEgressRegion({ timeoutMs: 1500 });
+                if (egress?.countryCode && egress.countryCode !== "CN") {
+                  overseasHint = " (detected non-mainland network; desktop preview models require China-side proxy)";
+                }
+              } catch {}
+              return { valid: false, error: `Desktop session expired or unauthorized — sign in to MiMo Desktop again${overseasHint}` };
+            }
+            if (!probe.ok) {
+              return { valid: false, error: `Preview probe failed (HTTP ${probe.status})` };
+            }
+            // Drain a little so the connection is not left half-open, then report.
+            try {
+              await probe.body?.cancel?.();
+            } catch {
+              /* best effort */
+            }
+            // Plain success: the session works. Do NOT report a `warning` —
+            // that field lands in connection.lastError and renders as a red
+            // error line in the dashboard, which reads as a problem when the
+            // test actually passed.
+            return { valid: true, error: null };
+          } catch (e) {
+            return { valid: false, error: e?.message || "Preview probe failed" };
+          }
+        }
+        let testUrl = "https://api.xiaomimimo.com/v1/models";
+        if (connection.provider === "xiaomi-tokenplan") {
+          const { resolveXiaomiTokenplanBaseUrl } = await import("open-sse/config/providers.js");
+          testUrl = `${resolveXiaomiTokenplanBaseUrl(connection)}/models`;
+        } else {
+          // xiaomi-mimo: a Token Plan subscriber's browser sign-in stores a
+          // token-plan baseUrl — test the cluster the key actually belongs to.
+          const { normalizeMimoApiBase } = await import("open-sse/config/providers.js");
+          const stored = normalizeMimoApiBase(connection.providerSpecificData?.baseUrl);
+          if (stored) testUrl = `${stored}/models`;
+        }
+        const res = await fetchWithConnectionProxy(testUrl, {
           headers: { Authorization: `Bearer ${connection.apiKey}` },
         }, effectiveProxy);
-        return { valid: res.ok, error: res.ok ? null : "Invalid API key" };
+        // Xiaomi plan clusters: /models returns 403 for valid keys lacking list
+        // permission; only 401 means invalid. (Billing keeps strict res.ok.)
+        const isPlanCluster = connection.provider === "xiaomi-tokenplan" || testUrl.includes("token-plan");
+        const valid = isPlanCluster ? res.status !== 401 : res.ok;
+        return { valid, error: valid ? null : "Invalid API key" };
       }
       case "blackbox": {
         const baseUrl = PROVIDERS["blackbox"]?.baseUrl?.replace(/\/chat\/completions$/, "") || "https://api.blackbox.ai/v1";
@@ -816,9 +1072,19 @@ case "llm7": {
         }, effectiveProxy);
         return { valid: res.ok, error: res.ok ? null : "Invalid API key", refreshed: false };
       }
+      case "stepfun":
+      case "stepfun-cn":
+      case "stepfun-plan":
+      case "stepfun-plan-cn":
+      // StepFun's four channels (Domestic/International × Pay-as-you-go/Step Plan)
+      // all expose a plain Bearer-auth GET /models — including the Step Plan
+      // `/step_plan/v1/models` path (the `/accounts` quota route is the only one
+      // that 404s there). Routed to the generic validator below.
       case "sensenova":
       case "longcat":
       case "bai":
+      case "atria":
+      case "tokenharbor":
       case "api-airforce":
       case "bazaarlink":
       case "baidu":
@@ -826,8 +1092,7 @@ case "llm7": {
       case "bluesminds":
       case "alitp-intl":
       case "tokenbom":
-      case "gorouter":
-      case "tabiauto": {
+      case "codiv": {
         // Generic OpenAI-compatible freeTier/apikey providers with a GET
         // /models endpoint and default Bearer auth — validate via that.
         const validateUrl =
@@ -873,6 +1138,25 @@ case "llm7": {
         const valid = res.status !== 401 && res.status !== 403;
         return { valid, error: valid ? null : "Invalid API key" };
       }
+      case "codebuddy-intl": {
+        // International gateway (codebuddy.ai) — same OpenAI-compatible,
+        // stream-only surface as CN. The IDE-channel headers are required (an
+        // unapproved channel answers 11128) and `stream:false` can be rejected
+        // outright (11101), so the verdict must stay auth-only (401/403) —
+        // do NOT tighten it to `res.ok` or this case reports failure forever.
+        const baseUrl = PROVIDERS["codebuddy-intl"]?.baseUrl || "https://www.codebuddy.ai/v2/chat/completions";
+        const res = await fetchWithConnectionProxy(baseUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${connection.apiKey}`,
+            ...(PROVIDERS["codebuddy-intl"]?.headers || {}),
+          },
+          body: JSON.stringify({ model: getDefaultModel("codebuddy-intl"), messages: [{ role: "user", content: "ping" }], max_tokens: 1, stream: false }),
+        }, effectiveProxy);
+        const valid = res.status !== 401 && res.status !== 403;
+        return { valid, error: valid ? null : "Invalid API key" };
+      }
       case "commandcode": {
         // CommandCode — NDJSON custom format, Bearer auth. Chat ping validates the key.
         const baseUrl = PROVIDERS["commandcode"]?.baseUrl || "https://api.commandcode.ai/alpha/generate";
@@ -905,9 +1189,29 @@ case "llm7": {
 }
 
 /**
- * Test a single connection by ID, update DB, and return result.
+ * Null-out every `modelLock_*` field on a connection (successful-test cleanup).
+ *
+ * Export for tests: the keys are flat and model-named (`modelLock_<model>`, plus
+ * the account-level `modelLock___all`), so they can only be found by prefix — a
+ * fixed key list would silently miss the model that is actually locked.
+ *
+ * @param {object} connection - raw connection row
+ * @returns {Record<string, null>} patch object, safe to spread into an update
  */
-export async function testSingleConnection(id) {
+export function clearModelLockFields(connection) {
+  if (!connection) return {};
+  return Object.fromEntries(
+    Object.keys(connection)
+      .filter((key) => key.startsWith(MODEL_LOCK_PREFIX))
+      .map((key) => [key, null])
+  );
+}
+
+/**
+ * Test a single connection by ID, update DB, and return result.
+ * `options.model` (optional) overrides the model used for the probe request.
+ */
+export async function testSingleConnection(id, options = {}) {
   const connection = await getProviderConnectionById(id);
   if (!connection) return { valid: false, error: "Connection not found", latencyMs: 0, testedAt: new Date().toISOString() };
 
@@ -929,10 +1233,18 @@ export async function testSingleConnection(id) {
   const start = Date.now();
   let result;
 
-  if (connection.authType === "apikey" || connection.authType === "cookie") {
-    result = await testApiKeyConnection(connection, effectiveProxy);
+  // NOTE: both spellings exist in the wild — legacy rows and some routes write
+  // "api_key", the dashboard/test paths use "apikey". Treat them as one.
+  const isKeyLike = connection.authType === "apikey" || connection.authType === "api_key" || connection.authType === "cookie";
+  // Xiaomi MiMo dual-credential rows carry authType "oauth" when they arrive
+  // via transfer import (accountTransfer defaults to it), but their probe —
+  // sk- key → /models, session cookie → Preview model — lives in the apikey
+  // path's provider switch. Route xiaomi-mimo there regardless of authType,
+  // otherwise the Test button reports "Provider test not supported".
+  if (isKeyLike || connection.provider === "xiaomi-mimo" || connection.provider === "mimo-desktop") {
+    result = await testApiKeyConnection(connection, effectiveProxy, options);
   } else {
-    result = await testOAuthConnection(connection, effectiveProxy);
+    result = await testOAuthConnection(connection, effectiveProxy, options);
   }
 
   const latencyMs = Date.now() - start;
@@ -950,6 +1262,23 @@ export async function testSingleConnection(id) {
         : null
       : new Date().toISOString(),
   };
+
+  // A successful test is proof the credential works RIGHT NOW, so no runtime
+  // health state may outlive it. Without this, re-logging into an account whose
+  // token had gone stale still left the old locks in place: the dashboard showed
+  // a green connection while every request kept being answered with the stale
+  // lock ("no account available"), so the user's fix looked like it did nothing.
+  //
+  // Only on success — clearing health state after a FAILED test would erase the
+  // evidence the dashboard is about to show.
+  if (result.valid) {
+    Object.assign(updateData, {
+      backoffLevel: 0,
+      rateLimitedUntil: null,
+      errorCode: null,
+      ...clearModelLockFields(connection),
+    });
+  }
 
   if (result.refreshed && result.newTokens) {
     if (result.newTokens.accessToken) updateData.accessToken = result.newTokens.accessToken;
@@ -971,6 +1300,31 @@ export async function testSingleConnection(id) {
   }
 
   await updateProviderConnection(id, updateData);
+
+  // Background refresh of package expiry on successful connection test
+  if (result.valid && USAGE_SUPPORTED_PROVIDERS.includes(connection.provider)) {
+    (async () => {
+      try {
+        const mergedConn = { ...connection, ...updateData };
+        // `proxyOptions` was an undefined identifier here — the ReferenceError
+        // hit the empty catch below, so this background expiry refresh silently
+        // never ran. The resolved proxy for this connection is `effectiveProxy`.
+        const usage = await getUsageForProvider(mergedConn, effectiveProxy);
+        const expiryInfo = extractEarliestPackageExpiry(usage);
+        if (expiryInfo) {
+          await updateProviderConnection(id, {
+            earliestPackageExpiry: expiryInfo.expiry || null,
+            earliestPackageName: expiryInfo.name || null,
+            earliestPackageRemaining:
+              typeof expiryInfo.remainingPercentage === "number" ? expiryInfo.remainingPercentage : null,
+            quotaCheckedAt: new Date().toISOString(),
+          });
+        }
+      } catch {
+        // Non-blocking, ignore background errors
+      }
+    })();
+  }
 
   return { valid: result.valid, error: result.error, refreshed: !!result.refreshed, latencyMs, testedAt: new Date().toISOString() };
 }

@@ -2,10 +2,9 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { importUsageFromSqlite, importUsageFromJson } from "./importUsage.js";
 import { verifyDashboardPassword, getDashboardAuthSession } from "@/lib/auth/dashboardSession";
+import { readCliToken, readDashboardPassword } from "@/lib/auth/authHeaders";
 import { validateApiKey, getSettings } from "@/lib/localDb";
 
-const PASSWORD_HEADER = "x-9r-password";
-const CLI_TOKEN_HEADER = "x-9r-cli-token";
 
 // POST /api/settings/database/import-usage
 // Import HISTORICAL USAGE ONLY (usageHistory rows) from a 9router backup
@@ -15,7 +14,7 @@ const CLI_TOKEN_HEADER = "x-9r-cli-token";
 // Same auth model as /api/settings/database: dashboard sessions (and
 // requireLogin=false instances) pass without re-entering the password; API
 // clients (CLI scripts, plugins) present either the dashboard password via
-// x-9r-password or a virtual proxy key (sk-…) via Authorization: Bearer.
+// x-10r-password (legacy x-9r-password) or a virtual proxy key (sk-…) via Authorization: Bearer.
 export async function POST(request) {
   try {
     if (!(await isAuthorized(request))) {
@@ -47,7 +46,7 @@ export async function POST(request) {
 async function isAuthorized(request) {
   // CLI token — value already validated by the dashboard guard middleware;
   // presence here mirrors the sibling /api/settings/database route.
-  if (request.headers.get(CLI_TOKEN_HEADER)) return true;
+  if (readCliToken(request)) return true;
 
   // Dashboard login session — no password re-entry for logged-in users.
   try {
@@ -62,7 +61,7 @@ async function isAuthorized(request) {
   } catch { /* settings unavailable — keep verifying credentials */ }
 
   // Explicit dashboard password (same header as the database export/import).
-  const password = request.headers.get(PASSWORD_HEADER);
+  const password = readDashboardPassword(request);
   if (password && (await verifyDashboardPassword(password))) return true;
 
   // Virtual proxy key (sk-…) — the same keys clients already hold for /v1,

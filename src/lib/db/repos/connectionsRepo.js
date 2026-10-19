@@ -2,6 +2,12 @@ import { v4 as uuidv4 } from "uuid";
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 import { getDisabledByProvider, disableModels } from "./disabledModelsRepo.js";
+import {
+  encryptConnectionData,
+  decryptConnectionData,
+  restoreUnreadableCredentials,
+  UNREADABLE_CREDENTIALS_KEY,
+} from "../crypto/credentialCipher.js";
 
 const OPTIONAL_FIELDS = [
   "displayName", "email", "globalPriority", "defaultModel",
@@ -9,13 +15,32 @@ const OPTIONAL_FIELDS = [
   "scope", "projectId", "apiKey", "testStatus",
   "lastTested", "lastError", "lastErrorAt", "rateLimitedUntil", "expiresIn", "errorCode",
   "consecutiveUseCount", "idToken", "lastRefreshAt",
+  "earliestPackageExpiry", "earliestPackageName", "earliestPackageRemaining", "quotaCheckedAt",
 ];
 
+// Every read and every write of a connection funnels through these two, which is
+// what makes credential encryption transparent to the rest of the app (issue #9,
+// item 2): `data` is encrypted on the way into SQLite and decrypted on the way
+// out, so no caller has to know about it — including the request path that pulls
+// a token to call upstream.
 function rowToConn(row) {
   if (!row) return null;
   const extra = parseJson(row.data, {});
+  const { data: decoded, error, unreadable } = decryptConnectionData(extra);
+  if (error) {
+    // Loud but not fatal: surface it on the row the dashboard already renders
+    // instead of throwing from every read (which would take the whole app down
+    // when a database is restored without its key file).
+    const synthesized = { testStatus: "unavailable", lastError: `Credentials unreadable: ${error}` };
+    Object.assign(decoded, synthesized);
+    // …and NOT destructive: the ciphertext travels with the object so that any
+    // write built from it (startup cleanup, error-state updates, refresh
+    // merges) puts it back into the row instead of erasing it. See
+    // restoreUnreadableCredentials() — applied in connToRow.
+    decoded[UNREADABLE_CREDENTIALS_KEY] = { ...unreadable, synthesized };
+  }
   return {
-    ...extra,
+    ...decoded,
     id: row.id,
     provider: row.provider,
     authType: row.authType,
@@ -30,6 +55,12 @@ function rowToConn(row) {
 
 function connToRow(c) {
   const { id, provider, authType, name, email, priority, isActive, createdAt, updatedAt, ...rest } = c;
+  // Fold any ciphertext that could not be decrypted on read back into the row
+  // (and strip the reserved carrier key + the synthesized failure state) BEFORE
+  // encrypting. encryptSecret is idempotent on enc:v1: values, so a restored
+  // ciphertext passes through untouched — the row keeps the credential instead
+  // of losing it when the current key can't read it.
+  const restored = restoreUnreadableCredentials(rest);
   return {
     id,
     provider,
@@ -38,7 +69,7 @@ function connToRow(c) {
     email: email ?? null,
     priority: priority ?? null,
     isActive: isActive === false ? 0 : 1,
-    data: stringifyJson(rest),
+    data: stringifyJson(encryptConnectionData(restored)),
     createdAt,
     updatedAt,
   };
@@ -87,7 +118,15 @@ export async function getProviderConnectionById(id) {
   return rowToConn(row);
 }
 
-// Internal sync reorder — must be called INSIDE a transaction
+// Internal sync reorder — must be called INSIDE a transaction.
+//
+// Normalizes priorities to a contiguous 1..N after a DELETE or an explicit
+// reorder, so gaps don't accumulate over time.
+//
+// Deliberately NOT called on insert: a new connection already gets
+// MAX(priority)+1, which sorts after every existing row, so the order is
+// identical with or without the rewrite. Skipping it there is what makes
+// bulk key import O(1) per key instead of O(pool) — see createProviderConnection.
 function reorderInTx(db, providerId) {
   const list = db.all(`SELECT * FROM providerConnections WHERE provider = ?`, [providerId]).map(rowToConn);
   list.sort((a, b) => {
@@ -96,7 +135,10 @@ function reorderInTx(db, providerId) {
     return new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0);
   });
   list.forEach((c, i) => {
-    db.run(`UPDATE providerConnections SET priority = ? WHERE id = ?`, [i + 1, c.id]);
+    const want = i + 1;
+    if ((c.priority || 0) !== want) {
+      db.run(`UPDATE providerConnections SET priority = ? WHERE id = ?`, [want, c.id]);
+    }
   });
 }
 
@@ -107,8 +149,26 @@ export async function createProviderConnection(data) {
 
   let isFirstConnection = false;
   db.transaction(() => {
-    const all = db.all(`SELECT * FROM providerConnections WHERE provider = ?`, [data.provider]).map(rowToConn);
-    isFirstConnection = all.length === 0;
+    // apikey connections are deduped by name and need only the current max
+    // priority, so query those directly instead of loading the whole pool
+    // (O(pool) per key — bulk key imports were O(n·m) and serialized every
+    // parallel writer on this transaction). The oauth branch below still
+    // scans, because its identity rules compare fields inside
+    // providerSpecificData and have no single-column equivalent.
+    const isApikey = data.authType === "apikey" && !!data.name;
+    const all = isApikey
+      ? db.all(
+          `SELECT * FROM providerConnections WHERE provider = ? AND authType = ? AND name = ?`,
+          [data.provider, "apikey", data.name]
+        ).map(rowToConn)
+      : db.all(`SELECT * FROM providerConnections WHERE provider = ?`, [data.provider]).map(rowToConn);
+    // isFirstConnection and "Account N" naming need the POOL size, not the
+    // dedup-candidate count — for the apikey path `all` is narrowed to
+    // same-name rows only.
+    const poolSize = isApikey
+      ? db.get(`SELECT COUNT(*) AS n FROM providerConnections WHERE provider = ?`, [data.provider])?.n ?? all.length
+      : all.length;
+    isFirstConnection = poolSize === 0;
 
     let existing = null;
     if (data.authType === "oauth" && data.email) {
@@ -150,7 +210,37 @@ export async function createProviderConnection(data) {
     // access_token: never dedup — user manages duplicates manually
 
     if (existing) {
+      // Name collision on an apikey connection used to silently replace the
+      // stored apiKey, so a script that reused names ("Key 1", "Key 2", …)
+      // destroyed existing pool entries with no 409 and no warning. Callers
+      // that genuinely mean "update this one" pass allowOverwrite; everyone
+      // else gets a typed error naming the row that would have been replaced.
+      if (data.allowOverwrite === false) {
+        const err = new Error(
+          `A connection named "${existing.name}" already exists for provider "${data.provider}". ` +
+          `Pass allowOverwrite: true to replace it.`
+        );
+        err.code = "PROVIDER_NAME_CONFLICT";
+        err.existingId = existing.id;
+        err.existingName = existing.name;
+        throw err;
+      }
       const merged = { ...existing, ...data, updatedAt: now };
+      // Re-provisioned credentials merged onto an existing row: the stored
+      // failure belongs to the superseded key/token — drop it so the red
+      // dashboard error is consumed by the re-auth itself, not only by the
+      // next successful request. Explicit values in `data` still win.
+      for (const f of ["lastError", "lastErrorAt", "errorCode"]) {
+        if (data[f] === undefined) merged[f] = null;
+      }
+      if (data.testStatus === undefined && merged.testStatus === "unavailable") merged.testStatus = "active";
+      // …same for the needs-reauth mark: the credentials being merged in ARE the
+      // re-auth, so both the sticky mark and its cooldown stamp are consumed by
+      // this write — a fresh token must not keep sitting behind a 24h skip.
+      if (data.testStatus === undefined && merged.testStatus === "needs-reauth") {
+        merged.testStatus = "active";
+        merged.needsReauthUntil = null;
+      }
       upsert(db, merged);
       result = merged;
       return;
@@ -158,11 +248,15 @@ export async function createProviderConnection(data) {
 
     let connectionName = data.name || null;
     if (!connectionName && (data.authType === "oauth" || data.authType === "access_token")) {
-      connectionName = deriveConnectionName(data, data.email || `Account ${all.length + 1}`);
+      connectionName = deriveConnectionName(data, data.email || `Account ${poolSize + 1}`);
     }
     let connectionPriority = data.priority;
     if (!connectionPriority) {
-      connectionPriority = all.reduce((m, c) => Math.max(m, c.priority || 0), 0) + 1;
+      // MAX(priority)+1 in SQL rather than a reduce over the loaded pool: the
+      // apikey path no longer has the whole pool in memory, and the aggregate
+      // is served by the index instead of a row scan.
+      const maxRow = db.get(`SELECT MAX(priority) AS m FROM providerConnections WHERE provider = ?`, [data.provider]);
+      connectionPriority = (maxRow?.m || 0) + 1;
     }
 
     const conn = {
@@ -184,7 +278,11 @@ export async function createProviderConnection(data) {
     if (data.email !== undefined) conn.email = data.email;
 
     upsert(db, conn);
-    reorderInTx(db, data.provider);
+    // No reorderInTx here. `conn.priority` is already MAX(priority)+1, so the
+    // row sorts last and the resulting order is what reorderInTx would have
+    // produced anyway. The rewrite cost ~2N statements per insert — O(pool) —
+    // which made a 5k-key import O(n·m): ~25M statements at a 5k pool, and it
+    // serialized every parallel writer on the same transaction.
     result = conn;
   });
 
@@ -225,6 +323,22 @@ export async function updateProviderConnection(id, data) {
     if (!row) { result = null; return; }
     const existing = rowToConn(row);
     const merged = { ...existing, ...data, updatedAt: new Date().toISOString() };
+    // Opt-in "credentials were replaced" reset. A stored failure belongs to the
+    // OLD credential set — once the user re-adds a key / re-authorizes, the red
+    // dashboard error is stale and must not linger until the next successful
+    // request. Explicit error fields in `data` still win (e.g. a failed
+    // validation may pass its own testStatus).
+    if ("resetErrorState" in merged) {
+      const shouldReset = merged.resetErrorState === true;
+      delete merged.resetErrorState;
+      if (shouldReset) {
+        const reset = { lastError: null, lastErrorAt: null, errorCode: null, testStatus: null, needsReauthUntil: null };
+        for (const f of Object.keys(reset)) {
+          if (data[f] !== undefined) delete reset[f];
+        }
+        Object.assign(merged, reset);
+      }
+    }
     upsert(db, merged);
     if (data.priority !== undefined) reorderInTx(db, existing.provider);
     result = merged;

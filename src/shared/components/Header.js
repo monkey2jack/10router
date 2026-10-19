@@ -169,6 +169,13 @@ const getPageInfo = (pathname) => {
       icon: "monitor",
       breadcrumbs: [],
     };
+  if (pathname.includes("/experimental"))
+    return {
+      title: "Experimental",
+      description: "Beta toggles for provider tools, daily check-ins, and dashboard security",
+      icon: "science",
+      breadcrumbs: [],
+    };
   if (pathname === "/dashboard")
     return {
       title: "Endpoint",
@@ -179,7 +186,7 @@ const getPageInfo = (pathname) => {
   return { title: "", description: "", breadcrumbs: [] };
 };
 
-export default function Header({ onMenuClick, onDesktopMenuClick, showMenuButton = true }) {
+export default function Header({ onMenuClick, onDesktopMenuClick, showMenuButton = true, sidebarCollapsed = false }) {
   const pathname = usePathname();
   const [displayName, setDisplayName] = useState("");
   const [loginMethod, setLoginMethod] = useState("");
@@ -240,15 +247,22 @@ export default function Header({ onMenuClick, onDesktopMenuClick, showMenuButton
         )}
       </div>
 
-      {/* Desktop sidebar collapse button */}
+      {/* Desktop sidebar collapse button — flips with state: expanded shows the
+          collapse arrow (menu_open), collapsed mirrors the SAME icon so the arrow
+          points the other way (hamburger felt off — user picked mirrored icon). */}
       {onDesktopMenuClick && (
         <button
           onClick={onDesktopMenuClick}
           className="hidden lg:flex items-center justify-center p-2 shrink-0 text-text-main hover:text-primary transition-colors rounded-lg"
-          title="Toggle sidebar"
-          aria-label="Toggle sidebar"
+          title={sidebarCollapsed ? translate("Expand sidebar") : translate("Collapse sidebar")}
+          aria-label={sidebarCollapsed ? translate("Expand sidebar") : translate("Collapse sidebar")}
+          aria-expanded={!sidebarCollapsed}
         >
-          <span className="material-symbols-outlined">menu_open</span>
+          <span
+            className={`material-symbols-outlined transition-transform duration-200 ${sidebarCollapsed ? "-scale-x-100" : ""}`}
+          >
+            menu_open
+          </span>
         </button>
       )}
 
@@ -382,5 +396,6 @@ function HeaderSearch() {
 Header.propTypes = {
   onMenuClick: PropTypes.func,
   onDesktopMenuClick: PropTypes.func,
+  sidebarCollapsed: PropTypes.bool,
   showMenuButton: PropTypes.bool,
 };

@@ -15,7 +15,8 @@ export default {
   category: "apikey",
   authType: "apikey",
   serviceKinds: [
-    "embedding"
+    "embedding",
+    "rerank"
   ],
   embeddingConfig: {
     baseUrl: "https://api.jina.ai/v1/embeddings",
@@ -37,6 +38,16 @@ export default {
         name: "Jina Embeddings v2 Base Code",
         dimensions: 768
       }
+    ]
+  },
+  // Same Bearer key as embeddings (jina.ai API key); /v1/rerank dialect.
+  rerankConfig: {
+    baseUrl: "https://api.jina.ai/v1/rerank",
+    authType: "apikey",
+    authHeader: "bearer",
+    models: [
+      { id: "jina-reranker-v3.5", name: "Jina Reranker v3.5" },
+      { id: "jina-reranker-v2-base-multilingual", name: "Jina Reranker v2 Multilingual" }
     ]
   }
 };

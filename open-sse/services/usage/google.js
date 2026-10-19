@@ -126,7 +126,10 @@ async function getGeminiSubscriptionInfo(accessToken, proxyOptions = null) {
 export async function getAntigravityUsage(accessToken, providerSpecificData, proxyOptions = null, options = {}) {
   try {
     const subscriptionInfo = await getAntigravitySubscriptionInfo(accessToken, proxyOptions);
-    const projectId = subscriptionInfo?.cloudaicompanionProject || null;
+    let projectId = normalizeCloudCodeProjectId(providerSpecificData?.projectId);
+    if (!projectId) {
+      projectId = normalizeCloudCodeProjectId(subscriptionInfo?.cloudaicompanionProject);
+    }
     const plan = subscriptionInfo?.currentTier?.name || "Antigravity";
 
     // 1) Prefer the dual-window summary (per-family 5h + weekly).
@@ -198,6 +201,9 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
         'gpt-oss-120b-medium',
         // Image generation models
         'gemini-3.1-flash-image',
+        'gemini-3-pro-image',
+        'gemini-2.5-flash-image',
+        'imagen-3.0-generate-002',
       ];
 
       for (const [modelKey, info] of Object.entries(data.models)) {

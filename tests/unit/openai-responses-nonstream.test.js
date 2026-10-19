@@ -146,3 +146,139 @@ describe("forced-SSE JSON path for a Responses-API client behind a chat upstream
     expect(json.choices[0].message.tool_calls[0].function.name).toBe("shell");
   });
 });
+
+// Issue #18 (third finding): a Claude client routed to a force-stream provider
+// (CodeBuddy CN rejects non-stream requests outright) used to receive the raw
+// aggregated chat.completion body — `content` undefined for an Anthropic client.
+describe("forced-SSE JSON path for a Claude client behind a chat upstream", () => {
+  const claudeCtx = ({ reasoning = null, stopTranslator = true } = {}) => {
+    const encoder = new TextEncoder();
+    const chunks = [
+      'data: {"id":"chatcmpl-sse","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-v4.1-flash","choices":[{"delta":{"content":"<block>no"},"finish_reason":null}]}',
+      ...(reasoning
+        ? [`data: {"id":"chatcmpl-sse","choices":[{"delta":{"reasoning_content":${JSON.stringify(reasoning)}},"finish_reason":null}]}`]
+        : []),
+      'data: {"id":"chatcmpl-sse","choices":[{"delta":{"content":"</block>"},"finish_reason":null}]}',
+      'data: {"id":"chatcmpl-sse","choices":[{"delta":{},"finish_reason":"stop"}]}',
+      'data: {"id":"chatcmpl-sse","choices":[],"usage":{"prompt_tokens":2026,"completion_tokens":6,"total_tokens":2032}}',
+      "data: [DONE]",
+      "",
+    ].join("\n\n");
+    const ctx = {
+      providerResponse: new Response(
+        new ReadableStream({ start(controller) { controller.enqueue(encoder.encode(chunks)); controller.close(); } }),
+        { headers: { "content-type": "text/event-stream" } }
+      ),
+      sourceFormat: FORMATS.CLAUDE,
+      targetFormat: FORMATS.OPENAI,
+      provider: "codebuddy-cn",
+      model: "deepseek-v4.1-flash",
+      body: { model: "cbcn/deepseek-v4.1-flash", messages: [], stream: false },
+      stream: false,
+      requestStartTime: Date.now(),
+      connectionId: "test-connection",
+      clientRawRequest: { endpoint: "/v1/messages" },
+      trackDone: vi.fn(),
+      appendLog: vi.fn(),
+    };
+    if (stopTranslator) {
+      // exactly what chatCore injects
+      ctx.translateToClientFormat = (raw) => translateNonStreamingResponse(raw, FORMATS.OPENAI, FORMATS.CLAUDE);
+    }
+    return ctx;
+  };
+
+  it("returns an Anthropic message body instead of raw chat.completion", async () => {
+    const result = await handleForcedSSEToJson(claudeCtx());
+    expect(result.success).toBe(true);
+    const json = await result.response.json();
+    expect(json.type).toBe("message");
+    expect(json).not.toHaveProperty("choices");
+    const text = json.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+    expect(text).toBe("<block>no</block>");
+    // `usage` must be Anthropic-named: Claude Code reads usage.input_tokens.
+    expect(json.usage.input_tokens).toBe(2026);
+    expect(json.usage.output_tokens).toBe(6);
+    expect(json.stop_reason).toBe("end_turn");
+  });
+
+  it("keeps reasoning as a thinking block, like the normal non-streaming path", async () => {
+    const result = await handleForcedSSEToJson(claudeCtx({ reasoning: "weighing the request" }));
+    const json = await result.response.json();
+    expect(json.content.find((b) => b.type === "thinking")?.thinking).toBe("weighing the request");
+  });
+
+  it("falls back to the raw body when no translator is injected", async () => {
+    const result = await handleForcedSSEToJson(claudeCtx({ stopTranslator: false }));
+    const json = await result.response.json();
+    expect(json.object).toBe("chat.completion");
+  });
+});
+
+describe("non-stream Responses upstream for a Chat client (opencode-go responses-only ids)", () => {
+  const RESPONSES_BODY = {
+    id: "resp_x",
+    object: "response",
+    created_at: 1790439371,
+    completed_at: 1790439372,
+    status: "completed",
+    model: "gpt-6-luna",
+    output: [
+      { id: "rs_1", type: "reasoning", encrypted_content: "xx", content: [], summary: [] },
+      { id: "msg_1", type: "message", status: "completed", role: "assistant", content: [{ type: "output_text", text: "pong", annotations: [] }] },
+    ],
+    usage: { input_tokens: 11, input_tokens_details: { cached_tokens: 3 }, output_tokens: 15, total_tokens: 26 },
+  };
+
+  it("converts the Responses body into a chat.completion with content and cache-aware usage", () => {
+    const out = translateNonStreamingResponse(RESPONSES_BODY, FORMATS.OPENAI_RESPONSES, FORMATS.OPENAI);
+    expect(out.object).toBe("chat.completion");
+    expect(out.choices[0].message.content).toBe("pong");
+    expect(out.choices[0].finish_reason).toBe("stop");
+    expect(out.usage.prompt_tokens).toBe(14); // 11 input + 3 cached
+    expect(out.usage.completion_tokens).toBe(15);
+    expect(out.usage.prompt_tokens_details.cached_tokens).toBe(3);
+  });
+
+  it("maps incomplete (budget exhausted) to finish_reason length", () => {
+    const body = {
+      ...RESPONSES_BODY,
+      status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" },
+      output: [{ id: "rs_1", type: "reasoning", content: [], summary: [] }],
+      usage: { input_tokens: 10, output_tokens: 0, total_tokens: 10 },
+    };
+    const out = translateNonStreamingResponse(body, FORMATS.OPENAI_RESPONSES, FORMATS.OPENAI);
+    expect(out.choices[0].finish_reason).toBe("length");
+  });
+
+  it("maps incomplete (content_filter) to finish_reason content_filter, not length", () => {
+    // As "length" a safety stop reads as a small output budget and clients
+    // respond by raising max_tokens — the refusal must surface as its own kind.
+    const body = {
+      ...RESPONSES_BODY,
+      status: "incomplete",
+      incomplete_details: { reason: "content_filter" },
+      output: [{ id: "rs_1", type: "reasoning", content: [], summary: [] }],
+      usage: { input_tokens: 10, output_tokens: 0, total_tokens: 10 },
+    };
+    const out = translateNonStreamingResponse(body, FORMATS.OPENAI_RESPONSES, FORMATS.OPENAI);
+    expect(out.choices[0].finish_reason).toBe("content_filter");
+  });
+
+  it("passes non-`response` bodies through untouched (safety)", () => {
+    const chatBody = { object: "chat.completion", choices: [] };
+    const out = translateNonStreamingResponse(chatBody, FORMATS.OPENAI_RESPONSES, FORMATS.OPENAI);
+    expect(out).toBe(chatBody);
+  });
+
+  it("converts function_call output into tool_calls", () => {
+    const body = {
+      ...RESPONSES_BODY,
+      output: [{ type: "function_call", call_id: "call_9", name: "shell", arguments: '{"cmd":"ls"}' }],
+    };
+    const out = translateNonStreamingResponse(body, FORMATS.OPENAI_RESPONSES, FORMATS.OPENAI);
+    expect(out.choices[0].finish_reason).toBe("tool_calls");
+    expect(out.choices[0].message.tool_calls[0].function.name).toBe("shell");
+  });
+});

@@ -3,13 +3,16 @@ import { FORMATS } from "../../translator/formats.js";
 import { needsTranslation } from "../../translator/index.js";
 import { fromOpenAIFinish } from "../../translator/concerns/finishReason.js";
 import { ollamaBodyToOpenAI } from "../../translator/response/ollama-to-openai.js";
-import { addBufferToUsage, filterUsageForFormat } from "../../utils/usageTracking.js";
+import { addBufferToUsage, filterUsageForFormat, usageOrEstimate } from "../../utils/usageTracking.js";
 import { createErrorResult } from "../../utils/error.js";
+import { upstreamResponseHeaders } from "../../utils/upstreamHeaders.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { parseSSEToOpenAIResponse } from "./sseToJsonHandler.js";
 import { buildRequestDetail, extractRequestConfig, extractUsageFromResponse, saveUsageStats, formatDoneLine } from "./requestDetail.js";
 import { appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { decloakToolNames } from "../../utils/claudeCloaking.js";
+import { restoreToolNames } from "../../utils/opencodeFingerprint.js";
+import { restoreGeminiToolName } from "../../translator/concerns/geminiTools.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
 
 function parseToolArguments(value) {
@@ -40,9 +43,11 @@ function shouldPreserveReasoningContent(model, responseBody, targetFormat) {
 }
 
 function openAICompletionToClaudeMessage(responseBody) {
-  if (!responseBody?.choices?.[0]) return responseBody;
-  const choice = responseBody.choices[0];
-  const message = choice.message || {};
+  if (responseBody?.type === "message" && Array.isArray(responseBody?.content)) {
+    return responseBody;
+  }
+  const choice = responseBody?.choices?.[0];
+  const message = choice?.message || {};
   const content = [];
 
   const reasoning = message.reasoning_content || message.provider_specific_fields?.reasoning_content || "";
@@ -63,14 +68,16 @@ function openAICompletionToClaudeMessage(responseBody) {
   }
   if (content.length === 0) content.push({ type: "text", text: "" });
 
-  const usage = responseBody.usage || {};
+  const usage = responseBody?.usage || {};
+  let msgId = String(responseBody?.id || `msg_${Date.now()}`).replace(/^chatcmpl-/, "");
+  if (!msgId.startsWith("msg_")) msgId = `msg_${msgId}`;
   return {
-    id: String(responseBody.id || `msg_${Date.now()}`).replace(/^chatcmpl-/, ""),
+    id: msgId,
     type: "message",
     role: "assistant",
-    model: responseBody.model || "unknown",
+    model: responseBody?.model || "unknown",
     content,
-    stop_reason: fromOpenAIFinish(choice.finish_reason, FORMATS.CLAUDE),
+    stop_reason: fromOpenAIFinish(choice?.finish_reason, FORMATS.CLAUDE),
     stop_sequence: null,
     usage: {
       input_tokens: usage.prompt_tokens || usage.input_tokens || 0,
@@ -93,6 +100,72 @@ function extractCustomToolInput(argumentsValue) {
     if (parsed && typeof parsed === "object" && typeof parsed.input === "string") return parsed.input;
   } catch { /* raw freeform input */ }
   return argumentsText;
+}
+
+// Responses `response` object → Chat Completions. Mirrors the forced-SSE branch in
+// sseToJsonHandler (pickAssistantMessageForChatCompletion: the user-visible answer is
+// the last non-empty message item; cache counters fold into prompt_tokens).
+function responsesCompletionToOpenAICompletion(responseBody) {
+  if (!responseBody || typeof responseBody !== "object" || responseBody.object !== "response") return responseBody;
+  const output = Array.isArray(responseBody.output) ? responseBody.output : [];
+  const messages = output.filter((item) => item?.type === "message");
+  let textContent = "";
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const parts = Array.isArray(messages[i].content) ? messages[i].content : [];
+    const text = parts.filter((c) => typeof c?.text === "string").map((c) => c.text).join("");
+    if (text.length > 0) { textContent = text; break; }
+    if (i === 0) textContent = text;
+  }
+  const funcCallItems = output.filter((item) => item.type === "function_call");
+  const toolCalls = funcCallItems.map((item, idx) => ({
+    id: item.call_id || `call_${item.name}_${Date.now()}_${idx}`,
+    type: "function",
+    function: {
+      name: item.name,
+      arguments: typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments || {}),
+    },
+  }));
+  const hasToolCalls = toolCalls.length > 0;
+  const usage = responseBody.usage || {};
+  const cacheRead = usage.input_tokens_details?.cached_tokens || 0;
+  const cacheCreate = usage.cache_creation_input_tokens || 0;
+  const inTokens = (usage.input_tokens || 0) + cacheRead + cacheCreate;
+  const outTokens = usage.output_tokens || 0;
+  const incomplete = responseBody.status === "incomplete";
+  const responseDone = responseBody.status === "completed" || responseBody.status === "done";
+  const message = { role: "assistant", content: textContent || (hasToolCalls ? null : "") };
+  if (hasToolCalls) message.tool_calls = toolCalls;
+  // Responses reports WHY it stopped in incomplete_details.reason; Chat
+  // Completions has one slot for it. "max_output_tokens" (the common case)
+  // and any unknown reason map to "length", but a safety stop must surface as
+  // "content_filter" — as "length" it reads as a small output budget, and
+  // clients respond by raising max_tokens or compacting instead of showing
+  // the refusal.
+  const incompleteReason = responseBody.incomplete_details?.reason;
+  const finishReason = hasToolCalls
+    ? "tool_calls"
+    : incomplete
+      ? (incompleteReason === "content_filter" ? "content_filter" : "length")
+      : (responseDone ? "stop" : (responseBody.status || "stop"));
+  const result = {
+    id: responseBody.id || `chatcmpl-${Date.now()}`,
+    object: "chat.completion",
+    created: responseBody.created_at || Math.floor(Date.now() / 1000),
+    model: responseBody.model || "unknown",
+    choices: [{
+      index: 0,
+      message,
+      finish_reason: finishReason,
+    }],
+    usage: { prompt_tokens: inTokens, completion_tokens: outTokens, total_tokens: inTokens + outTokens },
+  };
+  if (cacheRead > 0 || cacheCreate > 0) {
+    result.usage.prompt_tokens_details = {
+      ...(cacheRead > 0 ? { cached_tokens: cacheRead } : {}),
+      ...(cacheCreate > 0 ? { cache_creation_tokens: cacheCreate } : {}),
+    };
+  }
+  return result;
 }
 
 function openAICompletionToResponses(responseBody, customToolNames = null) {
@@ -159,20 +232,32 @@ function openAICompletionToResponses(responseBody, customToolNames = null) {
 /**
  * Translate non-streaming response body from provider format → OpenAI format.
  */
-export function translateNonStreamingResponse(responseBody, targetFormat, sourceFormat, customToolNames = null) {
+export function translateNonStreamingResponse(responseBody, targetFormat, sourceFormat, customToolNames = null, toolNameMap = null) {
   if (targetFormat === sourceFormat) return responseBody;
   // Provider responded in OpenAI Chat Completions shape but the client speaks
   // Responses API — convert so tool_calls/text surface as Responses `output`.
   if (targetFormat === FORMATS.OPENAI && sourceFormat === FORMATS.OPENAI_RESPONSES) {
     return openAICompletionToResponses(responseBody, customToolNames);
   }
+  // Mirror case: provider spoke the Responses API (openai-responses target —
+  // opencode-go's responses-only ids, grok-4.x / gpt-*-luna) but the client is a
+  // Chat Completions speaker. Without this the raw Responses body fell through
+  // and was served as-is: no `choices`, empty content, no usage.
+  if (targetFormat === FORMATS.OPENAI_RESPONSES && sourceFormat === FORMATS.OPENAI) {
+    return responsesCompletionToOpenAICompletion(responseBody);
+  }
   if (targetFormat === FORMATS.OPENAI && sourceFormat === FORMATS.CLAUDE) {
     return openAICompletionToClaudeMessage(responseBody);
   }
   if (targetFormat === FORMATS.OPENAI) return responseBody;
 
-  // Gemini / Antigravity
+  // Antigravity / Gemini / Vertex
   if (targetFormat === FORMATS.GEMINI || targetFormat === FORMATS.ANTIGRAVITY || targetFormat === FORMATS.GEMINI_CLI || targetFormat === FORMATS.VERTEX) {
+    if (sourceFormat === FORMATS.CLAUDE) {
+      // Direct pipeline or convert intermediate OpenAI format to Claude message
+      const openaiComp = translateNonStreamingResponse(responseBody, targetFormat, FORMATS.OPENAI, customToolNames, toolNameMap);
+      return openAICompletionToClaudeMessage(openaiComp);
+    }
     const response = responseBody.response || responseBody;
     if (!response?.candidates?.[0]) return responseBody;
 
@@ -187,10 +272,12 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
         if (part.thought === true && part.text) reasoningContent += part.text;
         else if (part.text !== undefined) textContent += part.text;
         if (part.functionCall) {
+          // Map a sanitized declaration name back to the one the client sent
+          const name = restoreGeminiToolName(part.functionCall.name, toolNameMap);
           toolCalls.push({
-            id: `call_${part.functionCall.name}_${Date.now()}_${toolCalls.length}`,
+            id: `call_${name}_${Date.now()}_${toolCalls.length}`,
             type: "function",
-            function: { name: part.functionCall.name, arguments: JSON.stringify(part.functionCall.args || {}) }
+            function: { name, arguments: JSON.stringify(part.functionCall.args || {}) }
           });
         }
         // Handle inline image data (from image generation models)
@@ -335,12 +422,24 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   responseBody = decloakToolNames(responseBody, toolNameMap);
 
   const usage = extractUsageFromResponse(responseBody);
-  appendLog({ tokens: usage, status: "200 OK" });
-  saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, usageKey: randomUUID(), silent: true });
-  if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime } }));
+  // Providers that answer a non-streaming request without a usage block used to
+  // leave BOTH writers with zeros: saveUsageStats drops all-zero rows outright
+  // (so the Overview tab, which reads usageDaily/usageHistory, showed nothing),
+  // while saveRequestDetail still wrote the row (so the Details tab listed a
+  // request with 0 in / 0 out). usageOrEstimate is the shared fallback — the
+  // SSE-to-JSON path and the plain SSE path use it too, so all three agree.
+  //
+  // This `usage` only feeds the log line and the DB rows — the client-facing
+  // usage is translatedResponse.usage below — so estimating cannot change the
+  // API response.
+  const recordedUsage = usageOrEstimate(usage, body, responseBody);
+  appendLog({ tokens: recordedUsage, status: "200 OK" });
+  const usageLatency = { total: Date.now() - requestStartTime };
+  saveUsageStats({ provider, model, tokens: recordedUsage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, latency: usageLatency, usageKey: randomUUID(), silent: true });
+  if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage: recordedUsage, latency: usageLatency }));
 
   const translatedResponse = needsTranslation(targetFormat, sourceFormat)
-    ? translateNonStreamingResponse(responseBody, targetFormat, sourceFormat, customToolNames)
+    ? translateNonStreamingResponse(responseBody, targetFormat, sourceFormat, customToolNames, toolNameMap)
     : responseBody;
   const isClaudeMessageResponse = sourceFormat === FORMATS.CLAUDE && translatedResponse?.type === "message";
   // Responses-format translation produces a `object:"response"` body with no
@@ -395,7 +494,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   saveRequestDetail(buildRequestDetail({
     provider, model, connectionId,
     latency: { ttft: totalLatency, total: totalLatency },
-    tokens: usage || { prompt_tokens: 0, completion_tokens: 0 },
+    tokens: recordedUsage || { prompt_tokens: 0, completion_tokens: 0 },
     request: extractRequestConfig(body, stream),
     providerRequest: finalBody || translatedBody || null,
     providerResponse: responseBody || null,
@@ -410,10 +509,21 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     console.error("[RequestDetail] Failed to save:", err.message);
   });
 
+  const headers = {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "*",
+    ...upstreamResponseHeaders(providerResponse.headers)
+  };
+  if (sourceFormat === FORMATS.CLAUDE) {
+    if (!headers["request-id"] || !headers["request-id"].startsWith("req_")) {
+      headers["request-id"] = `req_${Date.now()}`;
+    }
+  }
+
   return {
     success: true,
-    response: new Response(JSON.stringify(translatedResponse), {
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+    response: new Response(JSON.stringify(restoreToolNames(translatedResponse, toolNameMap)), {
+      headers
     })
   };
 }

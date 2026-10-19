@@ -7,6 +7,12 @@
 .material-symbols-outlined { visibility: hidden; }
 .fonts-loaded .material-symbols-outlined { visibility: visible; }
 
+/* Enforce font-size inheritance when explicit sizing classes or styles are provided */
+.material-symbols-outlined[class*="text-"],
+.material-symbols-outlined[style*="font-size"] {
+  font-size: inherit;
+}
+
 /* ============================================================
    10Router palette
    Brand orange (dark) / soft coral (light), neutral warm bases

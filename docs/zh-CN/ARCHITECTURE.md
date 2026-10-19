@@ -53,7 +53,7 @@ flowchart LR
     end
 
     subgraph Router["10Router 本地进程"]
-        GUARD["dashboardGuard 鉴权面<br/>PUBLIC_PREFIXES + ALWAYS_PROTECTED<br/>+ x-9r-real-ip 盖章校验"]
+        GUARD["dashboardGuard 鉴权面<br/>PUBLIC_PREFIXES + ALWAYS_PROTECTED<br/>+ x-10r-real-ip 盖章校验"]
         API["V1 兼容 API<br/>/v1/* · /v1beta/* · /responses"]
         DASH["仪表盘 + 管理 API<br/>/api/*"]
         CORE["SSE + 翻译核心<br/>open-sse + src/sse"]
@@ -152,10 +152,13 @@ flowchart LR
 
 ## 4) 认证 + 安全面
 
-- **IP 盖章链**：`custom-server.js` 从 TCP socket 写 `x-9r-real-ip`，并用进程内随机 `NINEROUTER_PEER_TOKEN`（`src/lib/auth/trustedPeer.js`）证明该头是自己盖的——登录限流（`loginLimiter.js`）只信盖章值，客户端自报 `X-Forwarded-For` 不能轮换限流桶
+- **IP 盖章链**：`custom-server.js` 从 TCP socket 写 `x-10r-real-ip`，并用进程内随机 `TENROUTER_PEER_TOKEN`（`src/lib/auth/trustedPeer.js`）证明该头是自己盖的——登录限流（`loginLimiter.js`）只信盖章值，客户端自报 `X-Forwarded-For` 不能轮换限流桶
 - 仪表盘 cookie 认证：`src/proxy.js`（dashboardGuard middleware，先于 Next rewrites）、`src/app/api/auth/login/route.js`；鉴权由 `PUBLIC_PREFIXES` / `ALWAYS_PROTECTED` 两张表决定，加公开 LLM 路径必须同步进表
 - API key 生成 / 校验：`src/shared/utils/apiKey.js`——格式 `sk-{machineId}-{keyId}-{crc8}`，CRC 为 HMAC-SHA256 截断；keyId 用 `crypto.randomBytes`（v1.0.8 起），HMAC 密钥默认走内置兜底（启动告警），实验开关 `API_KEY_ROTATION=true` 才切换为 env → `$DATA_DIR/api-key-secret`（0600）自动生成（会使存量 key 失效，绝不静默迁移）。完整机制（含「本地校验不验 CRC」的过渡态设计与强校验规划）见 [API Key 签名与密钥签名轮换](./api-key-signing-rotation.md)
-- CLI token（`x-9r-cli-token`）：加盐机器码（`getConsistentMachineId`），属本机进程互认，不是远程密钥；`import-usage` 等专用路由依赖它 + `ALWAYS_PROTECTED` 前置
+- CLI token（`x-10r-cli-token`，旧名 `x-9r-cli-token` 入站仍兼容）：加盐机器码（`getConsistentMachineId`），属本机进程互认，不是远程密钥；头名与读取统一在 `src/lib/auth/authHeaders.js`（仪表盘密码头 `x-10r-password` / 旧 `x-9r-password` 同理），guard 校验值、路由只判存在，两侧必须经同一 helper 读头；`import-usage` 等专用路由依赖它 + `ALWAYS_PROTECTED` 前置
+- 外部面板只读额度（CreditDaddy 等）：`GET /api/usage/quotas`，guard 对**仅 GET、仅该路径**放行有效虚拟 key（`sk-…`）；可查额度的连接判据与仪表盘额度页共用 `src/shared/utils/usageEligibility.js`；按连接缓存 5 分钟，`?force=1` 同一连接 30 秒内最多真刷一次，并发请求共用一次上游调用（含已超时仍在跑的那次）。响应不含凭据，但**含账号邮箱**，持任意虚拟 key 者可读
+- 更新检查开关（设置 → 安全，`settings.autoUpdateCheck`，默认开）：关闭后 `/api/version` 不访问 npm registry、不回任何新版本；`?check=1` 为显式检查（「立即检查」按钮、托盘「检查更新」），照常查询。CLI 启动器在服务起来前运行、读不到设置，改读服务端镜像的 `$DATA_DIR/update-check-disabled` 标记（`src/lib/updateCheck.js`，保存时写 / 删，开机按库对齐）
+- 登录关闭横幅可隐藏（`settings.hideLoginOffBanner`，需确认）；PATCH `requireLogin=true` 时服务端强制清除，隐藏不会延续到下一次关闭登录
 - 供应商密钥持久化在 `providerConnections` 条目中
 - 通过环境代理变量支持上游调用的可选代理（`open-sse/utils/proxyFetch.js`）
 
@@ -533,7 +536,7 @@ flowchart LR
 ## 安全敏感边界
 
 - JWT 密钥（`JWT_SECRET`）保护仪表盘会话 cookie 的校验/签名；占位串启动即拒，自动生成落 `$DATA_DIR/jwt-secret`（0600）
-- 初始密码兜底（`INITIAL_PASSWORD`，默认 `123456`）在真实部署中必须覆盖
+- 仪表盘密码无内置默认值：未设密码（且未配置 SSO）时仪表盘仅本机可访问 —— 远程来源没有任何可校验的凭据，无法接管实例；`INITIAL_PASSWORD` 是唯一的非交互式引导口令，无头部署必须设置
 - API key HMAC 密钥（`API_KEY_SECRET`）：默认内置兜底 + 启动告警；实验开关 `API_KEY_ROTATION=true` 切换为自动生成落盘 `$DATA_DIR/api-key-secret`（0600）——开启会使存量 key 的 CRC 全部失效，必须重新签发
 - 登录 500 只回通用文案，内部错误仅写服务端日志
 - `REQUIRE_API_KEY` 环境变量**运行时不读**——真实开关是设置 DB 的 `requireApiKey` 行（默认 `true`）
@@ -561,6 +564,7 @@ flowchart LR
 4. 云端行为依赖正确的 `NEXT_PUBLIC_BASE_URL` 与云端端点可达性。
 5. `API_KEY_ROTATION`（实验，默认 off）会更换 key CRC 的 HMAC 密钥——开启后**所有已签发 API key 失效**，须在仪表盘重新签发并更新各客户端；关闭时行为与历史版本一致。
 6. 导入的用量行（ZCode 插件）写 `usageHistory` 并打 `meta.imported` 标记；详情 tab 只读 `requestDetails`，两者按时间戳归并展示。
+7. **应用初始化随服务启动**：`src/instrumentation.js` 的 `register()`（Next 每个服务实例启动时调用一次）引入 `src/shared/services/bootstrap.js` → `initializeApp`：隧道 / Tailscale / MITM 自动恢复、看门狗、导入用量成本修复（后台、水位 `_meta.usageCostRepair`，新版本号重扫一次）、更新检查标记对齐。根布局的 import 只是兜底，`global.__appBootstrapped` 防二次启动。1.2.1 之前只经根布局触发——重启后要等有人打开页面才初始化，只走 `/v1` 的实例永远等不到；**不要把启动任务放回「首次渲染」路径**。完整契约（打标/回填/合成三件套、归并分页证明、撞签边界）见 [usage-import-rows.md](./usage-import-rows.md)。
 
 ## 运维验证清单
 

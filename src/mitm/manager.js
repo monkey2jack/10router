@@ -63,7 +63,7 @@ function resolveBundledServerPath() {
 }
 
 // Copy bundled server.js into DATA_DIR so MITM doesn't lock node_modules
-// (prevents EBUSY on `npm i -g 10router-cli@latest` while MITM is running).
+// (prevents EBUSY on `npm i -g @techysy/10router@latest` while MITM is running).
 function ensureRuntimeServer(bundledPath) {
   try {
     if (!bundledPath || !fs.existsSync(bundledPath)) return bundledPath;
@@ -94,8 +94,6 @@ function ensureRuntimeServer(bundledPath) {
 }
 
 const SERVER_PATH = ensureRuntimeServer(resolveBundledServerPath());
-const ENCRYPT_ALGO = "aes-256-gcm";
-const ENCRYPT_SALT = "10router-mitm-pwd";
 
 function getProcessUsingPort443() {
   try {
@@ -151,33 +149,64 @@ function killProcess(pid, force = false, sudoPassword = null) {
   }
 }
 
-function deriveKey() {
-  try {
-    const { machineIdSync } = require("node-machine-id");
-    const raw = machineIdSync();
-    return crypto.createHash("sha256").update(raw + ENCRYPT_SALT).digest();
-  } catch {
-    return crypto.createHash("sha256").update(ENCRYPT_SALT).digest();
+// The MITM sudo password uses the SAME encryption as provider credentials
+// (`lib/db/crypto/credentialCipher.js`): `enc:v1:` AES-256-GCM, key from
+// `CREDENTIAL_SECRET` or `$DATA_DIR/credential-key`.
+//
+// It used to be `sha256(machineId + "10router-mitm-pwd")` (issue #9, item 7). Two
+// problems with that: the machine id is not a secret — any local process can read
+// it, so the "encryption" was obfuscation — and a second key derivation meant a
+// second lifecycle to reason about when the key store changes (see the planned
+// OS-level backend: it only has to replace credentialCipher.getCredentialKey()).
+//
+// Legacy values (hex `iv:tag:ciphertext` from the machine-id derivation) still
+// decrypt, and are re-written in the new format the next time they are read.
+const LEGACY_ENCRYPT_SALT = "10router-mitm-pwd";
+const LEGACY_HEX_RE = /^[0-9a-f]{24}:[0-9a-f]{32}:[0-9a-f]+$/;
+
+async function credentialCipher() {
+  // Dynamic import: this file is CommonJS and the cipher is ESM.
+  return import("../lib/db/crypto/credentialCipher.js");
+}
+
+function legacyDeriveKey() {
+  const { machineIdSync } = require("node-machine-id");
+  const raw = machineIdSync();
+  if (!raw || typeof raw !== "string" || !raw.trim()) {
+    throw new Error("machine id unavailable — cannot read a legacy encrypted password");
   }
+  return crypto.createHash("sha256").update(raw + LEGACY_ENCRYPT_SALT).digest();
 }
 
-function encryptPassword(plaintext) {
-  const key = deriveKey();
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv(ENCRYPT_ALGO, key, iv);
-  const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return `${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
+async function encryptPassword(plaintext) {
+  const { encryptSecret } = await credentialCipher();
+  return encryptSecret(plaintext);
 }
 
-function decryptPassword(stored) {
+// Returns the plaintext, or null when nothing usable is stored. A legacy value
+// that decrypts is returned as-is — the caller re-saves it (saveMitmSettings will
+// write the new format), so the migration is a side effect of normal use.
+async function decryptPassword(stored) {
+  if (typeof stored !== "string" || !stored) return null;
+
+  const { isEncrypted, decryptSecret } = await credentialCipher();
+  if (isEncrypted(stored)) {
+    try {
+      const value = decryptSecret(stored);
+      return value || null;
+    } catch {
+      return null; // wrong/rolled key: ask for the password again instead of failing hard
+    }
+  }
+
+  // Legacy shape written by earlier versions.
+  if (!LEGACY_HEX_RE.test(stored)) return null;
   try {
     const [ivHex, tagHex, dataHex] = stored.split(":");
-    if (!ivHex || !tagHex || !dataHex) return null;
-    const key = deriveKey();
-    const decipher = crypto.createDecipheriv(ENCRYPT_ALGO, key, Buffer.from(ivHex, "hex"));
+    const decipher = crypto.createDecipheriv("aes-256-gcm", legacyDeriveKey(), Buffer.from(ivHex, "hex"));
     decipher.setAuthTag(Buffer.from(tagHex, "hex"));
-    return decipher.update(Buffer.from(dataHex, "hex")) + decipher.final("utf8");
+    const value = decipher.update(Buffer.from(dataHex, "hex")) + decipher.final("utf8");
+    return value || null;
   } catch {
     return null;
   }
@@ -195,7 +224,7 @@ async function saveMitmSettings(enabled, password) {
   if (!_updateSettings) return;
   try {
     const updates = { mitmEnabled: enabled };
-    if (password) updates.mitmSudoEncrypted = encryptPassword(password);
+    if (password) updates.mitmSudoEncrypted = await encryptPassword(password);
     await _updateSettings(updates);
   } catch (e) {
     err(`Failed to save settings: ${e.message}`);
@@ -215,8 +244,22 @@ async function loadEncryptedPassword() {
   if (!_getSettings) return null;
   try {
     const settings = await _getSettings();
-    if (!settings.mitmSudoEncrypted) return null;
-    return decryptPassword(settings.mitmSudoEncrypted);
+    const stored = settings.mitmSudoEncrypted;
+    if (!stored) return null;
+
+    const password = await decryptPassword(stored);
+    if (!password) return null;
+
+    // Legacy value (machine-id-derived, hex shape): re-save it in the shared
+    // `enc:v1:` format so the old derivation disappears from disk as a side
+    // effect of normal use, instead of needing a one-shot migration.
+    const { isEncrypted } = await credentialCipher();
+    if (!isEncrypted(stored) && _updateSettings) {
+      try {
+        await _updateSettings({ mitmSudoEncrypted: await encryptPassword(password) });
+      } catch { /* best effort — the password still works this session */ }
+    }
+    return password;
   } catch {
     return null;
   }
@@ -669,19 +712,28 @@ async function startServer(apiKey, sudoPassword, forceKillPort443 = false) {
   } else if (isSudoAvailable()) {
     // Pass HOME explicitly so os.homedir() resolves to the unprivileged user's home
     // instead of /root when sudo resets the environment.
+    //
+    // ROUTER_API_KEY must NOT ride in argv (#31): `sudo -S -E sh -c <cmd>` puts
+    // the whole command line in /proc/<pid>/cmdline for the server's entire
+    // life, readable by any local user. It is read from stdin instead — the
+    // same channel the sudo password already uses (sudo consumes the first
+    // line, `read` the second) — and exported inside the shell before exec,
+    // so the server's own argv stays clean too. Prefix assignments would only
+    // bind to the FIRST command (`read`), hence explicit exports.
     const inlineCmd = [
-      `HOME=${shellQuoteSingle(os.homedir())}`,
-      `ROUTER_API_KEY=${shellQuoteSingle(apiKey)}`,
-      `MITM_ROUTER_BASE=${shellQuoteSingle(mitmRouterBase)}`,
-      "NODE_ENV=production",
-      shellQuoteSingle(process.execPath),
-      shellQuoteSingle(effectiveServerPath),
-    ].join(" ");
+      `export HOME=${shellQuoteSingle(os.homedir())}`,
+      `export MITM_ROUTER_BASE=${shellQuoteSingle(mitmRouterBase)}`,
+      "export NODE_ENV=production",
+      "IFS= read -r ROUTER_API_KEY",
+      "export ROUTER_API_KEY",
+      `exec ${shellQuoteSingle(process.execPath)} ${shellQuoteSingle(effectiveServerPath)}`,
+    ].join(" && ");
     serverProcess = spawn(
       "sudo", ["-S", "-E", "sh", "-c", inlineCmd],
       { detached: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] }
     );
     serverProcess.stdin.write(`${sudoPassword}\n`);
+    serverProcess.stdin.write(`${apiKey}\n`);
     serverProcess.stdin.end();
   } else {
     // Docker/minimal images: no sudo — same as Windows-style direct spawn

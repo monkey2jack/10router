@@ -38,6 +38,7 @@ import {
   registerXiaomiMimoSession,
   getXiaomiMimoSessionStatus,
   clearXiaomiMimoSession,
+  completeXiaomiMimoFlow,
 } from "@/lib/oauth/utils/server";
 import { detectIdeInstalled } from "@/lib/oauth/utils/ideDetect";
 import { ZED_HOSTED_CONFIG } from "@/lib/oauth/constants/oauth";
@@ -86,6 +87,14 @@ async function completeXaiManualCode(code, state) {
  * Handles: authorize, exchange, device-code, poll
  */
 
+// The Xiaomi MiMo cards share this one custom ECDH flow: `xiaomi-mimo` (cloud
+// models) and `mimo-desktop` (account-session models, split out 2026-09-22). The
+// flow is addressed by provider id in the URL, so both ids must take the SAME
+// branches — while connections are created under whichever card the caller used,
+// never a hardcoded id, or the two cards would end up sharing one row.
+const XIAOMI_MIMO_PROVIDERS = new Set(["xiaomi-mimo", "mimo-desktop"]);
+const isXiaomiMimo = (p) => XIAOMI_MIMO_PROVIDERS.has(p);
+
 // GET /api/oauth/[provider]/authorize - Generate auth URL
 // GET /api/oauth/[provider]/device-code - Request device code (for device_code flow)
 export async function GET(request, { params }) {
@@ -96,7 +105,7 @@ export async function GET(request, { params }) {
     if (action === "authorize") {
       // Xiaomi MiMo: custom ECDH flow. Start the local callback proxy, mint an
       // X25519 keypair and register it against the state the client generated.
-      if (provider === "xiaomi-mimo") {
+      if (isXiaomiMimo(provider)) {
         const state = searchParams.get("state");
         if (!state) {
           return NextResponse.json({ error: "Missing state" }, { status: 400 });
@@ -105,11 +114,16 @@ export async function GET(request, { params }) {
         if (!started.success) {
           return NextResponse.json({ error: started.reason || "Failed to start callback listener" }, { status: 500 });
         }
-        const { generateKeyPair, buildAuthorizeUrl, getKeyName } = await import("@/lib/oauth/providers/xiaomi-mimo.js");
+        const { generateKeyPair, buildAuthorizeUrl, buildManualAuthorizeUrl, getKeyName } =
+          await import("@/lib/oauth/providers/xiaomi-mimo.js");
         const { publicKey, privateKeyDer } = generateKeyPair();
         registerXiaomiMimoSession({ state, privateKeyDer });
+        const keyName = getKeyName();
         return NextResponse.json({
-          authorizeUrl: buildAuthorizeUrl(publicKey, started.callbackUrl, getKeyName()),
+          authorizeUrl: buildAuthorizeUrl(publicKey, started.callbackUrl, keyName),
+          // The platform's code-display page. Official clients surface both and let the
+          // user fall back to copying a code when the localhost callback is unreachable.
+          manualUrl: buildManualAuthorizeUrl(publicKey, keyName),
           callbackUrl: started.callbackUrl,
           state,
         });
@@ -179,7 +193,7 @@ export async function GET(request, { params }) {
       else if (provider === "zed") session = getZedSessionStatus(state);
       else if (provider === "xai") session = getXaiSessionStatus(state);
       else if (provider === "codex") session = getCodexSessionStatus(state);
-      else if (provider === "xiaomi-mimo") {
+      else if (isXiaomiMimo(provider)) {
         const xm = getXiaomiMimoSessionStatus(state);
         if (!xm) return NextResponse.json({ status: "unknown" });
         if (xm.status === "done" && xm.result) {
@@ -215,7 +229,7 @@ export async function GET(request, { params }) {
       else if (provider === "zed") stopZedProxy();
       else if (provider === "xai") stopXaiProxy();
       else if (provider === "codex") stopCodexProxy();
-      else if (provider === "xiaomi-mimo") stopXiaomiMimoProxy();
+      else if (isXiaomiMimo(provider)) stopXiaomiMimoProxy();
       else return NextResponse.json({ error: "Proxy only supported for codex/xai/trae/windsurf/zed" }, { status: 400 });
       return NextResponse.json({ success: true });
     }
@@ -257,7 +271,10 @@ export async function GET(request, { params }) {
         "codebuddy-cn",
         "codebuddy-intl",
         "qoder",
+        "qoder-cn",
         "grok-cli",
+        "glm",
+        "muse",
       ];
       let deviceData;
       if (noPkceDeviceProviders.includes(provider)) {
@@ -287,6 +304,31 @@ export async function GET(request, { params }) {
 export async function POST(request, { params }) {
   try {
     const { provider, action } = await params;
+
+    // Zero-body actions (check-in, claim-compensation) don't require JSON payloads
+    if (action === "checkin") {
+      if (provider === "codebuddy-cn") {
+        const { runCodebuddyCheckinTick } = await import("@/sse/services/codebuddyCheckin.js");
+        const results = await runCodebuddyCheckinTick();
+        return NextResponse.json({ success: true, results });
+      }
+      if (provider === "qoder" || provider === "qoder-cn") {
+        const { claimAllQoderAccounts } = await import("@/sse/services/qoderCheckin.js");
+        const results = await claimAllQoderAccounts(provider);
+        return NextResponse.json({ success: true, results });
+      }
+      return NextResponse.json({ error: `Check-in not supported for ${provider}` }, { status: 400 });
+    }
+
+    if (action === "claim-compensation") {
+      if (provider === "codebuddy-cn") {
+        const { runCodebuddyCompensationTick } = await import("@/sse/services/codebuddyCheckin.js");
+        const results = await runCodebuddyCompensationTick();
+        return NextResponse.json({ success: true, results });
+      }
+      return NextResponse.json({ error: `Claim compensation not supported for ${provider}` }, { status: 400 });
+    }
+
     let body;
     try {
       body = await request.json();
@@ -308,33 +350,150 @@ export async function POST(request, { params }) {
       return NextResponse.json({ success: ok });
     }
 
+    if (action === "submit-code") {
+      // Xiaomi MiMo: the platform's authorize page may SHOW A CODE instead of calling
+      // our localhost redirect, so the user has to paste it back. That code is the very
+      // same ECDH+AES-GCM payload the callback carries, so it goes through the same
+      // decrypt-and-store path (see completeXiaomiMimoFlow).
+      if (!isXiaomiMimo(provider)) {
+        return NextResponse.json({ error: "submit-code only supported for the Xiaomi MiMo cards" }, { status: 400 });
+      }
+
+      const outcome = await completeXiaomiMimoFlow(body?.code);
+      if (!outcome.ok) {
+        // These are shown verbatim in the modal, so they must say what to DO next:
+        // a decryption failure is almost always a copy problem (a truncated blob or
+        // a label copied along with it), never a permission problem.
+        const messages = {
+          empty_payload: "Paste the authorization code first.",
+          payload_too_short:
+            "That is too short to be the whole code — it is usually a long string of 100+ characters. Use the Copy button on the sign-in page, then paste it here.",
+          no_pending_session:
+            "This sign-in attempt is no longer active. Click Sign in via Browser to start again.",
+          decrypt_failed:
+            "That code does not match this sign-in. Copy the whole code from the sign-in page, or click Sign in via Browser for a fresh one.",
+          missing_api_key: "That code did not contain an API key. Start the sign-in again.",
+        };
+        return NextResponse.json(
+          { status: "error", error: messages[outcome.error] || "Could not read that code." },
+          { status: 400 },
+        );
+      }
+
+      // The payload carries no state, so report which session matched: the client needs
+      // it for /exchange, which applies the sk- key server-side (it never reaches the
+      // browser — see the poll-status branch for the same redaction rule).
+      return NextResponse.json({
+        status: "done",
+        state: outcome.state,
+        result: { uid: outcome.result.uid, baseUrl: outcome.result.baseUrl },
+      });
+    }
+
     if (action === "exchange") {
       const { code, redirectUri, codeVerifier, state, meta } = body;
 
       // Xiaomi MiMo: the decrypted session already holds the sk- key server-side.
-      if (provider === "xiaomi-mimo") {
+      if (isXiaomiMimo(provider)) {
         if (!state) return NextResponse.json({ error: "Missing state" }, { status: 400 });
         const session = getXiaomiMimoSessionStatus(state);
         if (!session || session.status !== "done" || !session.result?.accessToken) {
           return NextResponse.json({ error: "OAuth session not completed" }, { status: 400 });
         }
         try {
-          const connection = await createProviderConnection({
-            provider: "xiaomi-mimo",
-            authType: "api_key",
-            accessToken: session.result.accessToken,
-            refreshToken: null,
-            expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
-            email: session.result.uid ? `${session.result.uid}@xiaomi` : null,
-            displayName: session.result.uid ? `Xiaomi ${session.result.uid}` : "Xiaomi MiMo",
-            providerSpecificData: {
-              uid: session.result.uid || null,
-              baseUrl: session.result.baseUrl || "https://api.xiaomimimo.com/v1",
-              authMethod: "oauth",
-              provider: "Xiaomi MiMo Desktop",
+          // Which card this browser sign-in was started from. The account session
+          // (passToken) belongs ONLY to the `mimo-desktop` card: folding it into
+          // the cloud card's row is what made its connection advertise a Desktop
+          // session it does not own (the "客户端会话" badge, and a weekly quota
+          // read from this machine's Desktop cookie store). The cloud card keeps
+          // the sk- key and nothing else; the executor never reads a stored
+          // passToken on it, and the Desktop card falls back to the machine
+          // cookie store on its own.
+          const isDesktopCard = provider === "mimo-desktop";
+
+          let desktopSession = null;
+          if (isDesktopCard) {
+            try {
+              const { readDesktopPassToken } = await import("open-sse/shared/mimoAccount.js");
+              desktopSession = await readDesktopPassToken();
+            } catch {
+              // Desktop locked / not installed — the import still stores what
+              // the browser flow returned; the session can come from the
+              // Desktop card's own import path later.
+            }
+          }
+
+          const uid = session.result.uid || null;
+          const sessionExtras = desktopSession?.passToken
+            ? {
+                mimoPassToken: desktopSession.passToken,
+                mimoUserId: desktopSession.userId || null,
+                mimoCUserId: desktopSession.cUserId || null,
+              }
+            : {};
+
+          // Merge into an existing row for the same Xiaomi account (e.g. the
+          // session-only connection created by the Desktop QR import) instead
+          // of stacking a second connection. Identity matching is shared with
+          // the api-key route so both paths agree — and the mimoUserId fallback
+          // covers payloads where the platform omits uid.
+          const { getProviderConnections, updateProviderConnection } = await import("@/models");
+          const { findXiaomiConnection } = await import("@/lib/oauth/xiaomiIdentity.js");
+          const existing = findXiaomiConnection(
+            await getProviderConnections({ provider }),
+            {
+              uid,
+              key: session.result.accessToken,
+              // The desktop session read above may know the account even when
+              // the browser payload does not carry a uid.
+              mimoUserId: desktopSession?.userId || null,
             },
-            testStatus: "active",
-          });
+          );
+
+          // Merged base psd for the update path. On the cloud card, also drop
+          // any session fields an older build folded into the row — the
+          // {...existing} spread would otherwise carry them straight back in.
+          const existingPsd = { ...(existing?.providerSpecificData || {}) };
+          if (!isDesktopCard) {
+            delete existingPsd.mimoPassToken;
+            delete existingPsd.mimoUserId;
+            delete existingPsd.mimoCUserId;
+          }
+
+          const connection = existing
+            ? await updateProviderConnection(existing.id, {
+                accessToken: session.result.accessToken,
+                providerSpecificData: {
+                  ...existingPsd,
+                  uid,
+                  baseUrl: session.result.baseUrl || "https://api.xiaomimimo.com/v1",
+                  authMethod: "oauth",
+                  // The Desktop label only ever belongs on the Desktop card —
+                  // on a cloud row it claimed a session that card does not own.
+                  ...(isDesktopCard ? { provider: "Xiaomi MiMo Desktop" } : {}),
+                  ...sessionExtras,
+                },
+                testStatus: "active",
+                // Browser re-authorize supersedes the stored failure text.
+                resetErrorState: true,
+              })
+            : await createProviderConnection({
+                provider,
+                authType: "api_key",
+                accessToken: session.result.accessToken,
+                refreshToken: null,
+                expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+                email: uid ? `${uid}@xiaomi` : null,
+                displayName: uid ? `Xiaomi ${uid}` : "Xiaomi MiMo",
+                providerSpecificData: {
+                  uid,
+                  baseUrl: session.result.baseUrl || "https://api.xiaomimimo.com/v1",
+                  authMethod: "oauth",
+                  ...(isDesktopCard ? { provider: "Xiaomi MiMo Desktop" } : {}),
+                  ...sessionExtras,
+                },
+                testStatus: "active",
+              });
           clearXiaomiMimoSession(state);
           stopXiaomiMimoProxy();
           return NextResponse.json({
@@ -464,15 +623,16 @@ export async function POST(request, { params }) {
       }
 
       // Providers that don't use PKCE for device code
-      const noPkceProviders = ["github", "kimi", "kimi-coding", "kilocode", "codebuddy-cn", "codebuddy-intl"];
+      const noPkceProviders = ["github", "kimi", "kimi-coding", "kilocode", "codebuddy-cn", "codebuddy-intl", "glm", "muse"];
       let result;
       if (noPkceProviders.includes(provider)) {
-        // kimi needs extraData._kimiDeviceId for stable X-Msh-Device-Id (CLIProxyAPI parity)
+        // kimi needs extraData._kimiDeviceId for stable X-Msh-Device-Id (CLIProxyAPI parity);
+        // glm needs extraData._zcodePollToken (ZCode CLI 轮询会话凭证)
         result = await pollForToken(provider, deviceCode, null, extraData);
       } else if (provider === "kiro") {
         // Kiro needs extraData (clientId, clientSecret) from device code response
         result = await pollForToken(provider, deviceCode, null, extraData);
-      } else if (provider === "qoder") {
+      } else if (provider === "qoder" || provider === "qoder-cn") {
         // Qoder needs both the PKCE verifier (codeVerifier) and the machineId
         // captured at device-code time (extraData._qoderMachineId) so
         // mapTokens can persist it for COSY signing.
@@ -518,6 +678,8 @@ export async function POST(request, { params }) {
         error: result.error,
         errorDescription: result.errorDescription,
         pending: isPending,
+        // fatal：不可恢复（如登录后交换失败）——客户端必须停止轮询并展示错误
+        ...(result.fatal ? { fatal: true } : {}),
       });
     }
 

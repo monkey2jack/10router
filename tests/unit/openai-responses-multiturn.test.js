@@ -179,3 +179,27 @@ describe("GrokCliExecutor multi-turn input", () => {
     expect(executor._currentTurnIdx).toBe(2);
   });
 });
+
+describe("openai→responses parameter renames", () => {
+  it("renames max_tokens to max_output_tokens (strict /v1/responses upstreams reject max_tokens)", () => {
+    const out = openaiToOpenAIResponsesRequest(
+      "grok-4.7",
+      { model: "grok-4.7", messages: [{ role: "user", content: "hi" }], max_tokens: 1024 },
+      false,
+      null
+    );
+    expect(out.max_tokens).toBeUndefined();
+    expect(out.max_output_tokens).toBe(1024);
+  });
+
+  it("leaves bodies without max_tokens untouched (no stray max_output_tokens)", () => {
+    const out = openaiToOpenAIResponsesRequest(
+      "grok-4.7",
+      { model: "grok-4.7", messages: [{ role: "user", content: "hi" }] },
+      false,
+      null
+    );
+    expect(out.max_tokens).toBeUndefined();
+    expect(out.max_output_tokens).toBeUndefined();
+  });
+});

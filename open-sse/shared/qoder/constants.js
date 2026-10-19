@@ -28,6 +28,23 @@ export const QODER_REFRESH_TOKEN_URL = `${QODER_CENTER_BASE}/algo/api/v3/user/re
 // This endpoint is NOT COSY-signed (plain JSON POST).
 export const QODER_JOB_TOKEN_EXCHANGE_URL = `${QODER_OPENAPI_BASE}/api/v1/jobToken/exchange`;
 
+// Web console (browser session) — the per-resource-pack usage breakdown is only
+// served here, and only to the browser's httpOnly session cookie (device/job
+// tokens get 401). CreditDaddy syncs captured cookies via providerSpecificData.
+export const QODER_WEB_BASE = "https://qoder.com";
+
+// ─── Qoder CN (qoder.com.cn deployment, from qodercli-cn v1.1.32) ──
+export const QODER_CN_GATEWAY_BASE = "https://gateway.qoder.com.cn";
+export const QODER_CN_OPENAPI_BASE = "https://openapi.qoder.com.cn";
+export const QODER_CN_LOGIN_URL = "https://qoder.cn/device/selectAccounts";
+export const QODER_CN_DEVICE_TOKEN_URL = `${QODER_CN_OPENAPI_BASE}/api/v1/deviceToken/poll`;
+export const QODER_CN_USERINFO_URL = `${QODER_CN_OPENAPI_BASE}/api/v1/userinfo`;
+export const QODER_CN_QUOTA_USAGE_URL = `${QODER_CN_OPENAPI_BASE}/api/v2/quota/usage`;
+export const QODER_CN_JOB_TOKEN_EXCHANGE_URL = `${QODER_CN_OPENAPI_BASE}/api/v1/jobToken/exchange`;
+export const QODER_CN_WEB_BASE = "https://qoder.cn";
+export const QODER_CN_CHAT_BASE_ALT = QODER_CN_GATEWAY_BASE;
+export const QODER_CN_MODEL_LIST_URL = `${QODER_CN_GATEWAY_BASE}/algo/api/v2/model/list`;
+
 // Inference endpoints (under /algo on api3.qoder.sh, all COSY-signed)
 export const QODER_CHAT_SIG_PATH = "/api/v2/service/pro/sse/agent_chat_generation";
 export const QODER_CHAT_URL = `${QODER_CHAT_BASE}/algo${QODER_CHAT_SIG_PATH}?FetchKeys=llm_model_result&AgentId=agent_common`;
@@ -62,7 +79,10 @@ export const QODER_MODEL_MAP = {
   gmodel: "gmodel",
   gfmodel: "gfmodel",
   kmodel: "kmodel",
+  kmodel_latest: "kmodel_latest",
   mmodel: "mmodel",
+  gm51model: "gm51model",
+  qmodel_preview: "qmodel_preview",
 };
 
 // RSA public key for COSY encryption (extracted from Qoder IDE v0.9).

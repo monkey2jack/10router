@@ -76,7 +76,7 @@ Common fields above work everywhere. These add/override:
 |---|---|---|
 | `openai`, `minimax`, `openrouter`, `recraft` | `quality`, `style`, `response_format` | Standard OpenAI shape |
 | `gemini` (nano-banana) | — | Only `prompt`; ignores `size`/`n` |
-| `codex` (gpt-5.4-image) | `image`, `images[]`, `image_detail`, `output_format`, `background` | SSE stream; **ChatGPT Plus/Pro required** |
+| `codex` (gpt-5.5-image) | `image`, `images[]`, `image_detail`, `output_format`, `background` | SSE stream; **ChatGPT Plus/Pro required** |
 | `huggingface` | — | Only `prompt`; returns single image |
 | `nanobanana` | `image`, `images[]` (edit mode) | `size` → aspect ratio; async polling |
 | `fal-ai` | `image` (img2img) | `n` → `num_images`; `size` → ratio; async |

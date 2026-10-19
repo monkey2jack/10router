@@ -12,7 +12,12 @@ HERE = Path(__file__).parent
 MASTER = 1024
 ORANGE_TOP = (240, 138, 46)    # #F08A2E
 ORANGE_BOTTOM = (226, 98, 14)  # #E2620E
-RADIUS = int(MASTER * 0.24)    # 与托盘小图标一致的圆角比例
+RADIUS = int(MASTER * 0.24)    # 与托盘小图标一致的圆角比例(单色托盘版仍画满幅)
+# 应用图标(彩色版)四周留 10% 透明边:100% 出血在任务栏/桌面快捷方式上
+# 视觉上顶满格,和系统自带图标并排时显得胀。内容画在 CONTENT 画布再居中贴回。
+PAD_RATIO = 0.10
+CONTENT = int(MASTER * (1 - 2 * PAD_RATIO))
+CONTENT_RADIUS = int(CONTENT * 0.24)
 
 
 def _font(size: int) -> ImageFont.FreeTypeFont:
@@ -26,25 +31,29 @@ def _font(size: int) -> ImageFont.FreeTypeFont:
 
 def build_master() -> Image.Image:
     img = Image.new("RGBA", (MASTER, MASTER), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
+    content = Image.new("RGBA", (CONTENT, CONTENT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(content)
     # 垂直渐变:逐行画圆角矩形裁出的横线
-    overlay = Image.new("RGBA", (MASTER, MASTER), (0, 0, 0, 0))
+    overlay = Image.new("RGBA", (CONTENT, CONTENT), (0, 0, 0, 0))
     odraw = ImageDraw.Draw(overlay)
-    for y in range(MASTER):
-        t = y / (MASTER - 1)
+    for y in range(CONTENT):
+        t = y / (CONTENT - 1)
         color = tuple(round(a + (b - a) * t) for a, b in zip(ORANGE_TOP, ORANGE_BOTTOM)) + (255,)
-        odraw.line([(0, y), (MASTER, y)], fill=color)
-    mask = Image.new("L", (MASTER, MASTER), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, MASTER - 1, MASTER - 1], radius=RADIUS, fill=255)
-    img.paste(overlay, (0, 0), mask)
+        odraw.line([(0, y), (CONTENT, y)], fill=color)
+    mask = Image.new("L", (CONTENT, CONTENT), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, CONTENT - 1, CONTENT - 1], radius=CONTENT_RADIUS, fill=255)
+    content.paste(overlay, (0, 0), mask)
 
     text = "10"
-    font = _font(int(MASTER * 0.52))
+    font = _font(int(CONTENT * 0.52))
     left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
     tw, th = right - left, bottom - top
-    x = (MASTER - tw) / 2 - left
-    y = (MASTER - th) / 2 - top
+    x = (CONTENT - tw) / 2 - left
+    y = (CONTENT - th) / 2 - top
     draw.text((x, y), text, font=font, fill=(255, 255, 255, 255))
+
+    margin = (MASTER - CONTENT) // 2
+    img.paste(content, (margin, margin))
     return img
 
 

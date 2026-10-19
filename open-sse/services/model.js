@@ -91,6 +91,29 @@ export function resolveModelAliasFromMap(alias, aliases) {
  * @param {string} modelStr - Model string
  * @param {object|function} aliasesOrGetter - Aliases object or async function to get aliases
  */
+/**
+ * Resolve a BARE model string through the alias maps (user aliases, then
+ * built-ins). Returns the resolved {provider, model}, or null when nothing
+ * matched — deliberately NO prefix inference, so callers decide what an
+ * unmatched bare name means for their surface.
+ */
+export async function resolveModelAliasCore(modelStr, aliasesOrGetter) {
+  const parsed = parseModel(modelStr);
+  if (!parsed.isAlias) return null;
+
+  // Get aliases (from object or function)
+  const aliases =
+    typeof aliasesOrGetter === "function"
+      ? await aliasesOrGetter()
+      : aliasesOrGetter;
+
+  return (
+    resolveModelAliasFromMap(parsed.model, aliases) ||
+    resolveModelAliasFromMap(parsed.model, BUILTIN_MODEL_ALIASES) ||
+    null
+  );
+}
+
 export async function getModelInfoCore(modelStr, aliasesOrGetter) {
   const parsed = parseModel(modelStr);
 
@@ -101,16 +124,7 @@ export async function getModelInfoCore(modelStr, aliasesOrGetter) {
     };
   }
 
-  // Get aliases (from object or function)
-  const aliases =
-    typeof aliasesOrGetter === "function"
-      ? await aliasesOrGetter()
-      : aliasesOrGetter;
-
-  // Resolve alias
-  const resolved =
-    resolveModelAliasFromMap(parsed.model, aliases) ||
-    resolveModelAliasFromMap(parsed.model, BUILTIN_MODEL_ALIASES);
+  const resolved = await resolveModelAliasCore(modelStr, aliasesOrGetter);
   if (resolved) {
     return resolved;
   }
@@ -122,8 +136,29 @@ export async function getModelInfoCore(modelStr, aliasesOrGetter) {
   };
 }
 
+// Codex 后端的专属 GPT slug：存在于 backend-api/codex/models，但 OpenAI API 没有。
+// 没有这些规则，Codex CLI 发的裸模型名（如 /model 选择器的 "gpt-5.6-terra"）会被
+// 推断到 openai，只有 Codex OAuth 账号的用户拿到的是 404（上游 #4405, 8f9ff44f）。
+// 覆盖范围：gpt-5.x、gpt-6.x、gpt-daybreak-*、gpt-reserve*；
+// 普通 gpt-4* / gpt-3.5* / gpt-4o* 仍走下面的通用 gpt-* → openai 规则。
+const CODEX_BARE_SLUG_PATTERNS = [
+  /^gpt-[56]\./,
+  /^gpt-6-/,
+  /^gpt-daybreak-/,
+  /^gpt-reserve/,
+];
+
+// 裸 slug 是否属于 Codex 后端专属 id —— src 侧在 alias/combo 解析之后复用此判断。
+export function isCodexBareSlug(modelName) {
+  if (!modelName) return false;
+  const m = modelName.toLowerCase();
+  return CODEX_BARE_SLUG_PATTERNS.some((re) => re.test(m));
+}
+
 // Config-driven prefix → provider inference (first match wins, fallback "openai").
 const MODEL_PREFIX_PROVIDERS = [
+  // codex 专属 slug 必须在通用 gpt-* → openai 之前命中
+  ...CODEX_BARE_SLUG_PATTERNS.map((re) => [re, "codex"]),
   [/^claude-/, "anthropic"],
   [/^gemini-/, "gemini"],
   [/^gpt-/, "openai"],

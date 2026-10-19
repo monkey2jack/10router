@@ -1,27 +1,39 @@
 import { PROVIDER_MODELS, PROVIDER_ID_TO_ALIAS, getModelKind } from "@/shared/constants/models";
 import {
   AI_PROVIDERS,
+  ALIAS_TO_ID,
   getProviderAlias,
   isAnthropicCompatibleProvider,
   isOpenAICompatibleProvider,
 } from "@/shared/constants/providers";
-import { getProviderConnections, getProviderNodes, getCombos, getCustomModels, getModelAliases } from "@/lib/localDb";
+import { buildProviderOrderComparator } from "@/shared/utils/modelListOrder";
+import { getProviderConnections, getProviderNodes, getCombos, getCustomModels, getModelAliases, getSettings } from "@/lib/localDb";
+import { getAllModelCaps } from "@/lib/modelCapsDb";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveKimchiModels } from "open-sse/services/kimchiModels.js";
 import { resolveQoderModels } from "open-sse/services/qoderModels.js";
 import { resolveCopilotModels } from "open-sse/services/copilotModels.js";
+
+// This GET reads live connection/registry state — without it Next may serve a
+// cached render, and a freshly added connection would not appear in the model
+// list until a full server restart (observed 2026-09-27: imported ocg stayed
+// invisible while /v1/models kept serving the pre-import render).
+export const dynamic = "force-dynamic";
 import { resolveClinepassModels } from "open-sse/services/clinepassModels.js";
+import { resolveClineModels } from "open-sse/services/clineModels.js";
 import { resolveGrokCliModels } from "open-sse/services/grokCliModels.js";
 import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
-import { capabilitiesFromServiceKind, getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { capabilitiesFromServiceKind, getCapabilitiesForModel, aggregateComboCapabilities, DEFAULT_CAPABILITIES } from "open-sse/providers/capabilities.js";
 
 // Per-provider live model resolvers. Each receives a connection record and
 // returns { models: [{ id, name? }, ...] } | null on failure.
 // Adding a provider here makes /v1/models prefer the live catalog for it.
+const STATIC_CL = PROVIDER_ID_TO_ALIAS["cline"] || "cline";
+
 const LIVE_MODEL_RESOLVERS = {
   kiro: async (conn) => {
     const result = await resolveKiroModels({
@@ -75,6 +87,32 @@ const LIVE_MODEL_RESOLVERS = {
       apiKey: conn.apiKey,
     });
     return result?.models?.length ? { models: result.models } : null;
+  },
+  cline: async (conn) => {
+    // Static paid list (registry) UNION live free shelf: the
+    // recommended-models feed only carries the rotating free tier (plus
+    // clinePass, which belongs to the clinepass provider), so overriding here
+    // would hide the paid models. On fetch failure return null and let the
+    // static list stand alone.
+    const staticModels = (PROVIDER_MODELS[STATIC_CL] || [])
+      .filter((m) => m?.id)
+      .map((m) => ({ id: m.id, name: m.name || m.id }));
+    const result = await resolveClineModels({
+      accessToken: conn.accessToken,
+      apiKey: conn.apiKey,
+      email: conn.email,
+      refreshToken: conn.refreshToken,
+      providerSpecificData: conn.providerSpecificData || {},
+    });
+    if (!result?.models?.length) return null;
+    const seen = new Set(staticModels.map((m) => m.id));
+    const merged = [...staticModels];
+    for (const m of result.models) {
+      if (!m?.id || seen.has(m.id)) continue;
+      seen.add(m.id);
+      merged.push({ id: m.id, name: m.name || m.id });
+    }
+    return { models: merged };
   },
   "grok-cli": async (conn) => {
     const proxy = await resolveConnectionProxyConfig(conn.providerSpecificData || {});
@@ -131,7 +169,7 @@ const parseOpenAIStyleModels = (data) => {
 
 // Header sent by fetchCompatibleModelIds to detect cross-instance /models fetches
 // and break recursive loops between 10router instances connected to each other.
-const INTERNAL_MODELS_FETCH_HEADER = "x-9r-internal-models-fetch";
+const INTERNAL_MODELS_FETCH_HEADER = "x-10r-internal-models-fetch";
 
 // LLM kind sentinel — combos/models with no explicit kind default to LLM
 const LLM_KIND = "llm";
@@ -145,6 +183,7 @@ const MODEL_TYPE_TO_KIND = {
   stt: "stt",
   imageToText: "imageToText",
   video: "video",
+  rerank: "rerank",
 };
 
 function modelKind(model) {
@@ -157,6 +196,10 @@ function modelKind(model) {
 // fall back to provider-level kind matching when per-model type is unavailable.
 function inferKindFromUnknownModelId(modelId) {
   const lower = String(modelId).toLowerCase();
+  // Before the embedding test: every shipped reranker id contains "rerank"
+  // (bge-reranker-*, jina-reranker-*) and none contains "embed", but the
+  // ordering keeps the two heuristics independent if a future id mixes both.
+  if (/rerank/.test(lower)) return "rerank";
   if (/embed/.test(lower)) return "embedding";
   if (/tts|speech|audio|voice/.test(lower)) return "tts";
   if (/image|imagen|dall-?e|flux|sdxl|sd-|stable-diffusion/.test(lower)) return "image";
@@ -236,6 +279,13 @@ function comboMatchesKinds(combo, kindFilter) {
   const kind = combo?.kind || LLM_KIND;
   return kindFilter.includes(kind);
 }
+
+// Positive-integer coercion for user-entered/stored token counts (may arrive
+// as strings from custom model rows); null when absent or invalid.
+const posNum = (v) => {
+  const n = typeof v === "string" ? Number(v) : v;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+};
 
 /**
  * Build OpenAI-format models list filtered by service kinds.
@@ -340,7 +390,142 @@ export async function buildModelsList(kindFilter, options = {}) {
     }
   }
 
-  const models = [];
+  // The user's latest provider order: settings.providerCardOrder is written by
+  // the dashboard's drag-and-drop card reordering (array of provider ids). The
+  // model list must expose providers in that same order — otherwise clients
+  // keep seeing raw DB insertion order while the UI says something else.
+  // One final rank sort (see emit/ordered at the bottom) is the single source
+  // of ordering, so connected providers and noAuth orphan custom models
+  // interleave exactly like the dashboard (where visible noAuth share the top
+  // rank with connected). Tie-breaks mirror the dashboard comparator via the
+  // shared helper: manual order → registry priority → name.
+  let providerCardOrder = [];
+  try {
+    const settings = await getSettings();
+    if (Array.isArray(settings?.providerCardOrder)) providerCardOrder = settings.providerCardOrder;
+  } catch (e) {
+    console.log("Could not fetch provider card order:", e?.message);
+  }
+  // User-pinned per-model context window / max output (dashboard overrides).
+  // Published under every provider name spelling, like getDisabledModels().
+  // Fail-open: clients may not override anything, but must still get a list.
+  let capsOverrides = {};
+  try {
+    const ov = await getAllModelCaps();
+    if (ov && typeof ov === "object") capsOverrides = ov;
+  } catch (e) {
+    console.log("Could not fetch model caps overrides:", e?.message);
+  }
+  const compareProviders = buildProviderOrderComparator({
+    cardOrder: providerCardOrder,
+    aliasToId: ALIAS_TO_ID,
+    priorityOf: (id) => AI_PROVIDERS[id]?.priority,
+  });
+  // Resolve every provider that can appear in this response to one ordinal up
+  // front, ranked together by the comparator — so connected providers and
+  // noAuth orphan custom models interleave under exactly the dashboard's rule
+  // (visible noAuth shares the top card rank with connected).
+  const canonicalProvider = (idOrAlias) => ALIAS_TO_ID[idOrAlias] || idOrAlias;
+  const groupRank = new Map();
+  {
+    const present = new Set(activeConnectionByProvider.keys());
+    for (const cm of customModels) {
+      if (cm?.id && cm?.providerAlias) present.add(String(cm.providerAlias));
+    }
+    if (connections.length === 0 && !dbAvailable) {
+      for (const alias of Object.keys(PROVIDER_MODELS)) present.add(alias);
+    }
+    [...present].sort(compareProviders).forEach((key, i) => {
+      const cid = canonicalProvider(key);
+      if (!groupRank.has(cid)) groupRank.set(cid, i);
+    });
+  }
+  const COMBO_RANK = -1; // combos lead the list, ahead of every provider group
+  const rankOf = (idOrAlias) => {
+    const r = groupRank.get(canonicalProvider(idOrAlias || ""));
+    return r === undefined ? Number.MAX_SAFE_INTEGER : r;
+  };
+
+  // Tagged accumulator: final list = stable sort by (rank, seq), so a
+  // provider's own models keep insertion order while the provider groups
+  // themselves land in the user's card order. This replaces pushing into one
+  // array in loop order, which could not interleave orphan providers.
+  const tagged = [];
+  let seq = 0;
+  const emit = (model, rank) => { tagged.push({ model, rank, seq: seq++ }); };
+  const orderedModels = () => {
+    tagged.sort((a, b) => (a.rank - b.rank) || (a.seq - b.seq));
+    return tagged.map((t) => t.model);
+  };
+
+  // Lookup map so aggregateComboCapabilities can recursively resolve nested combos
+  const comboByName = Object.fromEntries(combos.map((c) => [c.name, c.models]));
+
+  // LLM combos carry the aggregate of their members: union of modalities,
+  // intersection of tools, min context / max output (combo-caps contract).
+  // Pass the dashboard-pinned caps as resolveCaps so a member's user override
+  // (e.g. a pinned 1M window) reaches the combo aggregate, not only the member row.
+  // Hoisted out of the loop: it only reads `capsOverrides`, which is invariant.
+  const resolvePinnedCaps = (fullId) => {
+    const slash = fullId.indexOf("/");
+    if (slash === -1) return null;
+    const pinned = capsOverrides[fullId.slice(0, slash)]?.[fullId.slice(slash + 1)];
+    return pinned && (pinned.contextWindow || pinned.maxOutput) ? pinned : null;
+  };
+
+  // One shape for "attach capabilities + the snake_case token trio to a model
+  // entry". Three of the six emit sites used to hand-roll this and drifted:
+  // the static-catalog fallback sent `capabilities` but no token fields at all,
+  // and the zero-connection custom-model loop sent the token fields but no
+  // `capabilities` block and no catalogue lookup. Duplicated lists of this kind
+  // is how the combo path got left out and then "fixed" while the comment still
+  // claimed the other two were fine.
+  //
+  // `emitFloor` decides what to do when nothing pins a number. Built-in catalog
+  // models always have a table row or a deliberate floor, so they emit the
+  // resolved value. A user-added custom model is different: the dashboard says
+  // "没有内置默认值: 留空时使用供应商上报的", so a blank must stay blank rather
+  // than being stamped with the 200K floor — but if the id DOES resolve to a
+  // real table row (a qoder `qfmodel`, say) that row is exactly the "供应商
+  // 上报的" value and must come through.
+  const applyModelCaps = (entry, { alias, providerId, modelId, kind, customRow, emitFloor = true }) => {
+    const globalCaps = kind === LLM_KIND ? getCapabilitiesForModel(providerId || alias, modelId) : null;
+    if (!globalCaps) return entry;
+    const caps = { ...globalCaps };
+    let contextWindow = caps.contextWindow;
+    let maxOutput = caps.maxOutput;
+    let fromTable = contextWindow !== DEFAULT_CAPABILITIES.contextWindow
+      || maxOutput !== DEFAULT_CAPABILITIES.maxOutput;
+
+    // A user-added custom model's stored window belongs to THIS model, so it
+    // beats the generic catalogue default; an explicit dashboard override
+    // (modelCaps) beats everything.
+    if (customRow) {
+      const c = posNum(customRow.contextWindow);
+      const o = posNum(customRow.maxOutput);
+      if (c) { contextWindow = c; fromTable = true; }
+      if (o) { maxOutput = o; fromTable = true; }
+    }
+    const pinned = capsOverrides[alias]?.[modelId];
+    if (pinned?.contextWindow) { contextWindow = pinned.contextWindow; fromTable = true; }
+    if (pinned?.maxOutput) { maxOutput = pinned.maxOutput; fromTable = true; }
+
+    entry.capabilities = caps;
+    if (Number.isFinite(contextWindow)) caps.contextWindow = contextWindow;
+    if (Number.isFinite(maxOutput)) caps.maxOutput = maxOutput;
+
+    // The snake_case names are the contract clients actually match — see the
+    // comment on the combo path above. Guarded by Number.isFinite, matching the
+    // strict form used everywhere else here: a truthy check would pass a NaN or
+    // a string straight through to JSON.
+    const emitNumbers = emitFloor || fromTable;
+    if (emitNumbers && Number.isFinite(contextWindow)) {
+      entry.context_length = contextWindow;
+      entry.context_window = contextWindow;   // Anthropic 约定字段，Claude CLI/mirasim 读它
+    }
+    if (emitNumbers && Number.isFinite(maxOutput)) entry.max_completion_tokens = maxOutput;
+    return entry;
+  };
 
   // Combos first (filtered by kind). Web combos expose `kind` so AI knows search vs fetch.
   for (const combo of combos) {
@@ -352,8 +537,27 @@ export async function buildModelsList(kindFilter, options = {}) {
     };
     if (combo.kind === "webSearch" || combo.kind === "webFetch") {
       entry.kind = combo.kind;
+    } else {
+      const comboCaps = aggregateComboCapabilities(combo.models, comboByName, resolvePinnedCaps);
+      if (comboCaps) entry.capabilities = comboCaps;
+      // Emit the snake_case fields too. `capabilities.contextWindow` is camelCase
+      // and nested, and clients matching context_length / context_window do not
+      // recurse — Claude CLI and mirasim read those two top-level names and were
+      // getting nothing back for combos, so they guessed the window from the
+      // name and guessed high. The two model paths below already emit these;
+      // this path was the only one left out. Values follow the combo-caps
+      // contract (min context / max output), unchanged here. The guard is
+      // `Number.isFinite`, matching the strict form used lower in this file —
+      // a truthy check would pass a NaN or a string straight through to JSON.
+      if (comboCaps && Number.isFinite(comboCaps.contextWindow)) {
+        entry.context_length = comboCaps.contextWindow;
+        entry.context_window = comboCaps.contextWindow;
+      }
+      if (comboCaps && Number.isFinite(comboCaps.maxOutput)) {
+        entry.max_completion_tokens = comboCaps.maxOutput;
+      }
     }
-    models.push(entry);
+    emit(entry, COMBO_RANK);
   }
 
   if (connections.length === 0) {
@@ -374,11 +578,17 @@ export async function buildModelsList(kindFilter, options = {}) {
         for (const model of providerModels) {
           if (!kindFilter.includes(modelKind(model))) continue;
           if (isDisabled(alias, model.id)) continue;
-          models.push({
+          // This path used to emit `capabilities` only — no context_length /
+          // context_window / max_completion_tokens — so a client matching those
+          // names got nothing back and guessed the window from the model id.
+          // Goes through the shared helper now, dashboard pins included.
+          const entry = {
             id: `${alias}/${model.id}`,
             object: "model",
             owned_by: alias,
-          });
+          };
+          applyModelCaps(entry, { alias, providerId, modelId: model.id, kind: modelKind(model) });
+          emit(entry, rankOf(providerId));
         }
       }
     }
@@ -396,11 +606,25 @@ export async function buildModelsList(kindFilter, options = {}) {
       const modelId = String(customModel.id).trim();
       if (!modelId) continue;
 
-      models.push({
+      const entry = {
         id: `${providerAlias}/${modelId}`,
         object: "model",
         owned_by: providerAlias,
+      };
+      // Previously this path sent the token fields but no `capabilities` block
+      // and no catalogue lookup. It now shares the helper with every other
+      // model path; `emitFloor: false` keeps the product rule that a custom
+      // model left blank has no built-in default, while still surfacing a real
+      // table row when the id resolves to one.
+      applyModelCaps(entry, {
+        alias: providerAlias,
+        providerId: providerAlias,
+        modelId,
+        kind: LLM_KIND,
+        customRow: customModel,
+        emitFloor: false,
       });
+      emit(entry, rankOf(providerAlias));
     }
   } else {
     for (const [providerId, conn] of activeConnectionByProvider.entries()) {
@@ -484,6 +708,7 @@ export async function buildModelsList(kindFilter, options = {}) {
         .filter((modelId) => typeof modelId === "string" && modelId.trim() !== "");
 
       const customModelKindById = new Map();
+      const customModelCapsById = new Map();
       const customModelIds = customModels
         .filter((m) => {
           if (!m?.id) return false;
@@ -499,7 +724,10 @@ export async function buildModelsList(kindFilter, options = {}) {
         })
         .map((m) => {
           const modelId = String(m.id).trim();
-          if (modelId) customModelKindById.set(modelId, getModelKind(m) || LLM_KIND);
+          if (modelId) {
+            customModelKindById.set(modelId, getModelKind(m) || LLM_KIND);
+            customModelCapsById.set(modelId, m);
+          }
           return modelId;
         })
         .filter((modelId) => modelId !== "");
@@ -528,6 +756,9 @@ export async function buildModelsList(kindFilter, options = {}) {
         .filter((modelId) => typeof modelId === "string" && modelId.trim() !== "");
 
       const mergedModelIds = Array.from(new Set([...modelIds, ...customModelIds, ...aliasModelIds]));
+      // Dashboard-pinned caps for this provider, under any name spelling.
+      const providerCaps =
+        capsOverrides[providerId] || capsOverrides[staticAlias] || capsOverrides[outputAlias] || null;
 
       for (const modelId of mergedModelIds) {
         // Resolve kind: prefer custom/live metadata, then static, then ID heuristics.
@@ -573,38 +804,102 @@ export async function buildModelsList(kindFilter, options = {}) {
             if (!Number.isFinite(contextWindow)) contextWindow = fallback.contextWindow;
             if (!Number.isFinite(maxOutput)) maxOutput = fallback.maxOutput;
           }
+          // A user-added custom model's stored window belongs to THIS model, so
+          // it beats the generic catalog default; an explicit dashboard
+          // override (modelCaps) beats everything.
+          const customRow = customModelCapsById.get(modelId);
+          if (customRow) {
+            const c = posNum(customRow.contextWindow);
+            const o = posNum(customRow.maxOutput);
+            if (c) contextWindow = c;
+            if (o) maxOutput = o;
+          }
+          const pinned = providerCaps?.[modelId];
+          if (pinned?.contextWindow) contextWindow = pinned.contextWindow;
+          if (pinned?.maxOutput) maxOutput = pinned.maxOutput;
+          // Keep the nested block in sync with the snake_case values above.
+          if (caps) {
+            if (Number.isFinite(contextWindow)) caps.contextWindow = contextWindow;
+            if (Number.isFinite(maxOutput)) caps.maxOutput = maxOutput;
+          }
           if (Number.isFinite(contextWindow)) model.context_length = contextWindow;
+          if (Number.isFinite(contextWindow)) model.context_window = contextWindow;   // Anthropic 约定字段，Claude CLI/mirasim 读它
           if (Number.isFinite(maxOutput)) model.max_completion_tokens = maxOutput;
         }
-        models.push(model);
+        emit(model, rankOf(providerId));
       }
 
       // Web search/fetch — provider IS the model, expose as {alias}/search and/or {alias}/fetch with explicit kind
       const providerInfo = AI_PROVIDERS[providerId];
       if (kindFilter.includes("webSearch") && providerInfo?.searchConfig) {
-        models.push({
+        emit({
           id: `${outputAlias}/search`,
           object: "model",
           kind: "webSearch",
           owned_by: outputAlias,
-        });
+        }, rankOf(providerId));
       }
       if (kindFilter.includes("webFetch") && providerInfo?.fetchConfig) {
-        models.push({
+        emit({
           id: `${outputAlias}/fetch`,
           object: "model",
           kind: "webFetch",
           owned_by: outputAlias,
-        });
+        }, rankOf(providerId));
       }
     }
   }
 
+  // noAuth free providers (opencode, mimo-free, zcode-free) never create
+  // connection records — the per-connection loop above never sees their
+  // registry models. Emit them here (honor disabled/kind filters and caps).
+  // NOT gated on connections.length: a healthy DB with zero connections (a
+  // fresh install — exactly the onboarding path these providers target) must
+  // still list them.
+  // noAuth 静态出口按 dashboard 的优先级规则排序（低位在前，id 稳定次序）——
+  // 依赖注册表插入顺序会让两个尾部供应商之间退化成字母序偶然。
+  const noAuthEntries = Object.entries(AI_PROVIDERS)
+    .filter(([, p]) => p?.noAuth && p?.exposeStaticModels)
+    .sort((a, b) => (a[1].priority ?? Infinity) - (b[1].priority ?? Infinity)
+      || String(a[0]).localeCompare(String(b[0])));
+  for (const [pid, p] of noAuthEntries) {
+    if (!p?.noAuth || !p?.exposeStaticModels) continue; // 显式 opt-in（避免既有 noAuth 供应商模型自动冒出）
+    if (activeConnectionByProvider.has(pid)) continue; // 已由连接循环处理
+    if (!providerMatchesKinds(pid, kindFilter)) continue;
+    const alias = PROVIDER_ID_TO_ALIAS[pid] || pid;
+    for (const m of PROVIDER_MODELS[alias] || []) {
+      const modelId = String(m?.id || "").trim();
+      if (!modelId || isDisabled(alias, modelId)) continue;
+      const kind = getModelKind(m) || LLM_KIND;
+      if (!kindFilter.includes(kind)) continue;
+      const entry = {
+        id: `${alias}/${modelId}`,
+        object: "model",
+        owned_by: alias,
+      };
+      // Publish the same size metadata as the connected loop: without this,
+      // clients reading context_length/max_completion_tokens got nothing and
+      // fell back to guessing the window from the model name (zcode-free
+      // surfaced window-less in agent model cards) even though the catalog
+      // tables carry the values.
+      if (kind === LLM_KIND) {
+        const caps = getCapabilitiesForModel(pid, modelId);
+        const pinned = capsOverrides[alias]?.[modelId];
+        if (pinned?.contextWindow) caps.contextWindow = pinned.contextWindow;
+        if (pinned?.maxOutput) caps.maxOutput = pinned.maxOutput;
+        entry.capabilities = caps;
+        entry.context_length = caps.contextWindow;
+        entry.context_window = caps.contextWindow;   // Anthropic 约定字段，Claude CLI/mirasim 读它
+        entry.max_completion_tokens = caps.maxOutput;
+      }
+      emit(entry, rankOf(alias));
+    }
+  }
+
   // Orphan custom models: custom models whose providerAlias has no active
-  // connection (e.g. noAuth free providers like opencode — they never create
-  // connection records, so the per-connection loop above never sees them).
-  // Without this branch, adding oc/mimo-v2.5-free works in the dashboard but
-  // the model never shows up in /v1/models for clients.
+  // connection. Only meaningful when at least one connection exists — with
+  // zero connections the customModels loop in the `connections.length === 0`
+  // branch above already emitted every valid one.
   if (connections.length > 0) {
     const connectedAliases = new Set();
     for (const [providerId] of activeConnectionByProvider.entries()) {
@@ -632,17 +927,35 @@ export async function buildModelsList(kindFilter, options = {}) {
       const modelId = String(customModel.id).trim();
       if (!modelId) continue;
       if (isDisabled(alias, modelId)) continue;
-      models.push({
+      const entry = {
         id: `${alias}/${modelId}`,
         object: "model",
         owned_by: alias,
-      });
+      };
+      // Orphan customs resolve catalog caps too: the connected loop and the
+      // noAuth branch both publish capabilities + top-level sizes, and the
+      // same id on a connected provider gets them — leaving this branch bare
+      // made clients guess (ocz free models surfaced window-less). Order:
+      // pinned > the custom row's own stored values > catalog.
+      if (kind === LLM_KIND) {
+        const caps = getCapabilitiesForModel(alias, modelId);
+        const pinned = capsOverrides[alias]?.[modelId];
+        const cw = pinned?.contextWindow ?? posNum(customModel.contextWindow);
+        const mo = pinned?.maxOutput ?? posNum(customModel.maxOutput);
+        if (cw) caps.contextWindow = cw;
+        if (mo) caps.maxOutput = mo;
+        entry.capabilities = caps;
+        entry.context_length = caps.contextWindow;
+        entry.context_window = caps.contextWindow;   // Anthropic 约定字段，Claude CLI/mirasim 读它
+        entry.max_completion_tokens = caps.maxOutput;
+      }
+      emit(entry, rankOf(alias));
     }
   }
 
   const dedupedModels = [];
   const seenModelIds = new Set();
-  for (const model of models) {
+  for (const model of orderedModels()) {
     if (!model?.id || seenModelIds.has(model.id)) continue;
     seenModelIds.add(model.id);
     dedupedModels.push(model);
@@ -672,7 +985,44 @@ export async function GET(request) {
   try {
     // Detect cross-instance recursive /models fetch (another 10router fetching our /models)
     const skipDynamicFetch = request?.headers?.get(INTERNAL_MODELS_FETCH_HEADER) === "1";
-    const data = await buildModelsList([LLM_KIND], { skipDynamicFetch });
+    let data = await buildModelsList([LLM_KIND], { skipDynamicFetch });
+
+    // Filter by API key whitelists if the caller provides an authenticated key
+    const authHeader = request.headers.get("Authorization");
+    const xApiKey = request.headers.get("x-api-key");
+    const rawKey = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : (xApiKey || null);
+    if (rawKey) {
+      try {
+        const { getApiKeyByKey } = await import("@/lib/localDb");
+        const keyRecord = await getApiKeyByKey(rawKey);
+        if (keyRecord && (keyRecord.allowedModels?.length || keyRecord.allowedCombos?.length)) {
+          const { matchPattern } = await import("open-sse/providers/pricing.js");
+          const allowedModels = keyRecord.allowedModels || [];
+          const allowedCombos = (keyRecord.allowedCombos || []).map((c) => c.toLowerCase());
+          data = data.filter((m) => {
+            const id = m.id;
+            const idLower = id.toLowerCase();
+            if (m.owned_by === "combo") {
+              if (allowedCombos.length === 0) return true;
+              return allowedCombos.includes(idLower);
+            }
+            if (allowedModels.length > 0) {
+              return allowedModels.some((allowed) => {
+                const aLower = allowed.toLowerCase();
+                if (aLower === idLower) return true;
+                if (aLower.includes("*") && matchPattern(aLower, idLower)) return true;
+                if (idLower.includes("/") && idLower.split("/").pop() === aLower) return true;
+                return false;
+              });
+            }
+            return true;
+          });
+        }
+      } catch (e) {
+        console.warn("Failed to filter models by API key:", e.message);
+      }
+    }
+
     return Response.json({ object: "list", data }, {
       headers: { "Access-Control-Allow-Origin": "*" },
     });

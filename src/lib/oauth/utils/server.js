@@ -1,4 +1,5 @@
 import http from "http";
+import crypto from "node:crypto";
 import { URL } from "url";
 import { CODEX_CONFIG, TRAE_CONFIG, WINDSURF_CONFIG, XIAOMI_MIMO_CONFIG, ZED_HOSTED_CONFIG } from "../constants/oauth.js";
 
@@ -763,16 +764,44 @@ export function stopZedProxy() {
 let xiaomiMimoProxyServer = null;
 let xiaomiMimoProxyPort = null;
 let xiaomiMimoProxyTimeout = null;
+// The only origin allowed to call the listener cross-origin: the platform's own login
+// page, which is what hands us the payload.
+const XIAOMI_MIMO_PLATFORM_ORIGIN = new URL(XIAOMI_MIMO_CONFIG.platformUrl).origin;
+// Per-listener secret path. The platform's authorize page fetches this URL and hands
+// the encrypted payload to it, so the path doubles as the capability that keeps a
+// random web page from talking to the listener at all — which is why the official
+// client randomises it, and why it is what replaces a loopback-only Origin check
+// (the platform page is an https origin and could never pass one).
+let xiaomiMimoCallbackPath = null;
+
+/** Where the platform's page expects to be told how the hand-off went. */
+function xiaomiMimoPlatformCallbackUrl(status, message) {
+  const url = new URL(`${XIAOMI_MIMO_CONFIG.platformUrl}/authorize/callback`);
+  url.searchParams.set("status", status);
+  if (message) url.searchParams.set("message", message);
+  return url.toString();
+}
 
 const xiaomiMimoSessions = new Map();
+// MiMo Desktop keeps at most 8 pending login keys (its pending store is created
+// with cap:8). Mirror it: every entry holds an X25519 private key, so the 24 h
+// paste window must not become an unbounded key cache.
+const XIAOMI_MIMO_MAX_PENDING_SESSIONS = 8;
 
 export function registerXiaomiMimoSession({ state, privateKeyDer }) {
   if (!state || !privateKeyDer) return false;
-  // Bound the map: each entry holds an X25519 private key, and a flow that is
-  // never completed would otherwise retain it for the process lifetime.
-  const cutoff = Date.now() - XIAOMI_MIMO_CONFIG.timeoutMs;
+  // Bound the map: each entry holds an X25519 private key. The window is the
+  // PASTE-CODE window, not the callback window — the platform's authorize page makes
+  // the user copy a code by hand, so a key has to outlive the local listener.
+  const cutoff = Date.now() - XIAOMI_MIMO_CONFIG.pendingTtlMs;
   for (const [key, s] of xiaomiMimoSessions) {
     if (s.createdAt < cutoff) xiaomiMimoSessions.delete(key);
+  }
+  // Insertion order is chronological, so evicting from the head drops the oldest.
+  while (xiaomiMimoSessions.size >= XIAOMI_MIMO_MAX_PENDING_SESSIONS) {
+    const oldest = xiaomiMimoSessions.keys().next();
+    if (oldest.done) break;
+    xiaomiMimoSessions.delete(oldest.value);
   }
   xiaomiMimoSessions.set(state, {
     privateKeyDer,
@@ -794,6 +823,118 @@ export function clearXiaomiMimoSession(state) {
 }
 
 /**
+ * Minimum plausible size of the encrypted payload.
+ *
+ * Wire format needs 12-byte nonce + 32-byte ephemeral public key + 16-byte GCM tag +
+ * at least 1 byte of ciphertext = 61 raw bytes, i.e. 84 base64 characters. Anything
+ * shorter cannot be a payload — that is a copy problem, not a key mismatch, and the
+ * user needs to hear exactly that difference.
+ */
+const MIN_XIAOMI_MIMO_PAYLOAD_CHARS = 60;
+
+/**
+ * Normalize a browser-delivered encrypted payload.
+ *
+ * The same blob arrives four ways: as the `u` query param on the local callback, as a
+ * bare code copied off the platform's authorize page, as `u=<payload>` without a URL,
+ * and as the whole page text — which drags a label ("授权码：…", "Authorization code: …")
+ * and wrapping quotes along with it. Getting any of that wrong trips the GCM tag and
+ * looks like "the code is wrong", so be forgiving here instead of blaming the user.
+ *
+ * @param {string} input
+ * @returns {string} payload, or "" when nothing usable was supplied
+ */
+export function normalizeXiaomiMimoPayload(input) {
+  let value = String(input ?? "").trim();
+  if (!value) return "";
+
+  // A pasted URL/query — also covers a bare `u=<payload>` with no URL around it.
+  const wrapped = value.match(/(?:^|[?&])(?:u|code)=([^&\s]+)/);
+  if (wrapped) {
+    try {
+      value = decodeURIComponent(wrapped[1]);
+    } catch {
+      value = wrapped[1]; // A stray '%' must not become a 500
+    }
+  }
+
+  // A label copied together with the code. ASCII labels require a separator so a
+  // payload that merely starts with those letters is never eaten.
+  value = value
+    .replace(/^(?:授权码|验证码)\s*[:：=]?\s*/, "")
+    .replace(/^(?:authorization\s*code|code)\s*[:：=]\s*/i, "");
+  // Wrapping punctuation from copy buttons, markdown or quotes; and a trailing
+  // sentence punctuation mark from "…code. " style pages.
+  value = value.replace(/^[`'"“”‘’<([{]+/, "").replace(/[`'"“”‘’>)\]},.;:。，；：]+$/, "");
+  return value.replace(/\s+/g, "");
+}
+
+/**
+ * Decrypt a payload against every pending session and store the credential in
+ * whichever session's private key opened it.
+ *
+ * Both entry points funnel through here:
+ *   • the local callback proxy (`?u=`), and
+ *   • a pasted authorization code (POST …/submit-code).
+ *
+ * MiMo Desktop's own login engine does the same thing (its `loginCode()` walks up
+ * to 8 pending keys), because the platform never echoes a state: attribution IS
+ * "which pending key decrypts it", so every key must be tried.
+ *
+ * A failure deliberately leaves every session untouched — with several logins in
+ * flight one stray payload must not abort the others, and a synchronous caller
+ * (the paste route) reports the error directly instead.
+ *
+ * @param {string} rawPayload
+ * @returns {Promise<{ok: true, state: string, result: object}
+ *   | {ok: false, error: "empty_payload"|"payload_too_short"|"no_pending_session"|"missing_api_key"|"decrypt_failed"}>}
+ */
+export async function completeXiaomiMimoFlow(rawPayload) {
+  const payload = normalizeXiaomiMimoPayload(rawPayload);
+  if (!payload) return { ok: false, error: "empty_payload" };
+  if (payload.length < MIN_XIAOMI_MIMO_PAYLOAD_CHARS) {
+    return { ok: false, error: "payload_too_short" };
+  }
+
+  const pending = [...xiaomiMimoSessions.entries()].filter(([, s]) => s.status === "pending");
+  if (pending.length === 0) return { ok: false, error: "no_pending_session" };
+
+  const { decryptCallback } = await import("../providers/xiaomi-mimo.js");
+  let openedWithoutKey = false;
+
+  for (const [state, session] of pending) {
+    let decrypted;
+    try {
+      decrypted = decryptCallback(session.privateKeyDer, payload);
+    } catch {
+      continue; // Wrong key for this session — try the next one
+    }
+    if (!decrypted.sk) {
+      // The AES-GCM tag verified, so this IS our payload — it just is not a
+      // credential. Report that precisely instead of blaming the key.
+      openedWithoutKey = true;
+      continue;
+    }
+
+    session.status = "done";
+    session.result = {
+      uid: decrypted.uid,
+      accessToken: decrypted.sk,
+      baseUrl: decrypted.url || XIAOMI_MIMO_CONFIG.defaultBaseUrl,
+    };
+    return { ok: true, state, result: session.result };
+  }
+
+  const failed = openedWithoutKey ? "missing_api_key" : "decrypt_failed";
+  // Length + pending count only — the payload itself is a credential container and
+  // must never be written to a log.
+  console.warn(
+    `[xiaomi-mimo oauth] code rejected (${failed}): ${payload.length} chars, ${pending.length} pending session(s)`,
+  );
+  return { ok: false, error: failed };
+}
+
+/**
  * Start the Xiaomi Desktop OAuth callback proxy.
  * @returns {Promise<{success: boolean, port?: number, callbackUrl?: string, reason?: string}>}
  */
@@ -803,75 +944,72 @@ export function startXiaomiMimoProxy() {
       resolve({
         success: true,
         port: xiaomiMimoProxyPort,
-        callbackUrl: `http://127.0.0.1:${xiaomiMimoProxyPort}/`,
+        callbackUrl: `http://127.0.0.1:${xiaomiMimoProxyPort}${xiaomiMimoCallbackPath}`,
       });
       return;
     }
 
+    const callbackPath =
+      xiaomiMimoCallbackPath ||
+      (xiaomiMimoCallbackPath = `/callback/${crypto.randomBytes(16).toString("hex")}`);
+
     const server = http.createServer(async (req, res) => {
-      // Origin guard
-      if (!isLoopbackOrigin(req.headers.origin)) {
-        res.writeHead(403);
-        res.end("Forbidden");
+      // The platform's login page calls this listener from its own https origin, so the
+      // origin CANNOT be restricted to loopback (doing so silently broke the whole
+      // hand-off). The anti-abuse property comes from the unguessable callback path
+      // below plus the fact that the payload only opens with our X25519 private key —
+      // the same shape the official client uses.
+      const origin = req.headers.origin || "";
+      const cors =
+        origin === XIAOMI_MIMO_PLATFORM_ORIGIN
+          ? {
+              "Access-Control-Allow-Origin": origin,
+              "Access-Control-Allow-Methods": "GET, OPTIONS",
+              "Access-Control-Allow-Headers": "*",
+              "Access-Control-Max-Age": "600",
+              Vary: "Origin",
+            }
+          : { Vary: "Origin" };
+
+      if (req.method === "OPTIONS") {
+        res.writeHead(204, cors);
+        res.end();
         return;
       }
 
       const url = new URL(req.url, "http://127.0.0.1");
-      const u = url.searchParams.get("u");
-
-      if (!u) {
-        res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(renderCodexResultPage(false, "Missing encrypted payload (u parameter)."));
+      if (url.pathname !== callbackPath) {
+        res.writeHead(404, cors);
+        res.end("Not Found");
         return;
       }
 
-      // Try each pending session's private key — the callback URL carries no
-      // state param, so we attempt decryption with every pending key.
+      // From here on, failures are reported to the platform's page (a 302 it follows),
+      // never as a page we render — that is what closes out its sign-in UI.
+      const u = url.searchParams.get("u");
+      if (!u) {
+        res.writeHead(302, { ...cors, Location: xiaomiMimoPlatformCallbackUrl("error", "missing_data") });
+        res.end();
+        return;
+      }
+
+      // The callback URL carries no state param, so decryption is attributed purely by
+      // "which pending key opens the payload" — see completeXiaomiMimoFlow.
       const pendingSessions = [...xiaomiMimoSessions.entries()]
         .filter(([, s]) => s.status === "pending");
 
-      if (pendingSessions.length === 0) {
-        res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(renderCodexResultPage(false, "No active OAuth session. Please restart the login flow."));
-        return;
-      }
-
       try {
-        const { decryptCallback } = await import("../providers/xiaomi-mimo.js");
-        let result = null;
-        let matchedState = null;
-
-        for (const [state, session] of pendingSessions) {
-          try {
-            result = decryptCallback(session.privateKeyDer, u);
-            matchedState = state;
-            break;
-          } catch {
-            // Wrong key for this session — try next
-          }
+        const outcome = await completeXiaomiMimoFlow(u);
+        if (!outcome.ok) {
+          throw new Error(
+            outcome.error === "missing_api_key"
+              ? "Decrypted payload missing sk (API key)"
+              : "Could not decrypt with any pending session key",
+          );
         }
 
-        if (!result || !matchedState) {
-          throw new Error("Could not decrypt with any pending session key");
-        }
-
-        if (!result.sk) {
-          throw new Error("Decrypted payload missing sk (API key)");
-        }
-
-        // Store result only in the matched session
-        const session = xiaomiMimoSessions.get(matchedState);
-        if (session) {
-          session.status = "done";
-          session.result = {
-            uid: result.uid,
-            accessToken: result.sk,
-            baseUrl: result.url || XIAOMI_MIMO_CONFIG.defaultBaseUrl,
-          };
-        }
-
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(renderCodexResultPage(true, "Xiaomi account linked. You can close this tab."));
+        res.writeHead(302, { ...cors, Location: xiaomiMimoPlatformCallbackUrl("success") });
+        res.end();
         console.log("[xiaomi-mimo oauth] callback decrypted");
       } catch (err) {
         console.error("[xiaomi-mimo oauth] decrypt failed:", err.message);
@@ -886,8 +1024,8 @@ export function startXiaomiMimoProxy() {
           only.status = "error";
           only.error = err.message;
         }
-        res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(renderCodexResultPage(false, `Decryption failed: ${err.message}`));
+        res.writeHead(302, { ...cors, Location: xiaomiMimoPlatformCallbackUrl("error", "decrypt_failed") });
+        res.end();
       }
     });
 
@@ -907,7 +1045,7 @@ export function startXiaomiMimoProxy() {
       resolve({
         success: true,
         port: xiaomiMimoProxyPort,
-        callbackUrl: `http://127.0.0.1:${xiaomiMimoProxyPort}/`,
+        callbackUrl: `http://127.0.0.1:${xiaomiMimoProxyPort}${callbackPath}`,
       });
     });
   });
@@ -918,9 +1056,15 @@ export function stopXiaomiMimoProxy() {
   if (xiaomiMimoProxyTimeout) { clearTimeout(xiaomiMimoProxyTimeout); xiaomiMimoProxyTimeout = null; }
   if (xiaomiMimoProxyServer) { xiaomiMimoProxyServer.close(); xiaomiMimoProxyServer = null; }
   xiaomiMimoProxyPort = null;
-  // No callback can arrive once the listener is down, so drop every pending
-  // session — each holds an X25519 private key and they would otherwise
-  // accumulate for the process lifetime (one per /authorize call).
-  xiaomiMimoSessions.clear();
+  // A new listener gets a fresh secret path.
+  xiaomiMimoCallbackPath = null;
+  // Stop LISTENING only. The local listener is the automatic callback path; the
+  // platform's authorize page also shows a code for the user to paste by hand, and
+  // that path is still perfectly usable after this listener is gone. Dropping the
+  // pending keys here (as this used to) meant a pasted code failed with "this code
+  // does not match this sign-in" the moment the 5-minute listener timed out — i.e.
+  // exactly when a user gives up on the callback and reaches for the paste box.
+  // registerXiaomiMimoSession() is what bounds the map, by pendingTtlMs.
 }
+
 

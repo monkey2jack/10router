@@ -42,16 +42,16 @@ async function probeWebProvider(provider, apiKey) {
   return res.status !== 401 && res.status !== 403;
 }
 
-// Probe a media provider (tts/embedding/stt/image/video) using *Config.
+// Probe a media provider (tts/embedding/stt/image/video/rerank) using *Config.
 // Returns true if API key is accepted; null to skip (let default handler decide).
 async function probeMediaProvider(provider, apiKey) {
   const p = AI_PROVIDERS[provider];
   if (!p) return null;
-  const MEDIA_KINDS = new Set(["tts", "embedding", "stt", "image", "video", "music", "imageToText"]);
+  const MEDIA_KINDS = new Set(["tts", "embedding", "stt", "image", "video", "music", "imageToText", "rerank"]);
   const kinds = p.serviceKinds || ["llm"];
   const isMediaOnly = kinds.every((k) => MEDIA_KINDS.has(k));
   if (!isMediaOnly) return null;
-  const cfg = p.ttsConfig || p.sttConfig || p.embeddingConfig || p.imageConfig || p.videoConfig || p.musicConfig;
+  const cfg = p.ttsConfig || p.sttConfig || p.embeddingConfig || p.imageConfig || p.videoConfig || p.musicConfig || p.rerankConfig;
   // No probe config → best-effort accept (validate at usage time)
   if (!cfg) return true;
   if (p.noAuth || cfg.authType === "none") return true;
@@ -364,6 +364,7 @@ export async function POST(request) {
         case "cohere":
         case "nebius":
         case "siliconflow":
+        case "siliconflow-cn":
         case "hyperbolic":
         case "ollama":
         case "ollama-local":

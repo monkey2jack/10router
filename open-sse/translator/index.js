@@ -1,7 +1,9 @@
 import { FORMATS } from "./formats.js";
 import { ensureToolCallIds, fixMissingToolResponses } from "./concerns/toolCall.js";
-import { prepareClaudeRequest } from "./formats/claude.js";
+import { prepareClaudeRequest, ensureTrailingUserTurn } from "./formats/claude.js";
+import { ROLE, GEMINI_ROLE } from "./schema/roles.js";
 import { cloakClaudeTools } from "../utils/claudeCloaking.js";
+import { restoreToolNames } from "../utils/opencodeFingerprint.js";
 import { filterToOpenAIFormat } from "./formats/openai.js";
 import { normalizeThinkingConfig } from "../services/provider.js";
 import { applyThinking, captureThinking } from "./concerns/thinkingUnified.js";
@@ -31,6 +33,16 @@ export function register(from, to, requestFn, responseFn) {
 // No-op: translators self-register via the static imports at the bottom of this file.
 function ensureInitialized() {}
 
+// Introspection for tests and tooling: the `from:to` routes actually registered.
+// A translator file that exists but was never imported shows up as a missing
+// route here rather than silently degrading to the lossy double-hop.
+export function listRegisteredRoutes() {
+  return {
+    request: [...(requestRegistry?.keys() || [])].sort(),
+    response: [...(responseRegistry?.keys() || [])].sort(),
+  };
+}
+
 // Strip specific content types from messages (explicit opt-in via strip[] in PROVIDER_MODELS)
 function stripContentTypes(body, stripList = []) {
   if (!stripList.length || !body.messages || !Array.isArray(body.messages)) return;
@@ -48,10 +60,25 @@ function stripContentTypes(body, stripList = []) {
   }
 }
 
+// 客户端会话实际结束时的 role，按源格式自身的形状读取——并非所有源都用
+// messages[]（Gemini/Antigravity 用 contents[]，Responses/Codex 用 input[]）。
+// 只有显式以 model/assistant 轮结尾才是有意的 prefill，必须作为 ROLE.ASSISTANT
+// 传给 ensureTrailingUserTurn；其他结尾（包括无 role，如函数输出）保持 undefined，
+// 让「被清空的尾部 user 轮」修复照常生效。（上游 5e9bd464）
+function detectClientLastRole(body) {
+  if (Array.isArray(body?.messages)) return body.messages[body.messages.length - 1]?.role;
+  const items = Array.isArray(body?.contents) ? body.contents : Array.isArray(body?.input) ? body.input : null;
+  if (!items) return undefined;
+  const role = items[items.length - 1]?.role;
+  return role === ROLE.ASSISTANT || role === GEMINI_ROLE.MODEL ? ROLE.ASSISTANT : undefined;
+}
+
 // Translate request: source -> openai -> target
 export function translateRequest(sourceFormat, targetFormat, model, body, stream = true, credentials = null, provider = null, reqLogger = null, stripList = [], connectionId = null, clientTool = null) {
   ensureInitialized();
   let result = body;
+  // 客户端实际结束时的 role，在任何翻译器丢掉被清空的尾轮之前先记下来。
+  const clientLastRole = detectClientLastRole(body);
 
   // Strip explicit content types (opt-in via strip[] in PROVIDER_MODELS entry)
   stripContentTypes(result, stripList);
@@ -131,6 +158,7 @@ export function translateRequest(sourceFormat, targetFormat, model, body, stream
   if (targetFormat === FORMATS.CLAUDE) {
     const apiKey = credentials?.accessToken || credentials?.apiKey || null;
     result = prepareClaudeRequest(result, provider, apiKey, connectionId, credentials?.rawHeaders, clientSessionId);
+    if (Array.isArray(result?.messages)) result.messages = ensureTrailingUserTurn(result.messages, clientLastRole);
   }
 
   // Claude cloaking: rename client tools with _cc suffix (anti-ban)
@@ -161,9 +189,10 @@ export function translateRequest(sourceFormat, targetFormat, model, body, stream
 // Translate response chunk: target -> openai -> source
 export function translateResponse(targetFormat, sourceFormat, chunk, state) {
   ensureInitialized();
-  // If same format, return as-is
+  // If same format, return as-is (undoing OpenCode fingerprint renames — the
+  // client's own bash/glob/grep/read spelling must come back untouched)
   if (sourceFormat === targetFormat) {
-    return [chunk];
+    return [restoreToolNames(chunk, state?.toolNameMap)];
   }
 
   let results = [chunk];
@@ -228,8 +257,6 @@ export function initState(sourceFormat) {
     model: null,
     textBlockStarted: false,
     thinkingBlockStarted: false,
-    inThinkingBlock: false,
-    currentBlockIndex: null,
     toolCalls: new Map(),
     finishReason: null,
     finishReasonSent: false,
@@ -262,7 +289,8 @@ export function initState(sourceFormat) {
       funcArgsDone: {},
       funcItemDone: {},
       customToolNames: new Set(),
-      completedSent: false
+      completedSent: false,
+      completionPending: false
     };
   }
 

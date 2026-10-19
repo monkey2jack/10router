@@ -4,13 +4,16 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { resolveProviderAlias } from "../../open-sse/services/model.js";
 import { PROVIDER_ID_TO_ALIAS, PROVIDER_MODELS } from "../../open-sse/config/providerModels.js";
+import REGISTRY from "../../open-sse/providers/registry/index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const snapPath = join(here, "alias-baseline.json");
 
-// All known alias tokens to probe (collected from both maps' historical keys)
-const ALIAS_TOKENS = [
-  "cc","cx","gc","qw","if","ag","gh","kr","cu","kc","kmc","cl","oc","ocg","qd","qoder",
+// Tokens kept on probe even if no registry entry claims them any more, so that
+// DELETING a spelling shows up as `x: owner -> x` instead of vanishing from the
+// probe set and going unnoticed.
+const HISTORICAL_TOKENS = [
+  "cc","cx","gc","qw","if","ag","gh","kr","cu","kc","kmc","cl","oc","ocg","qd","qoder","qdc","qoder-cn",
   "el","openai","vercel","vercel-ai-gateway","anthropic","gemini","openrouter","glm","kimi",
   "minimax","minimax-cn","hf","huggingface","ds","deepseek","cmc","commandcode","groq","xai",
   "mistral","pplx","perplexity","together","fireworks","cerebras","cohere","nvidia","nebius",
@@ -23,8 +26,27 @@ const ALIAS_TOKENS = [
   "af","airforce","api-airforce","llm7","llm-7","samba","sambanova","bm","bluesminds",
   "bzl","bazaarlink","kgw","kilo-gateway","hunyuan","tencent","qianfan","baidu","ernie",
   "dv","devin","devin-cli","morph","morphllm",
-  "tokenbom","gorouter","tabiauto","agnes-ai","agnes-ai-cn",
+  "muse","muse-ai","meta-model-api","muse-code","muse-subscription",
+  "tokenbom","agnes-ai","agnes-ai-cn","drex","ocz","v1m","systemone","jev",
+  "step","stepfun","stepfun-cn","stepfun-plan","stepfun-plan-cn",
+  "step-cn","stepp-cn","stepp","sfp-cn","sfp","sfpcn","sf-cn","sfcn","step-plan","step-plan-cn","sf",
+  "rv","river",
 ];
+
+// Probe every spelling a provider actually publishes (id/alias/uiAlias/aliases)
+// plus the historical tokens above. This used to be a hand-written list only,
+// which is why the `tr` and `mmf` collisions were invisible here: neither
+// spelling was on it, so the gate never saw their resolution change. Deriving
+// from the registry means a new provider's spellings are covered the moment it
+// lands, with nothing to remember to update.
+const ALIAS_TOKENS = [
+  ...new Set([
+    ...REGISTRY.flatMap((p) =>
+      [p.id, p.alias, p.uiAlias, ...(Array.isArray(p.aliases) ? p.aliases : [])].filter(Boolean)
+    ),
+    ...HISTORICAL_TOKENS,
+  ]),
+].sort();
 
 // Sort idToAlias by key — runtime accesses by key, order is irrelevant (content-based)
 const sortedIdToAlias = Object.fromEntries(

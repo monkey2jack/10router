@@ -29,12 +29,16 @@ export const CLAUDE_API_HEADERS = {
   "Anthropic-Beta": "claude-code-20250219,interleaved-thinking-2025-05-14"
 };
 
+// Claude CLI version reported by the spoofed fingerprint. Bumped in lockstep with
+// what upstream Claude Code ships — Opus 5.5 gateways reject older versions.
+export const CLAUDE_CLI_VERSION = "2.1.280";
+
 // Full Claude CLI fingerprint — required by providers that gate on client identity (e.g. agentrouter)
 export const CLAUDE_CLI_SPOOF_HEADERS = {
   "Anthropic-Version": ANTHROPIC_API_VERSION,
   "Anthropic-Beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28",
   "Anthropic-Dangerous-Direct-Browser-Access": "true",
-  "User-Agent": "claude-cli/2.1.92 (external, sdk-cli)",
+  "User-Agent": `claude-cli/${CLAUDE_CLI_VERSION} (external, sdk-cli)`,
   "X-App": "cli",
   "X-Stainless-Helper-Method": "stream",
   "X-Stainless-Retry-Count": "0",
@@ -60,11 +64,29 @@ const ANTHROPIC_BETA_BASE = [
 ];
 const ANTHROPIC_BETA_HEAVY_AGENT = ["advanced-tool-use-2025-11-20", "effort-2025-11-24"];
 
+const ANTHROPIC_BETA_REDACT_THINKING = "redact-thinking-2026-02-12";
+
+// `redact-thinking` asks Anthropic to return signature-only thinking blocks —
+// right for clients that never render thinking, but it blanks the summaries a
+// client explicitly requested with thinking.display: "summarized".
+export function wantsThinkingSummaries(body) {
+  return body?.thinking?.display === "summarized";
+}
+
 // Heavy-agent beta flags are gated to opus/sonnet — cheaper models don't need them.
-export function selectAnthropicBeta(model = "") {
-  const flags = [...ANTHROPIC_BETA_BASE];
+export function selectAnthropicBeta(model = "", body = null) {
+  const flags = ANTHROPIC_BETA_BASE.filter(
+    (flag) => flag !== ANTHROPIC_BETA_REDACT_THINKING || !wantsThinkingSummaries(body),
+  );
   if (/^claude-(opus|sonnet)/.test(model)) flags.push(...ANTHROPIC_BETA_HEAVY_AGENT);
   return flags.join(",");
+}
+
+// 合并多来源的 anthropic-beta 旗标（去重、保序）：上游计算值 + 客户端自带的
+// beta 头。客户端显式要求的 beta 特性（如 context-management）必须存活。
+export function mergeAnthropicBeta(...values) {
+  const flags = values.flatMap((v) => (typeof v === "string" ? v.split(",") : [])).map((f) => f.trim()).filter(Boolean);
+  return [...new Set(flags)].join(",");
 }
 
 // Shared baseUrls
@@ -75,7 +97,7 @@ export const OPENAI_COMPAT_BASE = "https://api.openai.com/v1";
 export const ANTHROPIC_COMPAT_BASE = "https://api.anthropic.com/v1";
 
 // Official Antigravity IDE Desktop 2.11.0 fingerprint captured from macOS arm64.
-// Keep this static even when 9router runs on Linux: the provider profile is
+// Keep this static even when 10Router runs on Linux: the provider profile is
 // intentionally matching the IDE client, not the server host.
 export const ANTIGRAVITY_IDE_VERSION = "2.11.0";
 export const ANTIGRAVITY_IDE_BASE_URL = "https://daily-cloudcode-pa.googleapis.com";

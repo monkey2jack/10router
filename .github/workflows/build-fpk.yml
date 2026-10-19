@@ -38,10 +38,25 @@ jobs:
           cp -r open-sse fnos-packaging/app/server/
           cp -r src/mitm fnos-packaging/app/server/
           mkdir -p fnos-packaging/app/server/node_modules
-          cp -r node_modules/node-forge fnos-packaging/app/server/node_modules/
-          cp -r node_modules/sql.js fnos-packaging/app/server/node_modules/
-          cp -r node_modules/next fnos-packaging/app/server/node_modules/
-          cp -r node_modules/better-sqlite3 fnos-packaging/app/server/node_modules/
+          # 仅补 standalone **没带**的包。**绝不能覆盖** standalone 自带的 next:
+          # 覆盖成完整版会把 standalone 精简版旁边的 @swc(scoped 追踪产物)一起清掉,
+          # 装上就炸 `Cannot find module '@swc/helpers/_/_interop_require_default'`
+          # (2026-10-08 NAS 实测,且旧覆盖式打法多带 ~170MB 构建期文件,见
+          # docs/zh-CN/fnpk-size-reduction-1.3.6.md)。与 scripts/fpk-local.sh 保持一致。
+          for pkg in node-forge sql.js next better-sqlite3 "@swc"; do
+            if [ -d "fnos-packaging/app/server/node_modules/$pkg" ]; then
+              echo "SKIP  $pkg (standalone already ships it)"
+            else
+              mkdir -p "fnos-packaging/app/server/node_modules/$pkg"
+              cp -r "node_modules/$pkg/." "fnos-packaging/app/server/node_modules/$pkg/"
+              echo "COPY  $pkg"
+            fi
+          done
+          # 缺件早爆:比装到 NAS 上才发现快两个数量级
+          for p in node_modules/@swc/helpers node_modules/next node_modules/sql.js open-sse src/mitm .next/BUILD_ID public custom-server.js; do
+            [ -e "fnos-packaging/app/server/$p" ] || { echo "ERROR: missing $p"; exit 1; }
+          done
+          du -sh fnos-packaging/app/server
           ls -la fnos-packaging/app/server/
 
       - name: Download fnpack
@@ -86,8 +101,11 @@ jobs:
           [ -f 10router.fpk ] || { echo "ERROR: fnpack build url failed"; exit 1; }
           VERSION="$(grep -E '^version[[:space:]]*=' manifest | head -1 | sed 's/.*=//;s/[[:space:]]//g')"
           [ -n "$VERSION" ] || { echo "ERROR: could not extract version from manifest"; exit 1; }
-          mv 10router.fpk "10router-${VERSION}-${{ matrix.arch }}.fpk"
-          ls -lh "10router-${VERSION}-${{ matrix.arch }}.fpk"
+          # 资产命名平台化 (v1.4.0 起): 与 CreditDaddy 的 <App>-<平台>-<变体>-<版本>-<arch> 对齐,
+          # 同一 release 里同平台资产排序自动聚类。url 变体不带变体段;iframe 变体 = Window
+          # (fnOS 内嵌窗口打开)。下方 sums / attach 的 glob 必须同步改 (Linux 大小写敏感)。
+          mv 10router.fpk "10Router-FnOS-${VERSION}-${{ matrix.arch }}.fpk"
+          ls -lh "10Router-FnOS-${VERSION}-${{ matrix.arch }}.fpk"
 
       - name: Build iframe variant
         run: |
@@ -100,14 +118,15 @@ jobs:
           [ -f 10router.fpk ] || { echo "ERROR: fnpack build iframe failed"; exit 1; }
           VERSION="$(grep -E '^version[[:space:]]*=' manifest | head -1 | sed 's/.*=//;s/[[:space:]]//g')"
           [ -n "$VERSION" ] || { echo "ERROR: could not extract version from manifest"; exit 1; }
-          mv 10router.fpk "10router-${VERSION}-iframe-${{ matrix.arch }}.fpk"
-          ls -lh "10router-${VERSION}-iframe-${{ matrix.arch }}.fpk"
+          mv 10router.fpk "10Router-FnOS-Window-${VERSION}-${{ matrix.arch }}.fpk"
+          ls -lh "10Router-FnOS-Window-${VERSION}-${{ matrix.arch }}.fpk"
 
       - name: Upload fpk artifact
         uses: actions/upload-artifact@v4
         with:
+          # artifact 名是 run 内部标识,不进 release,保持旧拼写;path glob 跟随平台化名
           name: 10router-fpk-${{ matrix.arch }}-${{ github.sha }}
-          path: fnos-packaging/10router-*.fpk
+          path: fnos-packaging/10Router-*.fpk
           if-no-files-found: error
           retention-days: 14
 
@@ -123,10 +142,32 @@ jobs:
           pattern: 10router-fpk-*
           merge-multiple: true
 
+      # 确保 release 存在且带标题——否则第一个 attach 文件的 step 会用空 body/裸 tag 名创建它。
+      # 已存在时不动（notes 手工维护，绝不能覆盖）。
+      - name: Ensure release exists with title
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          gh release view "${{ github.ref_name }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "${{ github.ref_name }}" --repo "$GITHUB_REPOSITORY" \
+              --title "10Router ${{ github.ref_name }}" \
+              --notes "Release notes pending — see [CHANGELOG.md](https://github.com/techysy/10router/blob/main/CHANGELOG.md)."
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Generate checksum
+        run: |
+          set -euo pipefail
+          # 校验清单供下载方自行核对（标准 `sha256sum -c` 格式）。三个发布工作流并行
+          # 运行，所以每组各自一份，不用共享的 SHA256SUMS.txt（会互相覆盖）。
+          # 怎么核对见 docs/zh-CN/verify-downloads.md
+          ( cd fpk-assets && sha256sum 10Router-*.fpk > SHA256SUMS-fpk.txt )
+          cat fpk-assets/SHA256SUMS-fpk.txt
+
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: fpk-assets/10router-*.fpk
+          files: |
+            fpk-assets/10Router-*.fpk
+            fpk-assets/SHA256SUMS-fpk.txt
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -6,12 +6,66 @@ const { pathToFileURL } = require("url");
 
 const origCreate = http.createServer.bind(http);
 
-// Per-process secret proving x-9r-real-ip was stamped below rather than sent by the client.
+// Per-process secret proving x-10r-real-ip was stamped below rather than sent by the client.
 // A bare `next start` / `next dev` never loads this file, so it cannot produce a matching
 // header even though the env var is inherited by child processes. Named like x-9r-cli-token
 // so the request-detail header sanitizer redacts it too.
 const PEER_TOKEN = crypto.randomBytes(24).toString("hex");
-process.env.NINEROUTER_PEER_TOKEN = PEER_TOKEN;
+process.env.TENROUTER_PEER_TOKEN = PEER_TOKEN;
+
+// Long-term console archive: tee server console output into a per-day file under
+// the data dir (logs/app-YYYY-MM-DD.log, append-only, no cap — the durable record
+// of upstream answers / request failures that requestDetails' 200-record ring
+// buffer and the desktop 5MB server.log don't keep). Runs only from this file, so
+// `next dev` keeps its plain console. Best-effort: a bare repo checkout without
+// the standalone copy simply skips it.
+import(pathToFileURL(path.join(__dirname, "src", "lib", "consoleArchiveStandalone.mjs")))
+  .then((m) => m.installConsoleArchive())
+  .catch(() => {});
+
+// Full-Route-Cache staleness guard: an over-install upgrade (NSIS, fpk, npm -g,
+// manual untar) writes the new build on top of the old tree but leaves the
+// previous build's Full Route Cache under <distDir>/server/route-cache —
+// prerendered HTML/RSC that references the OLD hashed static chunks. The new
+// server happily serves those entries, so the dashboard keeps rendering the old
+// bundle (sidebar version pill stuck at the previous version) even though
+// package.json and /api/version already report the new release. Wipe that cache
+// whenever BUILD_ID differs from the marker we last booted with. Marker lives
+// next to route-cache (not inside it) so a wipe cannot erase the proof.
+function pruneStaleRouteCache(root = __dirname) {
+  for (const distDirName of [".next-cli-build", ".next"]) {
+    try {
+      const distDir = path.join(root, distDirName);
+      let buildId;
+      try {
+        buildId = fs.readFileSync(path.join(distDir, "BUILD_ID"), "utf8").trim();
+      } catch {
+        continue; // bare checkout without a build for this distDir
+      }
+      if (!buildId) continue;
+      const routeCache = path.join(distDir, "server", "route-cache");
+      const markerPath = path.join(distDir, "server", ".route-cache-build-id");
+      let marker = null;
+      try {
+        marker = fs.readFileSync(markerPath, "utf8").trim();
+      } catch {
+        /* first boot with the guard */
+      }
+      if (marker === buildId) continue;
+      if (fs.existsSync(routeCache)) {
+        fs.rmSync(routeCache, { recursive: true, force: true });
+        console.warn(
+          `[route-cache] pruned stale Full Route Cache from a previous build in ${distDirName}`
+        );
+      }
+      fs.mkdirSync(path.dirname(markerPath), { recursive: true });
+      fs.writeFileSync(markerPath, buildId + "\n");
+    } catch {
+      /* best-effort — a cache prune must never block boot */
+    }
+  }
+}
+pruneStaleRouteCache();
 
 let backgroundRefreshStarted = false;
 
@@ -90,13 +144,13 @@ http.createServer = (...args) => {
     // Direct/public sockets remain keyed by the unspoofable peer address.
     const proxyIp = xRealIp || (xff ? String(xff).split(",")[0].trim() : "");
     const ip = isLoopbackProxy && proxyIp ? proxyIp : socketIp;
-    delete req.headers["x-9r-real-ip"];
+    delete req.headers["x-10r-real-ip"];
     delete req.headers["x-forwarded-for"];
-    delete req.headers["x-9r-via-proxy"];
-    delete req.headers["x-9r-peer-token"];
-    req.headers["x-9r-real-ip"] = ip;
-    req.headers["x-9r-peer-token"] = PEER_TOKEN;
-    if (viaProxy) req.headers["x-9r-via-proxy"] = "1";
+    delete req.headers["x-10r-via-proxy"];
+    delete req.headers["x-10r-peer-token"];
+    req.headers["x-10r-real-ip"] = ip;
+    req.headers["x-10r-peer-token"] = PEER_TOKEN;
+    if (viaProxy) req.headers["x-10r-via-proxy"] = "1";
     return handler(req, res);
   };
   const server = origCreate(...rest, wrapped);
@@ -165,3 +219,5 @@ if (require.main === module) {
     require(nextBin);
   }
 }
+
+module.exports = { pruneStaleRouteCache };

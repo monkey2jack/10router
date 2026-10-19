@@ -2,6 +2,7 @@ import { PROVIDERS, PROVIDER_OAUTH } from "../../config/providers.js";
 import { OAUTH_ENDPOINTS, GITHUB_COPILOT, buildKimiHeaders } from "../../config/appConstants.js";
 import { proxyAwareFetch } from "../../utils/proxyFetch.js";
 import { dedupRefresh } from "./dedup.js";
+import { buildClineHeaders, getClineAccessToken } from "../../shared/clineAuth.js";
 import { buildExternalIdpRefreshParams } from "../../../src/lib/oauth/kiroExternalIdp.js";
 
 let _xaiServiceSingleton = null;
@@ -567,6 +568,62 @@ export async function refreshCodebuddyIntlToken(refreshToken, log) {
   }, log);
 }
 
+export async function refreshMinimaxCodeToken(provider, refreshToken, log, proxyOptions = null) {
+  if (!refreshToken) return null;
+  return dedupRefresh(provider, refreshToken, async () => {
+    const oauthConfig = PROVIDER_OAUTH[provider];
+    const tokenUrl = oauthConfig?.tokenUrl || (provider === "minimax-code-global"
+      ? "https://account.minimax.io/oauth2/token"
+      : "https://account.minimax.cn/oauth2/token");
+
+    try {
+      const response = await proxyAwareFetch(tokenUrl, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: oauthConfig?.clientId || "mcode-public",
+          refresh_token: refreshToken,
+        }).toString(),
+      }, proxyOptions);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        const failure = classifyOAuthRefreshError(response.status, errorText);
+        log?.warn?.("TOKEN_REFRESH", `Failed to refresh MiniMax Code token (${provider})`, {
+          status: response.status,
+          error: errorText,
+          code: failure.code,
+          permanent: failure.permanent,
+        });
+        if (failure.permanent) {
+          return { error: failure.code || "invalid_grant" };
+        }
+        return null;
+      }
+
+      const tokens = await response.json();
+      log?.info?.("TOKEN_REFRESH", `Successfully refreshed MiniMax Code token (${provider})`, {
+        hasNewAccessToken: !!tokens.access_token,
+        hasNewRefreshToken: !!tokens.refresh_token,
+        expiresIn: tokens.expires_in,
+      });
+
+      return {
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token || refreshToken,
+        expiresIn: tokens.expires_in,
+      };
+    } catch (error) {
+      log?.error?.("TOKEN_REFRESH", `Network error refreshing MiniMax Code token (${provider}): ${error.message}`);
+      return null;
+    }
+  }, log);
+}
+
 // Trae refresh — POST ExchangeToken with JSON body {ClientID, RefreshToken, ClientSecret, UserID}.
 // Response: {Result: {AccessToken, RefreshToken, TokenType, ExpiresAt}}.
 export async function refreshTraeToken(refreshToken, credentials, log) {
@@ -657,4 +714,93 @@ export async function refreshWindsurfToken(credentials, log) {
     "windsurf: apiKey is long-lived (no refresh_token flow) — skipping"
   );
   return null;
+}
+
+// Cline refresh (issue #21). Upstream POST /api/v1/auth/refresh rejects the
+// standard OAuth2 snake_case form body — it validates JSON with camelCase
+// fields (`refreshToken` + `grantType`) and answers 400 "Validation failed"
+// otherwise, which made backgroundTokenRefresh fail 100% for cline rows.
+// ClinePass OAuth shares the same endpoints (registry/clinepass.js oauth block,
+// CLINEPASS_CONFIG), so one implementation serves both handler entries.
+// Auth note: chat/user endpoints require the `Bearer workos:<jwt>` prefix
+// (clineAuth.js keeps that), but the refresh endpoint takes the token in the
+// body — no Authorization header needed.
+export async function refreshClineToken(providerId, refreshToken, log) {
+  if (!refreshToken) return null;
+  const oauth = PROVIDER_OAUTH[providerId] || PROVIDER_OAUTH.cline || {};
+  const url = oauth.refreshUrl;
+  if (!url) {
+    log?.warn?.("TOKEN_REFRESH", `No Cline refreshUrl configured for ${providerId}`);
+    return null;
+  }
+
+  return dedupRefresh(providerId, refreshToken, async () => {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: buildClineHeaders(null, {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        }),
+        // clientType matches the authorization exchange convention in
+        // src/lib/oauth/providers/cline.js (client_type: "extension"); PR #22
+        // live-verified the three-field body, issue #21 the two-field one.
+        body: JSON.stringify({ refreshToken, grantType: "refresh_token", clientType: "extension" }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        // Terminal auth errors (revoked/expired/invalidated refresh token)
+        // surface as an unrecoverable marker instead of a bare null so logs
+        // say "re-auth required" and future scheduler logic can act on it.
+        // Transient failures — including any wrong-shape 400 — stay null/retry.
+        const failure = classifyOAuthRefreshError(errorText, response.status);
+        if (failure.permanent) {
+          log?.error?.("TOKEN_REFRESH", `${providerId} refresh token invalid or expired — re-auth required`, {
+            status: response.status,
+            code: failure.code,
+          });
+          return { error: "unrecoverable_refresh_error", code: failure.code };
+        }
+        log?.error?.("TOKEN_REFRESH", `Failed to refresh ${providerId} token`, {
+          status: response.status,
+          error: errorText,
+        });
+        return null;
+      }
+
+      const payload = await response.json();
+      const data = payload?.data || payload;
+      // Canonical stored form: the workos: prefix the chat path expects
+      // (getClineAccessToken is idempotent, plain JWTs get prefixed).
+      const accessToken = getClineAccessToken(data?.accessToken);
+      if (!accessToken) {
+        log?.error?.("TOKEN_REFRESH", `${providerId} refresh returned no accessToken`, { payload });
+        return null;
+      }
+
+      const newRefresh = data?.refreshToken || refreshToken;
+      // Upstream returns an absolute ISO expiresAt; convert to the relative
+      // expiresIn that mergeRefreshedCredentials / updateProviderCredentials
+      // prefer (same normalization as the Trae handler).
+      let expiresIn;
+      if (data?.expiresAt) {
+        const ms = new Date(data.expiresAt).getTime() - Date.now();
+        if (Number.isFinite(ms) && ms > 0) expiresIn = Math.floor(ms / 1000);
+      } else if (typeof data?.expiresIn === "number") {
+        expiresIn = data.expiresIn;
+      }
+
+      log?.info?.("TOKEN_REFRESH", `Successfully refreshed ${providerId} token`, {
+        hasNewAccessToken: true,
+        hasNewRefreshToken: newRefresh !== refreshToken,
+        expiresIn,
+      });
+
+      return { accessToken, refreshToken: newRefresh, expiresIn };
+    } catch (error) {
+      log?.error?.("TOKEN_REFRESH", `${providerId} refresh error: ${error.message}`);
+      return null;
+    }
+  }, log);
 }

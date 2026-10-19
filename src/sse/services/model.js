@@ -1,6 +1,6 @@
 // Re-export from open-sse with localDb integration
 import { getModelAliases, getComboByName, getProviderNodes } from "@/lib/localDb";
-import { parseModel as parseModelCore, resolveModelAliasFromMap, getModelInfoCore } from "open-sse/services/model.js";
+import { parseModel as parseModelCore, resolveModelAliasFromMap, resolveModelAliasCore, getModelInfoCore, isCodexBareSlug } from "open-sse/services/model.js";
 import REGISTRY from "open-sse/providers/registry/index.js";
 
 // Local provider alias overrides (HMR-friendly, applied on top of open-sse map)
@@ -34,8 +34,14 @@ export async function resolveModelAlias(alias) {
 
 /**
  * Get full model info (parse or resolve)
+ *
+ * `inferFallback: false` opts the caller out of the bare-name prefix guess:
+ * an unmatched bare name then resolves to `provider: null` instead of the
+ * name-prefix heuristic (#34 — the guess used to route `deepseek-v4.1-flash`
+ * to whatever provider shared the prefix and fail there with a misleading
+ * "No active credentials" 404).
  */
-export async function getModelInfo(modelStr) {
+export async function getModelInfo(modelStr, { inferFallback = true } = {}) {
   const parsed = parseModel(modelStr);
 
   if (!parsed.isAlias) {
@@ -75,6 +81,21 @@ export async function getModelInfo(modelStr) {
     return { provider: null, model: parsed.model };
   }
 
+  const resolved = await resolveModelAliasCore(modelStr, getModelAliases);
+  if (resolved) {
+    return resolved;
+  }
+
+  // Codex CLI 会发裸的 codex 专属 slug（/model 选择器，如 gpt-5.6-terra）——这些 id
+  // 只在 codex 后端存在。放在 #34 的 400 判定之前接管（combo/用户别名命中优先），
+  // 只覆盖 Codex CLI 真实会发的 gpt-* slug，未知裸名依旧返回 provider: null。
+  if (isCodexBareSlug(parsed.model)) {
+    return { provider: "codex", model: parsed.model };
+  }
+
+  if (!inferFallback) {
+    return { provider: null, model: parsed.model };
+  }
   return getModelInfoCore(modelStr, getModelAliases);
 }
 

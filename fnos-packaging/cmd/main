@@ -60,20 +60,34 @@ start() {
     fi
     # 清理 SQLite WAL/SHM 残留（旧版/跨用户安装后属主可能错误，导致 node:sqlite 无法打开）
     rm -f "${DATA_DIR}/db/data.sqlite-shm" "${DATA_DIR}/db/data.sqlite-wal" 2>/dev/null || true
-    # 确保 .env 存在（NEXT.js 读取 INITIAL_PASSWORD 等配置）
-    # 注意：不写 JWT_SECRET —— 留空让服务端自动生成随机密钥（0600），
-    # 旧版本写入的占位值是公开字符串，会被服务端忽略并告警。
-    if [ ! -f "${SRC_DIR}/.env" ]; then
-        cat > "${SRC_DIR}/.env" <<'ENVEOF'
-INITIAL_PASSWORD=123456
-ENVEOF
-        echo "created default .env in ${SRC_DIR}"
+    # 初始登录密码持久化在 ${DATA_DIR}/initial-password（0600，跨 fpk 升级保留），
+    # 不再写 ${SRC_DIR}/.env —— 应用负载目录在每次升级时被整体替换，密码写在那里会被
+    # 抹掉并在下次启动重新生成，依赖引导密码的用户升级后被静默锁死 (issue #9 后续)。
+    # 不写 JWT_SECRET —— 留空让服务端自动生成随机密钥（0600）。密码在下方作为 env 变量
+    # 传给 node（env 优先级高于 .env），所以无需再写 .env。
+    PW_FILE="${DATA_DIR}/initial-password"
+    if [ ! -f "${PW_FILE}" ]; then
+        # 首次启动: 生成随机初始密码 —— 不再写死 123456。0.0.0.0 监听 + 公开口令 =
+        # 局域网内任何人一步拿到管理员权限和全部上游凭据 (issue #9)。密码只打印这一次，
+        # 登录后请在 Web UI「设置」页改掉。
+        GEN_PW="$("${NODE_BIN}" -e 'process.stdout.write(require("crypto").randomBytes(12).toString("base64url"))' 2>/dev/null || true)"
+        if [ -z "${GEN_PW}" ]; then
+            GEN_PW="$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+        fi
+        ( umask 077; printf '%s\n' "${GEN_PW}" > "${PW_FILE}" )
+        echo "generated INITIAL_PASSWORD in ${PW_FILE}"
+        echo "======================================================================"
+        echo " dashboard password for the first login: ${GEN_PW}"
+        echo " shown once — change it in the Web UI after logging in."
+        echo "======================================================================"
+        printf '%s generated INITIAL_PASSWORD in %s\n' "$(date '+%F %T')" "${PW_FILE}" >> "${LOG}"
     fi
     cd "${SRC_DIR}"
-    # 初始密码: 数据库未设密码或 requireLogin=false 时, 用 INITIAL_PASSWORD 兜底,
-    # 避免远程访问用默认密码被 "Default password must be changed before remote access" 拦截。
-    # 首次登录后建议在 Web UI 修改为自定义密码。
-    INITIAL_PASSWORD="${INITIAL_PASSWORD:-123456}"
+    # env 优先级高于 .env：把持久化的密码读回来，使同一密码在每次重启和升级后保持不变。
+    # 读不到就留空 —— 服务端在「未设密码」时退回仅本机可访问，而不是放行一个公开口令。
+    if [ -z "${INITIAL_PASSWORD:-}" ] && [ -f "${PW_FILE}" ]; then
+        INITIAL_PASSWORD="$(head -1 "${PW_FILE}")"
+    fi
     # HOME 指向数据目录：fnOS app 用户（如 10router）的 /home/<app> 未必存在，
     # 而 9router 源码会 mkdirSync($HOME/.9router) 存 usage/log，指向不存在的目录会 EACCES
     # INSTALL_CHANNEL=fpk：仪表盘「检查更新」据此显示对应版本 Releases

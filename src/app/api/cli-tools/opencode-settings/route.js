@@ -48,7 +48,7 @@ const readConfig = async () => {
   }
 };
 
-const has9RouterConfig = (config) => {
+const has10RouterConfig = (config) => {
   if (!config?.provider) return false;
   return !!config.provider["10router"];
 };
@@ -73,7 +73,7 @@ export async function GET() {
     return NextResponse.json({
       installed: true,
       config,
-      has10Router: has9RouterConfig(config),
+      has10Router: has10RouterConfig(config),
       configPath: getConfigPath(),
         opencode: {
           models: Object.keys(modelMap),

@@ -13,9 +13,16 @@ const DEFAULT_CONFIG = {
   protocol: "http:",
 };
 
-const CLI_TOKEN_HEADER = "x-9r-cli-token";
+// The server renamed x-9r-cli-token → x-10r-cli-token and still accepts both;
+// send both so this launcher also works against a server older than the rename.
+const CLI_TOKEN_HEADERS = ["x-10r-cli-token", "x-9r-cli-token"];
 const CLI_TOKEN_SALT = "9r-cli-auth";
 const APP_NAME = "10router";
+
+function cliTokenHeaders() {
+  const token = getCliToken();
+  return Object.fromEntries(CLI_TOKEN_HEADERS.map((h) => [h, token]));
+}
 
 function getDataDir() {
   if (process.env.DATA_DIR) return process.env.DATA_DIR;
@@ -94,7 +101,7 @@ function makeRequest(method, path, body = null) {
       method: method,
       headers: {
         "Content-Type": "application/json",
-        [CLI_TOKEN_HEADER]: getCliToken(),
+        ...cliTokenHeaders(),
       },
     };
 

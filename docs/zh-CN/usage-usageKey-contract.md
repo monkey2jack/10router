@@ -63,3 +63,5 @@ if (!entry.usageKey || existingKey === entry.usageKey) {
 3. **无 usageKey** → 保持内容去重
 
 > 该测试曾因**硬编码时间戳过期**而失败（`getUsageStats("24h")` 窗口查不到历史日期），后改为动态当前时间（commit `d20444d7`）。写同类测试时时间戳要用 `Date.now()` 而非固定日期。
+
+> **2026-09-16 补洞**：usageKey 合同曾被**签名静默丢参**架空——chatCore 四个调用点都传了 `usageKey: randomUUID()`，但中间层 `saveUsageStats` 的解构签名没有该参数，全部在调用边界丢弃（合同实际未生效于主链路）。修复时补了 `tests/unit/usage-stats-usagekey.test.js`：同毫秒同内容双调用、不同 key → 两行都存活。教训：**跨模块传参必须在终点断言字段真的存在**，签名"看起来传了"不算数。详见 [test-report-1.1.2-silent-data-drop.md](test-report-1.1.2-silent-data-drop.md)。

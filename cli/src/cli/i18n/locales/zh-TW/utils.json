@@ -11,6 +11,10 @@
   "utils.modelSelector.combosHeader": "【組合】",
   "utils.modelSelector.cancelOption": "  0. 取消\n",
   "utils.modelSelector.enterNumber": "請輸入編號：",
+  "utils.modelSelector.noProvidersHeader": "\n  未發現已連接的供應商。",
+  "utils.modelSelector.connectHint": "  請先在供應商選單中連接一個供應商。\n",
+  "utils.modelSelector.customOption": "  m. ✍️  手動輸入模型 ID",
+  "utils.modelSelector.enterCustom": "請輸入自定義模型 ID：",
 
   "utils.format.invalidDate": "無效日期",
   "utils.format.justNow": "剛剛",

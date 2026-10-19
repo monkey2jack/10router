@@ -44,7 +44,7 @@ const readJson = async (filePath) => {
   }
 };
 
-const has9RouterConfig = (auth) => {
+const has10RouterConfig = (auth) => {
   if (!auth) return false;
   const entry = auth["openai-compatible"] || auth["10router"];
   if (!entry) return false;
@@ -62,7 +62,7 @@ export async function GET() {
     return NextResponse.json({
       installed: true,
       settings: { auth: auth ? Object.keys(auth) : [] },
-      has10Router: has9RouterConfig(auth),
+      has10Router: has10RouterConfig(auth),
       authPath: getAuthPath(),
     });
   } catch (error) {

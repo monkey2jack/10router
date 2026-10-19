@@ -1,6 +1,7 @@
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS, PROVIDER_OAUTH } from "../config/providers.js";
-import { ANTHROPIC_API_VERSION, OPENAI_COMPAT_BASE, ANTHROPIC_COMPAT_BASE, selectAnthropicBeta } from "../providers/shared.js";
+import { ANTHROPIC_API_VERSION, OPENAI_COMPAT_BASE, ANTHROPIC_COMPAT_BASE, selectAnthropicBeta, mergeAnthropicBeta } from "../providers/shared.js";
+import { extractClaudeSessionIdFromUserId } from "../utils/claudeCloaking.js";
 import { resolveOpenAICompatibleApiType } from "../services/provider.js";
 import { OAUTH_ENDPOINTS, buildKimiHeaders } from "../config/appConstants.js";
 import { buildClineHeaders } from "../shared/clineAuth.js";
@@ -40,6 +41,9 @@ function applyAuth(headers, desc, credentials) {
 const HEADER_HOOKS = {
   // Stable device_id from OAuth connection (CLIProxyAPI KimiTokenStorage.DeviceID)
   kimiHeaders: (h, c) => Object.assign(h, buildKimiHeaders(c?.providerSpecificData?.deviceId)),
+  // Muse: x-api-version 只加在订阅（铸造 key）请求上——纯 Model API key 不带即可用。
+  // OAuth 连接的凭证存 accessToken（不设 apiKey），据此区分两种认证态。
+  museHeaders: (h, c) => { if (c?.accessToken && !c?.apiKey) h["x-api-version"] = "1.0.0"; },
   clineHeaders: (h, c) => Object.assign(h, buildClineHeaders(c.apiKey || c.accessToken)),
   kilocodeOrg: (h, c) => { if (c.providerSpecificData?.orgId) h["X-Kilocode-OrganizationID"] = c.providerSpecificData.orgId; },
 };
@@ -102,6 +106,13 @@ export class DefaultExecutor extends BaseExecutor {
   }
 
   buildUrl(model, stream, urlIndex = 0, credentials = null) {
+    // CreditDaddy 网关线（zcode-free / trae-free）: 主机/端口/路径可配置
+    // （getProviderCredentials 注入 psd.baseUrl），优先于注册表 transport ——
+    // 覆盖本机 127.0.0.1:47860 与局域网/zcode-api 后端
+    if ((this.provider === "zcode-free" || this.provider === "trae-free") && credentials?.providerSpecificData?.baseUrl) {
+      const normalized = String(credentials.providerSpecificData.baseUrl).replace(/\/$/, "");
+      return normalized.endsWith("/messages") ? normalized : `${normalized}/messages`;
+    }
     // Runtime transport (multi-endpoint providers): use the sourceFormat-matched endpoint
     const rt = credentials?.runtimeTransport;
     if (rt?.baseUrl) {
@@ -146,7 +157,7 @@ export class DefaultExecutor extends BaseExecutor {
     return BEARER;
   }
 
-  buildHeaders(credentials, stream = true, url, model) {
+  buildHeaders(credentials, stream = true, url, model, body) {
     const rt = credentials?.runtimeTransport;
     const headers = { "Content-Type": "application/json", ...(rt ? rt.headers : this.config.headers) };
     const desc = rt?.auth || AUTH_DESCRIPTORS[this.provider] || this.resolveAuthDescriptor();
@@ -166,7 +177,22 @@ export class DefaultExecutor extends BaseExecutor {
     const isClaudeModel = typeof model === "string" && /^claude-/.test(model);
     if (model && (this.provider === "claude"
       || (this.provider?.startsWith?.("anthropic-compatible-") && isClaudeModel))) {
-      headers["Anthropic-Beta"] = selectAnthropicBeta(model);
+      // 客户端自带的 beta 旗标并入上游计算值（dc198dff）：客户端显式要求的
+      // beta 特性（如 context-management）必须在请求里存活。
+      const clientBeta = credentials?.rawHeaders?.["anthropic-beta"];
+      headers["Anthropic-Beta"] = mergeAnthropicBeta(selectAnthropicBeta(model, body), clientBeta);
+    } else if (this.provider === "anthropic" && credentials?.rawHeaders?.["anthropic-beta"]) {
+      headers["Anthropic-Beta"] = mergeAnthropicBeta(headers["Anthropic-Beta"], credentials.rawHeaders["anthropic-beta"]);
+    }
+
+    // Claude OAuth：x-claude-code-session-id 缺失时与 metadata.user_id.session_id
+    // 对齐（6aea3875）——指纹一致性依赖两者相同。
+    if (this.provider === "claude" && !headers["x-claude-code-session-id"]) {
+      const token = credentials?.accessToken || credentials?.apiKey || "";
+      if (token.includes("sk-ant-oat")) {
+        const sid = extractClaudeSessionIdFromUserId(body?.metadata?.user_id);
+        if (sid) headers["x-claude-code-session-id"] = sid;
+      }
     }
 
     // Strip first-party Claude Code identity headers for non-Anthropic anthropic-compatible upstreams
@@ -229,7 +255,9 @@ export class DefaultExecutor extends BaseExecutor {
       clinepass: () => this.refreshCline(credentials.refreshToken, proxyOptions),
       kimi: () => this.refreshKimi(credentials, proxyOptions),
       "kimi-coding": () => this.refreshKimi(credentials, proxyOptions),
-      kilocode: () => this.refreshKilocode(credentials.refreshToken, proxyOptions)
+      kilocode: () => this.refreshKilocode(credentials.refreshToken, proxyOptions),
+      "minimax-code": () => this.refreshMinimaxCode("minimax-code", credentials, proxyOptions),
+      "minimax-code-global": () => this.refreshMinimaxCode("minimax-code-global", credentials, proxyOptions),
     };
 
     const refresher = refreshers[this.provider];
@@ -326,6 +354,13 @@ export class DefaultExecutor extends BaseExecutor {
     if (!response.ok) return null;
     const tokens = await response.json();
     return { accessToken: tokens.access_token, refreshToken: tokens.refresh_token || refreshToken, expiresIn: tokens.expires_in };
+  }
+
+  async refreshMinimaxCode(provider, credentials, proxyOptions = null) {
+    const refreshToken = credentials?.refreshToken;
+    if (!refreshToken) return null;
+    const { refreshMinimaxCodeToken } = await import("../services/tokenRefresh/providers.js");
+    return refreshMinimaxCodeToken(provider, refreshToken, console, proxyOptions);
   }
 
   async refreshKilocode(refreshToken, proxyOptions = null) {

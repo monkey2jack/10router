@@ -41,6 +41,12 @@ export default {
     },
   },
   models: [
+    // Opus 5.5 — experimental preview, 1M context, 2x credits（上游 e78b766a，
+    // 2026-09-22 上线，kiro.dev 会话 UI 可见，点号 id 为 Kiro 原生拼写）。
+    { id: "claude-opus-5.5", name: "Claude Opus 5.5" },
+    { id: "claude-opus-5.5-thinking", name: "Claude Opus 5.5 (Thinking)" },
+    { id: "claude-opus-5.5-agentic", name: "Claude Opus 5.5 (Agentic)" },
+    { id: "claude-opus-5.5-thinking-agentic", name: "Claude Opus 5.5 (Thinking + Agentic)" },
     // Opus (added per kiro.dev/changelog/models and kiro.dev/docs/models)
     { id: "claude-opus-5", name: "Claude Opus 5" },
     { id: "claude-opus-5-thinking", name: "Claude Opus 5 (Thinking)" },

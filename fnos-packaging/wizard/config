@@ -1,0 +1,18 @@
+[
+    {
+        "stepTitle": "重置仪表盘密码",
+        "items": [
+            {
+                "type": "tips",
+                "label": "",
+                "helpText": "忘记 10Router 仪表盘密码时使用。填写新密码并保存，下次登录即生效（无需重启应用）；留空保存则不做任何修改。\n\n重置成功后，建议登录仪表盘在「设置 → 安全」里再改一次密码。"
+            },
+            {
+                "type": "text",
+                "field": "reset_dashboard_password",
+                "label": "新仪表盘密码（留空则不修改）",
+                "initValue": ""
+            }
+        ]
+    }
+]

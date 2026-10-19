@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 /**
- * 10router usage exporter — supports ZCode, OpenCode *and* mirasim.
+ * 10router usage exporter — supports ZCode, OpenCode, mirasim, Xiaomi MiMo
+ * *and* another 10Router/9Router instance.
  *
  * Reads a local model-usage ledger (ZCode: ~/.zcode/cli/db/db.sqlite,
  * OpenCode: ~/.local/share/opencode/opencode.db,
- * mirasim: ~/.mirasim/insights/usage-*.ndjson) and either POSTs to
- * 10Router's /api/settings/database/import-usage (online) or writes a JSON
- * file for offline import.
+ * mirasim: ~/.mirasim/insights/usage-*.ndjson,
+ * Xiaomi MiMo: ~/.local/share/mimocode/mimocode.db,
+ * 10Router/9Router instance: its own data.sqlite via --db or auto-discovery)
+ * and either POSTs to 10Router's /api/settings/database/import-usage (online)
+ * or writes a JSON file for offline import.
  *
  * Modes:
  *   (default)  export + POST to --endpoint            (needs network + auth)
@@ -17,6 +20,10 @@
  *   --source zcode      (default) read ZCode ledger
  *   --source opencode   read OpenCode desktop ledger
  *   --source mirasim    read mirasim desktop insights ledger
+ *   --source mimo       read Xiaomi MiMo (mimocode) desktop ledger
+ *   --source 10r        read another 10Router/9Router instance's data.sqlite
+ *                       (aliases: 10router / 9r / 9router; --db to point at a
+ *                       specific file — e.g. a NAS copy or a sibling relay)
  *
  * Auth (online modes): one of
  *   --key sk-…            virtual proxy key from 10router dashboard (preferred)
@@ -28,6 +35,8 @@
  *   node export-usage.mjs --export zcode-usage.json
  *   node export-usage.mjs --source opencode --export opencode-usage.json
  *   node export-usage.mjs --source mirasim --export mirasim-usage.json
+ *   node export-usage.mjs --source mimo --export mimo-usage.json
+ *   node export-usage.mjs --source 10r --db /path/to/nas/data.sqlite --export 10r-usage.json
  *   node export-usage.mjs --import opencode-usage.json --endpoint http://nas:20128 --key sk-…
  */
 
@@ -46,22 +55,33 @@ function parseArgs(argv) {
     endpoint: process.env.TENROUTER_ENDPOINT || "http://127.0.0.1:20127",
     key: process.env.TENROUTER_KEY || "",
     password: process.env.TENROUTER_PASSWORD || "",
-    source: "zcode", // "zcode" | "opencode" | "mirasim"
+    source: "zcode", // "zcode" | "opencode" | "mirasim" | "mimo" | "10r"
+    dbPath: null,    // 10r: explicit source instance db (else auto-discover)
+    tag: null,       // 10r: label stamped into meta.syncedFrom (default: db path)
+    force: false,    // 10r: bypass the same-instance import guard
     limit: 0,
     dryRun: false,
     quiet: false,
     exportFile: null,
     importFile: null,
+    includeCustom: false, // zcode: also export non-builtin (custom/gateway) providers
   };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--endpoint") args.endpoint = argv[++i];
     else if (a === "--key") args.key = argv[++i];
     else if (a === "--password") args.password = argv[++i];
-    else if (a === "--source") args.source = argv[++i];
+    else if (a === "--source") {
+      const s = argv[++i];
+      args.source = ({ mimocode: "mimo", "10router": "10r", "9r": "10r", "9router": "10r" })[s] || s;
+    }
+    else if (a === "--db") args.dbPath = argv[++i];
+    else if (a === "--tag") args.tag = argv[++i];
+    else if (a === "--force") args.force = true;
     else if (a === "--limit") args.limit = parseInt(argv[++i], 10) || 0;
     else if (a === "--export") args.exportFile = argv[++i];
     else if (a === "--import") args.importFile = argv[++i];
+    else if (a === "--include-custom") args.includeCustom = true;
     else if (a === "--dry-run") args.dryRun = true;
     else if (a === "--quiet") args.quiet = true;
     else if (a === "--help" || a === "-h") {
@@ -75,12 +95,24 @@ Source:
   --source zcode       (default) read ZCode ledger (~/.zcode/cli/db/db.sqlite)
   --source opencode    read OpenCode desktop ledger (~/.local/share/opencode/opencode.db)
   --source mirasim     read mirasim insights ledger (~/.mirasim/insights/usage-*.ndjson)
+  --source mimo        read Xiaomi MiMo ledger (~/.local/share/mimocode/mimocode.db)
+  --source 10r         read another 10Router/9Router instance's data.sqlite
+                       (aliases: 10router / 9r / 9router)
 
 Options:
   --endpoint URL       10Router base URL (default http://127.0.0.1:20127)
   --key sk-...         virtual proxy key (recommended)   [online modes]
   --password PASS      dashboard password                 [online modes]
+  --db PATH            10r: path to the source instance's data.sqlite
+                       (default: auto-discover %APPDATA%\\10router|9router and
+                       ~/.10router|~/.9router; env TENROUTER_DB also works)
+  --tag LABEL          10r: label stored in meta.syncedFrom (default: db path)
+  --force              10r: import even when the db looks like it belongs to
+                       the very instance behind --endpoint (see --source 10r)
   --limit N            keep only the newest N rows
+  --include-custom     zcode: also export non-builtin providers (default: only
+                       official builtin:* channels — custom/gateway providers are
+                       already accounted elsewhere, exporting them double-counts)
   --dry-run            show what would be sent, send nothing
   --quiet              suppress progress output`);
       process.exit(0);
@@ -90,8 +122,12 @@ Options:
     console.error("error: --export and --import are mutually exclusive");
     process.exit(2);
   }
-  if (!["zcode", "opencode", "mirasim"].includes(args.source)) {
-    console.error(`error: --source must be "zcode", "opencode" or "mirasim", got "${args.source}"`);
+  if (!["zcode", "opencode", "mirasim", "mimo", "10r"].includes(args.source)) {
+    console.error(`error: --source must be "zcode", "opencode", "mirasim", "mimo" or "10r", got "${args.source}"`);
+    process.exit(2);
+  }
+  if (args.dbPath && args.source !== "10r") {
+    console.error(`error: --db only applies to --source 10r (got --source ${args.source})`);
     process.exit(2);
   }
   // Offline export needs neither endpoint nor credentials.
@@ -195,24 +231,86 @@ function convertOpenCodeSession(s) {
 }
 
 // ---------------------------------------------------------------------------
+// Xiaomi MiMo (mimocode) db discovery & conversion
+// ---------------------------------------------------------------------------
+
+function mimoDbCandidates() {
+  const home = os.homedir();
+  const candidates = [];
+  // Primary: ~/.local/share/mimocode/mimocode.db
+  candidates.push(path.join(home, ".local", "share", "mimocode", "mimocode.db"));
+  // Fallbacks: AppData/Roaming or Local on Windows
+  if (process.platform === "win32") {
+    candidates.push(path.join(home, "AppData", "Roaming", "Xiaomi MiMo", "mimocode.db"));
+    candidates.push(path.join(home, "AppData", "Roaming", "Xiaomi MiMo", "mimocode", "mimocode.db"));
+    const localAppData = process.env.LOCALAPPDATA || path.join(home, "AppData", "Local");
+    candidates.push(path.join(localAppData, "mimocode", "mimocode.db"));
+  }
+  return candidates.filter((p) => fs.existsSync(p));
+}
+
+const MIMO_PROVIDER_PREFIX = "mimo-";
+
+function convertMimoMessage(row, d) {
+  const t = d.tokens || {};
+  const tokens = {
+    prompt_tokens: t.input || 0,
+    completion_tokens: t.output || 0,
+    ...(t.reasoning ? { reasoning_tokens: t.reasoning } : {}),
+    ...(t.cache?.read ? { cache_read_input_tokens: t.cache.read } : {}),
+    ...(t.cache?.write ? { cache_creation_input_tokens: t.cache.write } : {}),
+  };
+  const providerId = d.providerID || "mimo";
+  const modelId = d.modelID || "unknown";
+  const ts = d.time?.completed || d.time?.created || row.time_created || Date.now();
+  return {
+    timestamp: new Date(ts).toISOString(),
+    provider: MIMO_PROVIDER_PREFIX + providerId,
+    model: modelId,
+    connectionId: null,
+    apiKey: null,
+    endpoint: "mimo://" + (d.agent || "desktop"),
+    cost: d.cost || 0,
+    status: "ok",
+    tokens,
+    meta: {
+      source: "mimo",
+      mimoMessageId: row.id || null,
+      sessionId: row.session_id || null,
+      agent: d.agent || null,
+      mode: d.mode || null,
+      planUsage: true,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // model_usage → usageHistory conversion
 // ---------------------------------------------------------------------------
 
-// Providers whose baseURL points at 10router itself: their calls are already
-// accounted in 10router's usageHistory, importing them again would double-count.
-function loadSelfProviderIds() {
-  const ids = new Set();
-  const cfgPath = path.join(os.homedir(), ".zcode", "v2", "config.json");
-  try {
-    const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
-    for (const [id, p] of Object.entries(cfg.provider || {})) {
-      const baseURL = String(p?.options?.baseURL || "");
-      if (/[:/]20127\b|\/v1\b/.test(baseURL) && /10router|127\.0\.0\.1|192\.168\.|localhost/i.test(baseURL + " " + (p?.name || ""))) {
-        ids.add(id);
-      }
-    }
-  } catch { /* no config — nothing to exclude */ }
-  return ids;
+// ZCode rows are exported for OFFICIAL channels only. Every other provider is
+// a user-added custom provider, and in this user's setup those all point at
+// local gateways (10Router itself, or a sibling relay) whose traffic is
+// already accounted for by 10Router's own logging or another sync source —
+// importing them here would double-count. This is structural (no reliance on
+// provider names/URLs/model shapes) and survives provider delete+re-add,
+// which changes the UUID and historically slipped past the old
+// config-matching guard.
+//
+// Official prefixes:
+//   builtin:  — ZCode's built-in official channels (bigmodel / zai / …)
+//   account:  — subscription-account channels, introduced by a recent ZCode
+//               major release: plan/quota traffic that used to be
+//               builtin:bigmodel-start-plan now lands as
+//               account:bigmodel-start-plan (verified 2026-09-20: 341 rows
+//               since 09-18, subscription quota like the builtin form).
+//
+// Escape hatch: --include-custom exports the rest anyway (for setups where
+// custom providers are genuine third-party channels not covered elsewhere).
+const OFFICIAL_PROVIDER_PREFIXES = ["builtin:", "account:"];
+function isOfficialProvider(id) {
+  const s = String(id || "");
+  return OFFICIAL_PROVIDER_PREFIXES.some((p) => s.startsWith(p));
 }
 
 function statusTo10r(status) {
@@ -235,7 +333,7 @@ function convertRow(row) {
   const startedMs = row.started_at || row.completed_at || Date.now();
   return {
     timestamp: new Date(startedMs).toISOString(),
-    provider: ZCODE_PROVIDER_PREFIX + String(row.provider_id || "unknown").replace(/^builtin:/, ""),
+    provider: ZCODE_PROVIDER_PREFIX + String(row.provider_id || "unknown").replace(/^(builtin:|account:)/, ""),
     model: row.model_id || "unknown",
     connectionId: null,
     apiKey: null,
@@ -262,7 +360,8 @@ function convertRow(row) {
 async function importBatch(entries, { endpoint, key, password }) {
   const headers = { "Content-Type": "application/json" };
   if (key) headers["Authorization"] = `Bearer ${key}`;
-  if (password) headers["x-9r-password"] = password;
+  // x-10r-password is the current name; x-9r-password keeps pre-rename servers working.
+  if (password) Object.assign(headers, { "x-10r-password": password, "x-9r-password": password });
   const res = await fetch(`${endpoint.replace(/\/$/, "")}/api/settings/database/import-usage`, {
     method: "POST",
     headers,
@@ -283,7 +382,6 @@ async function importBatch(entries, { endpoint, key, password }) {
 
 // Read every ZCode db snapshot and return converted usageHistory entries.
 function collectZcodeEntries() {
-  const selfIds = loadSelfProviderIds();
   const dbs = zcodeDbCandidates();
   if (dbs.length === 0) {
     console.error("error: no ZCode db.sqlite found (~/.zcode/cli/db/db.sqlite)");
@@ -292,6 +390,8 @@ function collectZcodeEntries() {
 
   const entries = [];
   const seenIds = new Set();
+  let skippedCustom = 0;
+  const skippedByProvider = {};
   for (const dbPath of dbs) {
     const { tmpDir, dst } = snapshotDb(dbPath);
     try {
@@ -306,7 +406,14 @@ function collectZcodeEntries() {
           rows = db.prepare(`SELECT logical_request_id, provider_id, model_id, agent, status, started_at, completed_at, duration_ms, input_tokens, output_tokens FROM model_usage ORDER BY started_at ASC`).all();
         }
         for (const row of rows) {
-          if (selfIds.has(row.provider_id)) continue; // already in 10router
+          // Official channels only (default): anything else is a user-added
+          // custom provider pointing at a local gateway, already counted.
+          if (!args.includeCustom && !isOfficialProvider(row.provider_id)) {
+            skippedCustom++;
+            const key = String(row.provider_id || "unknown");
+            skippedByProvider[key] = (skippedByProvider[key] || 0) + 1;
+            continue;
+          }
           if (row.provider_id && row.logical_request_id) {
             const dedupId = `${row.provider_id}|${row.logical_request_id}`;
             if (seenIds.has(dedupId)) continue;
@@ -319,6 +426,12 @@ function collectZcodeEntries() {
       }
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+  if (skippedCustom > 0) {
+    log(`zcode: skipped ${skippedCustom} rows from non-official providers (custom/gateway channels — already counted elsewhere)`);
+    for (const [p, c] of Object.entries(skippedByProvider).sort((a, b) => b[1] - a[1]).slice(0, 8)) {
+      log(`  - ${p}: ${c}`);
     }
   }
   return entries;
@@ -401,8 +514,16 @@ function isSelfHostedUpstream(upstreamHost, endpointUrl) {
 }
 
 function convertMirasimRow(e) {
+  // mirasim's ledger logs `input` as NET-NEW input only — cache reads/writes
+  // live in separate fields and are excluded (verified across all three legs:
+  // anthropic sum(input)=110K vs sum(cacheRead)=471M; openai-chat 16.5M vs
+  // 123M; openai-responses 5.8M vs 145M). Report true input as
+  // input + cacheRead + cacheWrite so dashboards don't show "input: 638,
+  // cache: 113M" for a heavy cached session. The cache fields stay in `tokens`
+  // for cache-hit accounting; only prompt_tokens carries the total.
+  const inputTotal = (e.input || 0) + (e.cacheRead || 0) + (e.cacheWrite || 0);
   const tokens = {
-    prompt_tokens: e.input || 0,
+    prompt_tokens: inputTotal,
     completion_tokens: e.output || 0,
   };
   if (e.cacheRead) tokens.cache_read_input_tokens = e.cacheRead;
@@ -433,6 +554,9 @@ function convertMirasimRow(e) {
       repo: e.repo || null,
       workspace: e.workspace || null,
       planUsage: true,
+      // prompt_tokens already includes cache — normalize-mirasim-input.mjs
+      // must not add it again (it also detects unflagged rows, e.g. CreditDaddy's).
+      mirasimInputNormalized: true,
     },
   };
 }
@@ -474,9 +598,211 @@ function collectMirasimEntries() {
   return entries;
 }
 
+// Read Xiaomi MiMo (mimocode) db and return converted usageHistory entries.
+function collectMimoEntries() {
+  const dbs = mimoDbCandidates();
+  if (dbs.length === 0) {
+    console.error("error: no Xiaomi MiMo db found (~/.local/share/mimocode/mimocode.db)");
+    process.exit(1);
+  }
+
+  const entries = [];
+  const seenIds = new Set();
+  let skippedNoTokens = 0;
+
+  for (const dbPath of dbs) {
+    // mimocode uses WAL too; snapshot before reading.
+    const { tmpDir, dst } = snapshotDb(dbPath);
+    try {
+      const db = new DatabaseSync(dst, { readOnly: true });
+      try {
+        const rows = db.prepare(`SELECT id, session_id, time_created, data FROM message ORDER BY time_created ASC`).all();
+        for (const row of rows) {
+          let d;
+          try { d = JSON.parse(row.data); } catch { continue; }
+          if (d.role !== "assistant") continue;
+
+          // Dedup by message id if present
+          if (row.id) {
+            if (seenIds.has(row.id)) continue;
+            seenIds.add(row.id);
+          }
+
+          const t = d.tokens || {};
+          const consumed = (t.input || 0) + (t.output || 0) + (t.reasoning || 0) + (t.cache?.read || 0) + (t.cache?.write || 0);
+          if (!consumed) {
+            skippedNoTokens++;
+            continue;
+          }
+
+          entries.push(convertMimoMessage(row, d));
+        }
+      } finally {
+        db.close();
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+
+  if (skippedNoTokens > 0) log(`mimo: skipped ${skippedNoTokens} rows without token counts (empty/aborted turns)`);
+  return entries;
+}
+
+// ---------------------------------------------------------------------------
+// Another 10Router / 9Router instance (source "10r")
+// ---------------------------------------------------------------------------
+
+// The other instance's data.sqlite already stores usageHistory rows in
+// exactly the shape this script POSTs — import is a pass-through. Use case:
+// aggregating a second instance (NAS box, sibling relay, 9Router legacy
+// install) into the dashboard you actually watch.
+//
+// Locations mirror src/lib/dataDir.js: DATA_DIR/db/data.sqlite, where
+// DATA_DIR = %APPDATA%\10router (Windows) or ~/.10router (Unix); 9Router
+// legacy installs used %APPDATA%\9router / ~/.9router.
+function routerDbCandidates() {
+  const list = [];
+  if (process.env.TENROUTER_DB) list.push(process.env.TENROUTER_DB);
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+    list.push(path.join(appData, "10router", "db", "data.sqlite"));
+    list.push(path.join(appData, "9router", "db", "data.sqlite"));
+  } else {
+    list.push(path.join(os.homedir(), ".10router", "db", "data.sqlite"));
+    list.push(path.join(os.homedir(), ".9router", "db", "data.sqlite"));
+  }
+  return list;
+}
+
+function normPath(p) {
+  const s = path.resolve(p);
+  return process.platform === "win32" ? s.toLowerCase() : s;
+}
+
+function isLoopbackUrl(u) {
+  try {
+    // Tolerate schemeless endpoints ("127.0.0.1:20127") the same way
+    // isSelfHostedUpstream() does — otherwise the guard silently fails open.
+    const url = u.includes("://") ? u : `http://${u}`;
+    const h = new URL(url).hostname;
+    return h === "localhost" || h === "::1" || h === "[::1]" || /^127\./.test(h);
+  } catch { return false; }
+}
+
+function safeParseJson(str) {
+  if (!str) return {};
+  if (typeof str !== "string") return str;
+  try { return JSON.parse(str); } catch { return {}; }
+}
+
+function convertRouterRow(row, dbPath, tag) {
+  const tokens = safeParseJson(row.tokens) || {};
+  const meta = safeParseJson(row.meta) || {};
+  if (!meta.source) meta.source = "10r";
+  meta.syncedFrom = tag || dbPath;
+  // Machine-checkable provenance, independent of the --tag label: the
+  // --import same-instance guard reads this to refuse feeding a file back
+  // into the very instance it was exported from.
+  meta.sourceDbPath = dbPath;
+  // Gateway-sync marker: rows NATIVE on the source instance are real gateway
+  // observations — the target's health scoring keeps them (exception to the
+  // imported-rows exclusion). Rows the source instance itself imported from a
+  // client ledger (zcode/mirasim/mimo) stay excluded, however far they travel.
+  if (meta.imported !== true) meta.gatewaySync = true;
+  // connectionId is the SOURCE instance's connection uuid — meaningless here;
+  // keep it under meta for tracing but null the column so the target's
+  // byAccount aggregation doesn't render foreign uuid fragments.
+  if (row.connectionId) meta.sourceConnectionId = row.connectionId;
+  const promptTokens = row.promptTokens ?? tokens.prompt_tokens ?? tokens.input_tokens ?? 0;
+  const completionTokens = row.completionTokens ?? tokens.completion_tokens ?? tokens.output_tokens ?? 0;
+  return {
+    timestamp: row.timestamp,
+    provider: row.provider || "unknown",
+    model: row.model || "unknown",
+    connectionId: null,
+    apiKey: row.apiKey || null,
+    endpoint: row.endpoint || null,
+    promptTokens,
+    completionTokens,
+    // cost/status pass through untouched: native 10r/9r rows may carry real
+    // metered spend and error statuses — unlike the plan-based sources above,
+    // there is nothing to zero out here.
+    cost: row.cost || 0,
+    status: row.status || "ok",
+    tokens,
+    meta,
+  };
+}
+
+function collectRouterEntries() {
+  const localDefaults = routerDbCandidates(); // includes TENROUTER_DB when set
+  let dbPath = args.dbPath;
+  if (dbPath) {
+    if (!fs.existsSync(dbPath)) {
+      console.error(`error: db not found: ${dbPath}`);
+      process.exit(1);
+    }
+  } else {
+    const found = localDefaults.filter((p) => { try { return fs.existsSync(p); } catch { return false; } });
+    if (found.length === 0) {
+      console.error("error: no 10Router/9Router db found. Looked at:");
+      for (const p of localDefaults) console.error(`  - ${p}`);
+      console.error("use --db <path/to/data.sqlite> to point at another instance's database");
+      process.exit(1);
+    }
+    dbPath = found[0];
+    if (found.length > 1) log(`10r: multiple local instance dbs found, using ${dbPath} (override with --db)`);
+  }
+
+  // Same-instance guard: importing a live instance's db into ITSELF is worse
+  // than a no-op — every row dedup-hits, and importUsageRows stamps
+  // meta.imported=true on dedup hits, which would relabel every LIVE row as an
+  // import in the request-details view. Loopback endpoint + local default path
+  // is the classic accident (both defaults point at the same local instance).
+  if (!args.force && !args.exportFile && isLoopbackUrl(args.endpoint)
+      && localDefaults.some((p) => normPath(p) === normPath(dbPath))) {
+    console.error(`error: ${dbPath} looks like the database of the very instance behind ${args.endpoint}`);
+    console.error("(loopback endpoint + local default db path). Importing it into itself would");
+    console.error("mark all live rows as imported. If this really is a different instance,");
+    console.error("re-run with --force; otherwise pick the source db explicitly with --db.");
+    process.exit(2);
+  }
+
+  const { tmpDir, dst } = snapshotDb(dbPath);
+  try {
+    const db = new DatabaseSync(dst, { readOnly: true });
+    try {
+      // Same column set the server's readUsageFromSqlite() accepts (which in
+      // turn is documented for 9router files). Fallback for schema drift in
+      // very old instances.
+      let rows;
+      try {
+        rows = db.prepare(`SELECT timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta FROM usageHistory ORDER BY id ASC`).all();
+      } catch {
+        rows = db.prepare(`SELECT timestamp, provider, model, promptTokens, completionTokens, tokens FROM usageHistory ORDER BY id ASC`).all();
+      }
+      log(`10r: read ${rows.length} rows from ${dbPath}`);
+      // A NULL-timestamp row must never reach the server: importUsageRows
+      // backfills `new Date().toISOString()` for it, which differs per run and
+      // defeats signature dedup — every re-run would insert it again.
+      const usable = rows.filter((r) => r.timestamp);
+      const noTs = rows.length - usable.length;
+      if (noTs > 0) log(`10r: skipped ${noTs} rows without a timestamp (would defeat dedup)`);
+      return usable.map((r) => convertRouterRow(r, dbPath, args.tag));
+    } finally {
+      db.close();
+    }
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 function collectEntries() {
   if (args.source === "opencode") return collectOpencodeEntries();
   if (args.source === "mirasim") return collectMirasimEntries();
+  if (args.source === "mimo") return collectMimoEntries();
+  if (args.source === "10r") return collectRouterEntries();
   return collectZcodeEntries();
 }
 
@@ -516,6 +842,30 @@ async function main() {
     if (selected.length === 0) {
       log("nothing to import (0 rows in file)");
       return;
+    }
+
+    // Same-instance guard for offline files: a JSON exported by `--source 10r`
+    // records its source db path in meta.sourceDbPath (meta.syncedFrom as a
+    // fallback for label-only files). Feeding it back into the very instance
+    // behind that path (loopback endpoint) is the same accident the online
+    // mode refuses — every row dedup-hits and the server stamps
+    // meta.imported=true on the LIVE rows.
+    if (!args.force && isLoopbackUrl(args.endpoint)) {
+      const localDefaults = routerDbCandidates();
+      const seenPaths = new Set();
+      for (const r of raw.slice(0, 200)) { // provenance is uniform per file; sample is enough
+        const m = r && typeof r.meta === "object" ? r.meta : null;
+        if (!m) continue;
+        if (m.sourceDbPath) seenPaths.add(normPath(m.sourceDbPath));
+        else if (m.source === "10r" && m.syncedFrom) seenPaths.add(normPath(m.syncedFrom));
+      }
+      if (localDefaults.some((p) => seenPaths.has(normPath(p)))) {
+        console.error(`error: ${args.importFile} was exported from the database of the very instance behind ${args.endpoint}`);
+        console.error("(loopback endpoint + local default db path in meta.sourceDbPath). Importing it");
+        console.error("into itself would mark all live rows as imported. Use --force only if this");
+        console.error("really is a different instance (e.g. the file was copied from elsewhere).");
+        process.exit(2);
+      }
     }
     if (args.dryRun) {
       log(`[dry-run] would import ${selected.length} rows from ${args.importFile} to ${args.endpoint}`);

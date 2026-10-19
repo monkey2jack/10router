@@ -31,11 +31,14 @@ SEC=$(cat /vol4/@appdata/10router/auth/cli-secret)
 CLI_TOKEN=$(echo -n "${MID}9r-cli-auth${SEC}" | sha256sum | cut -c1-16)
 ```
 
-> 规则：`sha256(machine-id + "9r-cli-auth" + cli-secret).slice(0,16)`，salt 固定 `9r-cli-auth`。
+> 规则：`sha256(machine-id + "9r-cli-auth" + cli-secret).slice(0,16)`，salt 固定 `9r-cli-auth`（salt 参与哈希，改名会让所有 token 失效，故保留旧值）。
+>
+> **放在请求头 `x-10r-cli-token` 里，不是 `Authorization: Bearer`**——guard 只从该头读 CLI token，
+> 塞进 Bearer 会被当成 LLM key 校验而 401。旧名 `x-9r-cli-token` 服务端仍兼容（老版 CLI/插件），新代码用新名。
 
 验证（NAS 上走 loopback）：
 ```bash
-curl -s -H "Authorization: Bearer ${CLI_TOKEN}" http://127.0.0.1:20127/api/provider-nodes
+curl -s -H "x-10r-cli-token: ${CLI_TOKEN}" http://127.0.0.1:20127/api/provider-nodes
 ```
 
 ### 方式 B：dashboard LLM API key（agent 自助添加的意图所在）
@@ -60,7 +63,7 @@ curl -s -X POST http://<IP>:20127/api/provider-nodes \
 
 ```bash
 curl -s -X POST http://<IP>:20127/api/provider-nodes \
-  -H "Content-Type: application/json" -H "Authorization: Bearer ${CLI_TOKEN}" \
+  -H "Content-Type: application/json" -H "x-10r-cli-token: ${CLI_TOKEN}" \
   -d '{
     "name": "JustWorker",
     "prefix": "justworker",
@@ -82,7 +85,7 @@ curl -s -X POST http://<IP>:20127/api/provider-nodes \
 
 ```bash
 curl -s -X POST http://<IP>:20127/api/providers \
-  -H "Content-Type: application/json" -H "Authorization: Bearer ${CLI_TOKEN}" \
+  -H "Content-Type: application/json" -H "x-10r-cli-token: ${CLI_TOKEN}" \
   -d '{
     "provider": "openai-compatible-chat-<uuid>",
     "apiKey": "sk-UPSTREAM_KEY",
@@ -145,14 +148,14 @@ TOKEN=$(echo -n "${MID}9r-cli-auth${SEC}" | sha256sum | cut -c1-16)
 
 # 1) 建 node
 NODE=$(curl -s -X POST http://$IP:20127/api/provider-nodes \
-  -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -H "x-10r-cli-token: $TOKEN" \
   -d '{"name":"MyGW","prefix":"mygw","apiType":"chat","baseUrl":"https://gw.example.com/v1","type":"openai-compatible"}')
 echo "$NODE"
 NODE_ID=$(echo "$NODE" | python3 -c 'import sys,json;print(json.load(sys.stdin)["node"]["id"])')
 
 # 2) 加 connection
 curl -s -X POST http://$IP:20127/api/providers \
-  -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -H "x-10r-cli-token: $TOKEN" \
   -d "{\"provider\":\"$NODE_ID\",\"apiKey\":\"sk-UPSTREAM_KEY\",\"name\":\"MyGW\",\"priority\":1}"
 
 # 3) 验证路由（模型必须带前缀）

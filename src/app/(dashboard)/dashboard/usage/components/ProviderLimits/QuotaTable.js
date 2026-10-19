@@ -1,293 +1,252 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import PropTypes from "prop-types";
 import { formatResetTime, getRemainingPercentage } from "./utils";
 import { translate } from "@/i18n/runtime";
+// Quota name translation lives in shared/utils/quotaName.js so the quota-block
+// summary (QuotaPackBar) renders the same localized pack names.
+//
+// This MUST be a plain import, not `export { translateQuotaName } from "..."`:
+// a re-export creates no local binding, so the component's own call at
+// `translateQuotaName(quota.name)` below compiled to a bare free identifier and
+// threw `ReferenceError: translateQuotaName is not defined` the moment a
+// per-pack row was actually rendered — i.e. only after expanding "逐包明细",
+// which is what made this look like an intermittent blank page. The named
+// export is preserved for ProviderLimitCard / QuotaProgressBar / index.js.
+import { translateQuotaName } from "@/shared/utils/quotaName";
+import { isExpiredPack, isResettingRow, isSpentPack, meterTone } from "@/shared/utils/quotaRows";
+import QuotaMeter, { TONE_TEXT, meterSolid, quotaDateWord } from "@/shared/components/QuotaMeter";
+import { cn } from "@/shared/utils/cn";
 
-const PAGE_SIZE = 10;
+// Rows revealed per "show more" click. Not pages: a pager with Prev/Next and a
+// "Showing x–y" box was heavier than the card it sat in.
+const STEP = 10;
 
-// Quota names are English dictionary keys ("Monthly", "Total Points"), but
-// generated names embed numbers ("Bonus Pack 1") that exact-match translate()
-// can't hit. Translate the base word, keep the numeric suffix.
-export function translateQuotaName(name) {
-  const m = /^Bonus Pack (\d+)$/.exec(String(name || "").trim());
-  if (m) return `${translate("Bonus Pack")} ${m[1]}`;
-  return translate(name);
+export { translateQuotaName };
+
+function fmtAmount(n) {
+  return Number(Number(n || 0).toFixed(2)).toLocaleString("en-US");
 }
 
-/**
- * Format reset time display (Today, 12:00 PM)
- */
-function formatResetTimeDisplay(resetTime) {
-  if (!resetTime) return null;
-
-  try {
-    const date = new Date(resetTime);
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-
-    let dayStr = "";
-    if (date >= today && date < tomorrow) {
-      dayStr = "Today";
-    } else if (date >= tomorrow && date < new Date(tomorrow.getTime() + 24 * 60 * 60 * 1000)) {
-      dayStr = "Tomorrow";
-    } else {
-      dayStr = date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-    }
-
-    const timeStr = date.toLocaleTimeString("en-US", {
-      hour: "numeric",
-      minute: "2-digit",
-      hour12: true,
-    });
-
-    return `${dayStr}, ${timeStr}`;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Get color classes based on remaining percentage
- */
-function getColorClasses(remainingPercentage) {
-  if (remainingPercentage > 70) {
-    return {
-      text: "text-green-600 dark:text-green-400",
-      bg: "bg-green-500",
-      bgLight: "bg-green-500/10",
-      emoji: "🟢",
-    };
-  }
-
-  if (remainingPercentage >= 30) {
-    return {
-      text: "text-yellow-600 dark:text-yellow-400",
-      bg: "bg-yellow-500",
-      bgLight: "bg-yellow-500/10",
-      emoji: "🟡",
-    };
-  }
-
-  return {
-    text: "text-red-600 dark:text-red-400",
-    bg: "bg-red-500",
-    bgLight: "bg-red-500/10",
-    emoji: "🔴",
-  };
+/** Absolute local time for the hover title ("2026-10-15 14:00"). */
+function fullDateTime(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime()) || d.getFullYear() > 2099) return "";
+  const p = (x) => String(x).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 function sortQuotas(quotas, sortMode) {
   if (sortMode === "remaining-asc") {
-    return [...quotas].sort((a, b) => a.remaining - b.remaining || a.name.localeCompare(b.name));
+    return [...quotas].sort((a, b) => a.pct - b.pct || a.name.localeCompare(b.name));
   }
 
   if (sortMode === "remaining-desc") {
-    return [...quotas].sort((a, b) => b.remaining - a.remaining || a.name.localeCompare(b.name));
+    return [...quotas].sort((a, b) => b.pct - a.pct || a.name.localeCompare(b.name));
   }
 
   return quotas;
 }
 
 /**
- * Quota Table Component - Table-based display for quota data
+ * One per-pack row — the SAME two-line item as the card's QuotaRow above it:
+ *
+ *   ■ 赠送包 3                         55.33 / 100　10-15 到期   ⊘
+ *   [=============               ]
+ *
+ * The date is absolute like the card's; the relative countdown and the full
+ * timestamp are on hover. The hide control stays faint until the row is hovered
+ * or focused, so 45 rows do not carry 45 loud eye icons.
+ */
+function QuotaDetailRow({ quota, now, onHide }) {
+  const tone = meterTone(quota, quota.pct);
+  const resets = isResettingRow(quota);
+  const expired = isExpiredPack(quota, now);
+  const hasDate = Boolean(quota.resetAt) && new Date(quota.resetAt).getFullYear() <= 2099;
+  const countdown = hasDate ? formatResetTime(quota.resetAt) : "-";
+  const dateTitle = hasDate
+    ? [fullDateTime(quota.resetAt), countdown !== "-" ? countdown : null].filter(Boolean).join(" · ")
+    : undefined;
+
+  // percentScale rows normalize the RPC's remaining fraction to 0–100 — there is
+  // no real count, so they read as a percent. Everything else reads REMAINING /
+  // total like the card; the used amount is on hover.
+  const amount = quota.percentScale
+    ? `${quota.pct}%`
+    : quota.unlimited
+      ? "∞"
+      : `${fmtAmount(Math.max(0, quota.total - quota.used))} / ${fmtAmount(quota.total)}`;
+
+  return (
+    <div className="group min-w-0 space-y-1 py-1">
+      <div className="flex min-w-0 items-center justify-between gap-2 text-[11px] tabular-nums">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="size-[8px] shrink-0 rounded-[2px]" style={{ background: meterSolid(quota.pct) }} aria-hidden="true" />
+          <span className="truncate text-text">{translateQuotaName(quota.name)}</span>
+        </span>
+        <span className="flex shrink-0 items-center gap-2">
+          <span
+            className={TONE_TEXT[tone]}
+            title={quota.percentScale || quota.unlimited ? undefined : `${translate("Used")} ${fmtAmount(quota.used)}`}
+          >
+            {amount}
+          </span>
+          {hasDate ? (
+            <span className="text-text-muted" title={dateTitle}>
+              {quotaDateWord(resets, quota.resetAt, { expired })}
+            </span>
+          ) : null}
+          {onHide ? (
+            <button
+              type="button"
+              onClick={() => onHide(quota)}
+              className="-my-1 inline-flex size-5 items-center justify-center rounded text-text-muted opacity-30 transition hover:bg-black/5 hover:text-text group-hover:opacity-100 focus-visible:opacity-100 dark:hover:bg-white/5"
+              title={translate("Hide this quota row")}
+              aria-label={`${translate("Hide this quota row")}: ${translateQuotaName(quota.name)}`}
+            >
+              <span className="material-symbols-outlined text-[14px]">visibility_off</span>
+            </button>
+          ) : null}
+        </span>
+      </div>
+      <QuotaMeter pct={quota.pct} />
+    </div>
+  );
+}
+
+QuotaDetailRow.propTypes = {
+  quota: PropTypes.object.isRequired,
+  now: PropTypes.number.isRequired,
+  onHide: PropTypes.func,
+};
+
+/** First `limit` rows + a "show N more" button — the one way lists grow here. */
+function RowList({ rows, now, onHide, limit, onMore }) {
+  const rest = rows.length - limit;
+  return (
+    <>
+      {rows.slice(0, limit).map((quota) => (
+        <QuotaDetailRow key={`${quota.name}-${quota.index}`} quota={quota} now={now} onHide={onHide} />
+      ))}
+      {rest > 0 && (
+        <button
+          type="button"
+          onClick={onMore}
+          className="w-full rounded-md py-1 text-[11px] text-text-muted transition-colors hover:bg-black/5 hover:text-text dark:hover:bg-white/5"
+        >
+          {translate("Show {count} more").replace("{count}", String(Math.min(STEP, rest)))}
+        </button>
+      )}
+    </>
+  );
+}
+
+RowList.propTypes = {
+  rows: PropTypes.array.isRequired,
+  now: PropTypes.number.isRequired,
+  onHide: PropTypes.func,
+  limit: PropTypes.number.isRequired,
+  onMore: PropTypes.func.isRequired,
+};
+
+/**
+ * Per-pack details (逐包明细). Live rows first; one-shot packs that are used up
+ * or expired can never come back, so they fold into a collapsed history group
+ * instead of being paged through ahead of — or mixed in with — the live ones.
+ *
+ * Expansion state deliberately survives the card's auto-refresh: resetting it
+ * whenever `quotas` changed collapsed what the user had just opened.
  */
 export default function QuotaTable({
   quotas = [],
-  compact = false,
   sortMode = "default",
   showSortLabel = false,
   onHideQuota = null,
 }) {
-  const [page, setPage] = useState(1);
+  const [liveLimit, setLiveLimit] = useState(STEP);
+  const [historyLimit, setHistoryLimit] = useState(STEP);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  // "Now" for the expired test: taken at mount (details open on expand) and
+  // re-taken whenever fresh quota data lands — the card's auto-refresh refetch
+  // every 60s must age the classification, or a pack crossing its expiry while
+  // the page stays open keeps rendering as active until a full remount. An
+  // effect, not the render body, so a render never reads the clock.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    setNow(Date.now());
+  }, [quotas]);
 
-  const normalizedQuotas = useMemo(
-    () => quotas.map((quota, index) => ({
+  const { live, history } = useMemo(() => {
+    const at = now;
+    const rows = quotas.map((quota, index) => ({
       ...quota,
       index,
-      remaining: getRemainingPercentage(quota),
-    })),
-    [quotas],
-  );
-
-  const sortedQuotas = useMemo(
-    () => sortQuotas(normalizedQuotas, sortMode),
-    [normalizedQuotas, sortMode],
-  );
-
-  const totalPages = Math.max(1, Math.ceil(sortedQuotas.length / PAGE_SIZE));
-
-  useEffect(() => {
-    setPage(1);
-  }, [sortMode, quotas]);
-
-  useEffect(() => {
-    setPage((currentPage) => Math.min(currentPage, totalPages));
-  }, [totalPages]);
+      used: Number(quota.used || 0),
+      total: Number(quota.total || 0),
+      pct: getRemainingPercentage(quota),
+    }));
+    const sorted = sortQuotas(rows, sortMode);
+    return {
+      live: sorted.filter((q) => !isSpentPack(q, at)),
+      history: sorted.filter((q) => isSpentPack(q, at)),
+    };
+  }, [quotas, sortMode, now]);
 
   if (!quotas || quotas.length === 0) {
     return null;
   }
 
-  const currentPageRows = sortedQuotas.slice(
-    (page - 1) * PAGE_SIZE,
-    page * PAGE_SIZE,
-  );
-  const pageStart = sortedQuotas.length === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
-  const pageEnd = Math.min(page * PAGE_SIZE, sortedQuotas.length);
-
-  const cellPad = compact ? "py-1 px-1.5" : "py-2 px-3";
-  const nameText = compact ? "text-[11px]" : "text-sm";
-  const resetPrimary = compact ? "text-[11px]" : "text-sm";
-  const resetSecondary = compact ? "text-[10px] leading-tight" : "text-xs";
-  const sortLabel = "Sorted by account remaining";
-  const hasHideAction = typeof onHideQuota === "function";
+  const onHide = typeof onHideQuota === "function" ? onHideQuota : null;
 
   return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between gap-2">
-        <div className="text-[10px] text-text-muted">
-          {sortedQuotas.length} quota{sortedQuotas.length > 1 ? "s" : ""}
-        </div>
-        {showSortLabel && (
-          <div className="rounded-md border border-black/10 bg-black/[0.02] px-2 py-1 text-[10px] text-text-muted dark:border-white/10 dark:bg-white/[0.03]">
-            {sortLabel}
-          </div>
-        )}
-      </div>
+    <div className="space-y-0.5">
+      {showSortLabel && (
+        <div className="pb-1 text-[10px] text-text-muted">{translate("Sorted by account remaining")}</div>
+      )}
 
-      <div className="space-y-px">
-        {currentPageRows.map((quota) => {
-          const colors = getColorClasses(quota.remaining);
-          const countdown = formatResetTime(quota.resetAt);
-          const resetDisplay = formatResetTimeDisplay(quota.resetAt);
-          // recurring defaults true: a missing flag means the quota
-          // refreshes at resetAt. Bonus/one-shot packs set recurring:false
-          // and their resetAt is a hard expiry, so word it as "expires".
-          const recurring = quota.recurring !== false;
-          const countdownLabel = recurring ? `in ${countdown}` : `expires in ${countdown}`;
+      <RowList
+        rows={live}
+        now={now}
+        onHide={onHide}
+        limit={liveLimit}
+        onMore={() => setLiveLimit((n) => n + STEP)}
+      />
 
-          return (
-            <div
-              key={`${quota.name}-${quota.index}`}
-              className={`flex items-center gap-2 border-b border-black/5 dark:border-white/5 hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors ${cellPad}`}
-            >
-              {/* Name */}
-              <div className="flex w-36 min-w-0 items-center gap-1.5">
-                <span className="text-[10px] shrink-0">{colors.emoji}</span>
-                <span className={`${nameText} font-medium text-text-primary truncate`}>
-                  {translateQuotaName(quota.name)}
-                </span>
-              </div>
-
-              {/* Progress + used/total */}
-              <div className={`min-w-0 flex-1 ${compact ? "space-y-1" : "space-y-1.5"}`}>
-                <div className={`${compact ? "h-1" : "h-1.5"} rounded-full overflow-hidden border ${colors.bgLight} ${
-                  quota.remaining === 0 ? "border-black/10 dark:border-white/10" : "border-transparent"
-                }`}>
-                  <div
-                    className={`h-full transition-all duration-300 ${colors.bg}`}
-                    style={{ width: `${Math.min(quota.remaining, 100)}%` }}
-                  />
-                </div>
-
-                <div className={`flex items-center justify-between gap-1 min-w-0 ${compact ? "text-[10px]" : "text-xs"}`}>
-                  {/* percentScale rows normalize the RPC's remaining fraction to
-                      0–100 — there is no real request count to show. */}
-                  <span
-                    className="text-text-muted truncate"
-                    title={quota.percentScale ? undefined : `${quota.used.toLocaleString()} / ${quota.total > 0 ? quota.total.toLocaleString() : "∞"}`}
-                  >
-                    {quota.percentScale
-                      ? ""
-                      : `${quota.used.toLocaleString()} / ${quota.total > 0 ? quota.total.toLocaleString() : "∞"}`}
-                  </span>
-                  <span className={`font-medium ${colors.text} shrink-0`}>
-                    {quota.remaining}%
-                  </span>
-                </div>
-              </div>
-
-              {/* Reset time */}
-              <div className="min-w-0 shrink">
-                {countdown !== "-" || resetDisplay ? (
-                  compact ? (
-                    <div
-                      className={`${resetPrimary} text-text-primary font-medium truncate`}
-                      title={resetDisplay || ""}
-                    >
-                      {countdown !== "-" ? countdownLabel : resetDisplay}
-                    </div>
-                  ) : (
-                    <div className="min-w-0 space-y-0.5">
-                      {countdown !== "-" && (
-                        <div className={`${resetPrimary} text-text-primary font-medium truncate`}>
-                          {countdownLabel}
-                        </div>
-                      )}
-                      {resetDisplay && (
-                        <div className={`${resetSecondary} text-text-muted truncate`}>
-                          {resetDisplay}
-                        </div>
-                      )}
-                    </div>
-                  )
-                ) : (
-                  <div className={`${resetPrimary} text-text-muted italic`}>N/A</div>
-                )}
-              </div>
-
-              {/* Hide action */}
-              {hasHideAction && (
-                <button
-                  type="button"
-                  onClick={() => onHideQuota(quota)}
-                  className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-black/5 hover:text-text-primary dark:hover:bg-white/5"
-                  title="Hide this quota row"
-                  aria-label={`Hide quota ${quota.name}`}
-                >
-                  <span className="material-symbols-outlined text-[15px]">
-                    visibility_off
-                  </span>
-                </button>
-              )}
+      {history.length > 0 && (
+        <div className={cn(live.length > 0 && "mt-1 border-t border-black/5 pt-1 dark:border-white/5")}>
+          <button
+            type="button"
+            onClick={() => setHistoryOpen((v) => !v)}
+            className="flex w-full items-center gap-1 rounded-md py-1 text-[11px] text-text-muted transition-colors hover:bg-black/5 hover:text-text dark:hover:bg-white/5"
+            aria-expanded={historyOpen}
+          >
+            <span className="material-symbols-outlined text-[14px]">
+              {historyOpen ? "expand_less" : "expand_more"}
+            </span>
+            {translate("Used up / expired")}
+            <span className="tabular-nums opacity-60">({history.length})</span>
+          </button>
+          {historyOpen && (
+            <div className="opacity-60">
+              <RowList
+                rows={history}
+                now={now}
+                onHide={onHide}
+                limit={historyLimit}
+                onMore={() => setHistoryLimit((n) => n + STEP)}
+              />
             </div>
-          );
-        })}
-      </div>
-
-      {totalPages > 1 && (
-        <div className="rounded-md border border-black/10 bg-black/[0.02] px-2 py-1.5 dark:border-white/10 dark:bg-white/[0.03]">
-          <div className="flex items-center justify-between gap-2 text-[10px] text-text-muted">
-            <span>
-              Showing {pageStart}-{pageEnd} of {sortedQuotas.length}
-            </span>
-            <span>
-              Page {page} / {totalPages}
-            </span>
-          </div>
-          <div className="mt-1.5 flex items-center justify-end gap-1">
-            <button
-              type="button"
-              onClick={() => setPage((currentPage) => Math.max(1, currentPage - 1))}
-              disabled={page === 1}
-              className="flex h-6 items-center rounded-md border border-black/10 px-2 text-[10px] text-text-primary transition-colors hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:hover:bg-white/5"
-            >
-              Prev
-            </button>
-            <button
-              type="button"
-              onClick={() => setPage((currentPage) => Math.min(totalPages, currentPage + 1))}
-              disabled={page === totalPages}
-              className="flex h-6 items-center rounded-md border border-black/10 px-2 text-[10px] text-text-primary transition-colors hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:hover:bg-white/5"
-            >
-              Next
-            </button>
-          </div>
+          )}
         </div>
       )}
     </div>
   );
 }
+
+QuotaTable.propTypes = {
+  quotas: PropTypes.array,
+  sortMode: PropTypes.string,
+  showSortLabel: PropTypes.bool,
+  onHideQuota: PropTypes.func,
+};

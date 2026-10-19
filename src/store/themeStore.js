@@ -14,11 +14,16 @@ const useThemeStore = create(
         applyTheme(theme);
       },
 
+      // Three-state cycle: system → light → dark → system. "system" follows the
+      // OS preference (Windows personalization / macOS appearance / the fnOS
+      // browser), so a machine that switches day/night on its own keeps the UI
+      // in sync without a manual toggle.
       toggleTheme: () => {
         const currentTheme = get().theme;
-        const newTheme = currentTheme === "dark" ? "light" : "dark";
-        set({ theme: newTheme });
-        applyTheme(newTheme);
+        const nextTheme =
+          currentTheme === "system" ? "light" : currentTheme === "light" ? "dark" : "system";
+        set({ theme: nextTheme });
+        applyTheme(nextTheme);
       },
 
       initTheme: () => {

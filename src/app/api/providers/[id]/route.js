@@ -5,6 +5,7 @@ import {
   updateProviderConnection,
   deleteProviderConnection,
 } from "@/models";
+import { proxyPoolUrlError } from "@/lib/network/outboundProxy.js";
 
 function normalizeProxyConfig(body = {}) {
   const hasAnyProxyField =
@@ -23,6 +24,15 @@ function normalizeProxyConfig(body = {}) {
       hasAnyProxyField: true,
       error: "Connection proxy URL is required when connection proxy is enabled",
     };
+  }
+
+  // Only an enabled proxy is validated: a stale stored URL must never block
+  // the user from switching the proxy off.
+  if (enabled && url) {
+    const urlError = proxyPoolUrlError(url);
+    if (urlError) {
+      return { hasAnyProxyField: true, error: urlError };
+    }
   }
 
   return {
@@ -59,6 +69,33 @@ function shouldMergeProviderSpecificData(existing, incoming, hasLegacyProxy, has
   return existing !== undefined || incoming !== undefined || hasLegacyProxy || hasProxyPoolField;
 }
 
+// Mirror of the list route's redaction (src/app/api/providers/route.js):
+// providerSpecificData rides along wholesale, and the Xiaomi desktop session
+// cookie (mimoPassToken) would otherwise be echoed to any dashboard consumer
+// in plaintext. The UI only needs the capability booleans; the PUT route
+// merges into existing providerSpecificData, so dropping the key here cannot
+// wipe the stored value on an edit roundtrip.
+function toSafeConnection(connection) {
+  const psd = { ...(connection.providerSpecificData || {}) };
+  delete psd.mimoPassToken;
+  const rawToken = typeof connection.accessToken === "string" ? connection.accessToken : "";
+  const result = {
+    ...connection,
+    providerSpecificData: psd,
+    // True only for a REAL key — the session placeholder is not a key.
+    hasAccessToken: rawToken.length > 0 && !rawToken.startsWith("mimo-desktop-session"),
+    hasDesktopSession: Boolean(connection.providerSpecificData?.mimoPassToken),
+  };
+  delete result.apiKey;
+  delete result.accessToken;
+  delete result.refreshToken;
+  delete result.idToken;
+  // Internal carrier for ciphertext that could not be decrypted (kept on the
+  // row so a later write doesn't erase it); never part of an API response.
+  delete result.__unreadableCredentials;
+  return result;
+}
+
 // GET /api/providers/[id] - Get single connection
 export async function GET(request, { params }) {
   try {
@@ -69,14 +106,7 @@ export async function GET(request, { params }) {
       return NextResponse.json({ error: "Connection not found" }, { status: 404 });
     }
 
-    // Hide sensitive fields
-    const result = { ...connection };
-    delete result.apiKey;
-    delete result.accessToken;
-    delete result.refreshToken;
-    delete result.idToken;
-
-    return NextResponse.json({ connection: result });
+    return NextResponse.json({ connection: toSafeConnection(connection) });
   } catch (error) {
     console.log("Error fetching connection:", error);
     return NextResponse.json({ error: "Failed to fetch connection" }, { status: 500 });
@@ -122,7 +152,15 @@ export async function PUT(request, { params }) {
     if (globalPriority !== undefined) updateData.globalPriority = globalPriority;
     if (defaultModel !== undefined) updateData.defaultModel = defaultModel;
     if (isActive !== undefined) updateData.isActive = isActive;
-    if (apiKey && existing.authType === "apikey") updateData.apiKey = apiKey;
+    if (apiKey && (existing.authType === "apikey" || existing.authType === "api_key")) {
+      updateData.apiKey = apiKey;
+      // Fresh credentials make the stored failure stale — clear the red
+      // dashboard error instead of waiting for the next successful request.
+      // The badge goes "active" (same as the OAuth re-auth paths), not null
+      // (which would render "Unknown" on a row that was just working).
+      updateData.testStatus = "active";
+      updateData.resetErrorState = true;
+    }
     if (testStatus !== undefined) updateData.testStatus = testStatus;
     if (lastError !== undefined) updateData.lastError = lastError;
     if (lastErrorAt !== undefined) updateData.lastErrorAt = lastErrorAt;
@@ -157,14 +195,7 @@ export async function PUT(request, { params }) {
 
     const updated = await updateProviderConnection(id, updateData);
 
-    // Hide sensitive fields
-    const result = { ...updated };
-    delete result.apiKey;
-    delete result.accessToken;
-    delete result.refreshToken;
-    delete result.idToken;
-
-    return NextResponse.json({ connection: result });
+    return NextResponse.json({ connection: toSafeConnection(updated) });
   } catch (error) {
     console.log("Error updating connection:", error);
     return NextResponse.json({ error: "Failed to update connection" }, { status: 500 });

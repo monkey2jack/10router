@@ -1,12 +1,20 @@
 // Verify refactored PROVIDERS is byte-for-byte equal to baseline JSON.
 // Exit 1 + print precise per-provider/per-field diff on mismatch.
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { PROVIDERS } from "../../open-sse/config/providers.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const baseline = JSON.parse(readFileSync(join(here, "providers-baseline.json"), "utf8"));
+const snapPath = join(here, "providers-baseline.json");
+
+if (process.argv[2] === "--snapshot") {
+  writeFileSync(snapPath, JSON.stringify(PROVIDERS, null, 2));
+  console.log(`Snapshot providers → ${snapPath}`);
+  process.exit(0);
+}
+
+const baseline = JSON.parse(readFileSync(snapPath, "utf8"));
 
 // Fields intentionally added during refactor (verified by dedicated runtime tests, not byte-baseline).
 // authUrl: removed dead field (qwen/iflow) — no consumer reads config.authUrl (oauth block has authorize/deviceCode)

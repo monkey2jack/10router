@@ -150,6 +150,10 @@ Data dir resolution (`src/lib/dataDir.js`): explicit `DATA_DIR` env wins; otherw
 
 - Dashboard cookie auth: `src/proxy.js`, `src/app/api/auth/login/route.js`
 - API key generation/verification: `src/shared/utils/apiKey.js`
+- CLI token (`x-10r-cli-token`; the legacy `x-9r-cli-token` is still accepted inbound): a salted machine id (`getConsistentMachineId`) for same-machine process trust, not a remote secret. Header names and reads live in `src/lib/auth/authHeaders.js` (dashboard password header `x-10r-password` / legacy `x-9r-password` likewise) — the guard validates the value and some routes trust its presence, so both must read through the same helper
+- Read-only quota overview for external dashboards (e.g. CreditDaddy): `GET /api/usage/quotas`; the guard admits a valid virtual key (`sk-…`) for GET on that path only. Which connections count is shared with the dashboard's quota page (`src/shared/utils/usageEligibility.js`); results are cached 5 min per connection, `?force=1` refreshes a connection at most once per 30 s, and concurrent requests share one upstream call. No credentials in the response, but account emails are readable by any virtual-key holder
+- Update checks (Settings → Security, `settings.autoUpdateCheck`, default on): off means `/api/version` never contacts the npm registry and reports no update; `?check=1` is an explicit check ("Check now", the tray's "Check for updates"). The CLI launcher runs before the server and reads the server-mirrored `$DATA_DIR/update-check-disabled` marker instead (`src/lib/updateCheck.js`)
+- The login-off banner can be hidden (`settings.hideLoginOffBanner`, behind a confirmation); PATCH `requireLogin=true` clears it server-side
 - Provider secrets persisted in `providerConnections` entries
 - Optional proxy support for upstream calls via env proxy variables (`open-sse/utils/proxyFetch.js`)
 
@@ -521,7 +525,7 @@ Runtime visibility sources:
 ## Security-Sensitive Boundaries
 
 - JWT secret (`JWT_SECRET`) secures dashboard session cookie verification/signing
-- Initial password fallback (`INITIAL_PASSWORD`, default `123456`) must be overridden in real deployments
+- Dashboard password has no built-in default: with none set (and no SSO configured) the dashboard is loopback-only, so a remote caller has nothing to present and cannot take the instance over; `INITIAL_PASSWORD` is the only non-interactive bootstrap password and must be set for headless deployments
 - API key HMAC secret (`API_KEY_SECRET`) secures generated local API key format
 - Provider secrets (API keys/tokens) are persisted in local DB and should be protected at filesystem level
 - Cloud sync endpoints rely on API key auth + machine id semantics
@@ -544,6 +548,7 @@ Environment variables actively used by code:
 2. `/api/v1/route.js` returns a static model list and is not the main models source used by `/v1/models`.
 3. Request logger writes full headers/body when enabled; treat log directory as sensitive.
 4. Cloud behavior depends on correct `NEXT_PUBLIC_BASE_URL` and cloud endpoint reachability.
+5. **App initialization starts with the server**: `src/instrumentation.js` `register()` (called once per server instance) imports `src/shared/services/bootstrap.js` → `initializeApp`: tunnel / Tailscale / MITM auto-resume, watchdog, imported-usage cost repair (background, watermark `_meta.usageCostRepair`, one re-scan per new version), update-check marker sync. The root layout's import is only a fallback; `global.__appBootstrapped` prevents a second start. Before 1.2.1 it ran only from the layout — after a restart nothing initialized until someone opened a page, and a `/v1`-only instance never did. Do not move startup work back onto the first-render path.
 
 ## Operational Verification Checklist
 

@@ -21,6 +21,11 @@ const PROVIDER_ORDER = [
 // Providers that need no auth — always show in model selector
 const NO_AUTH_PROVIDER_IDS = Object.keys(FREE_PROVIDERS).filter(id => FREE_PROVIDERS[id].noAuth);
 
+// 需要按账号拉取 live 目录的供应商（Cursor 的可选模型随账号订阅浮动；Zed 的
+// 静态 registry 目录是空的、靠 passthrough 透传，由 modelsUrl 实时下发）。静态
+// 目录只作拉取失败/为空时的兜底 —— 不同账号可能拿到不同的模型清单。
+const LIVE_CATALOG_PROVIDERS = ["cursor", "zed"];
+
 export default function ModelSelectModal({
   isOpen,
   onClose,
@@ -46,52 +51,62 @@ export default function ModelSelectModal({
   }, [activeProviders, kindFilter]);
   const { getCaps } = useModelCaps();
   const [searchQuery, setSearchQuery] = useState("");
+  const [onlyConnected, setOnlyConnected] = useState(() => {
+    if (typeof window === "undefined") return true;
+    const saved = window.localStorage.getItem("modelSelectOnlyConnected");
+    return saved !== null ? saved === "1" : true;
+  });
   const [combos, setCombos] = useState([]);
   const [providerNodes, setProviderNodes] = useState([]);
   const [customModels, setCustomModels] = useState([]);
   const [disabledModels, setDisabledModels] = useState({});
-  const [cursorModels, setCursorModels] = useState([]);
+  // live 目录按供应商分组缓存：{ [providerId]: models }
+  const [liveCatalogModels, setLiveCatalogModels] = useState({});
 
-  // Cursor exposes the usable catalog per account. Keep the static catalog only
-  // as a fallback, since it quickly becomes stale and different accounts can
-  // have different model entitlements.
-  const cursorConnectionIds = useMemo(
-    () => activeProviders
-      .filter((provider) => provider.provider === "cursor" && provider.id)
-      .map((provider) => provider.id),
-    [activeProviders],
-  );
+  // 每个 live 供应商取它所有已连接账号的 connection id。
+  const liveConnectionIdsByProvider = useMemo(() => {
+    const map = Object.fromEntries(LIVE_CATALOG_PROVIDERS.map((providerId) => [providerId, []]));
+    for (const provider of activeProviders) {
+      if (Object.hasOwn(map, provider.provider) && provider.id) map[provider.provider].push(provider.id);
+    }
+    return map;
+  }, [activeProviders]);
 
   useEffect(() => {
-    if (!isOpen || cursorConnectionIds.length === 0) {
-      setCursorModels([]);
+    if (!isOpen) {
+      setLiveCatalogModels({});
       return undefined;
     }
 
     let cancelled = false;
-    Promise.all(cursorConnectionIds.map(async (connectionId) => {
-      const response = await fetch(`/api/providers/${connectionId}/models`, { cache: "no-store" });
-      if (!response.ok) return [];
-      const data = await response.json();
-      return Array.isArray(data.models) ? data.models : [];
+    // 逐供应商聚合其全部账号的目录；同 id 跨账号去重（provider:model 对唯一）。
+    Promise.all(LIVE_CATALOG_PROVIDERS.map(async (providerId) => {
+      const connectionIds = liveConnectionIdsByProvider[providerId];
+      if (connectionIds.length === 0) return [providerId, []];
+      const modelLists = await Promise.all(connectionIds.map(async (connectionId) => {
+        const response = await fetch(`/api/providers/${connectionId}/models`, { cache: "no-store" });
+        if (!response.ok) return [];
+        const data = await response.json();
+        return Array.isArray(data.models) ? data.models : [];
+      }));
+      const seen = new Set();
+      return [providerId, modelLists.flat().filter((model) => {
+        if (!model?.id || seen.has(model.id)) return false;
+        seen.add(model.id);
+        return true;
+      })];
     }))
-      .then((modelLists) => {
-        if (cancelled) return;
-        const seen = new Set();
-        setCursorModels(modelLists.flat().filter((model) => {
-          if (!model?.id || seen.has(model.id)) return false;
-          seen.add(model.id);
-          return true;
-        }));
+      .then((entries) => {
+        if (!cancelled) setLiveCatalogModels(Object.fromEntries(entries));
       })
       .catch((error) => {
         // Do not hide the static fallback when the account catalog is unavailable.
-        console.warn("Unable to load Cursor models for selector:", error);
-        if (!cancelled) setCursorModels([]);
+        console.warn("Unable to load live catalog models for selector:", error);
+        if (!cancelled) setLiveCatalogModels({});
       });
 
     return () => { cancelled = true; };
-  }, [isOpen, cursorConnectionIds]);
+  }, [isOpen, liveConnectionIdsByProvider]);
 
   const fetchCombos = async () => {
     try {
@@ -188,23 +203,40 @@ export default function ModelSelectModal({
       ? NO_AUTH_PROVIDER_IDS.filter((id) => (AI_PROVIDERS[id]?.serviceKinds || ["llm"]).includes(kindFilter))
       : NO_AUTH_PROVIDER_IDS;
 
-    // Only show connected providers (including both standard and custom)
-    const providerIdsToShow = new Set([
-      ...activeConnectionIds,  // Only connected providers
-      ...noAuthIds,            // No-auth providers (kind-filtered)
+    // Connected providers + no-auth providers
+    const connectedIds = new Set([
+      ...activeConnectionIds,
+      ...noAuthIds,
     ]);
 
-    // Sort by PROVIDER_ORDER
-    const sortedProviderIds = [...providerIdsToShow].sort((a, b) => {
+    // Unconnected standard providers that match kindFilter
+    const unconnectedIds = Object.keys(allProviders).filter((id) => {
+      if (connectedIds.has(id)) return false;
+      const p = allProviders[id];
+      if (!p || p.hidden) return false;
+      if (kindFilter) {
+        const kinds = p.serviceKinds || ["llm"];
+        return kinds.includes(kindFilter);
+      }
+      return true;
+    });
+
+    const sortOrder = (a, b) => {
       const indexA = PROVIDER_ORDER.indexOf(a);
       const indexB = PROVIDER_ORDER.indexOf(b);
       return (indexA === -1 ? 999 : indexA) - (indexB === -1 ? 999 : indexB);
-    });
+    };
+
+    const sortedProviderIds = [
+      ...[...connectedIds].sort(sortOrder),
+      ...[...unconnectedIds].sort(sortOrder),
+    ];
 
     sortedProviderIds.forEach((providerId) => {
       const alias = getProviderAlias(providerId);
       const providerInfo = allProviders[providerId] || { name: providerId, color: "#666" };
       const isCustomProvider = isOpenAICompatibleProvider(providerId) || isAnthropicCompatibleProvider(providerId);
+      const isConnected = connectedIds.has(providerId);
 
       // For provider-as-model kinds (webSearch/webFetch): emit a single entry where value === providerId
       if (kindFilter && PROVIDER_AS_MODEL_KINDS.has(kindFilter)) {
@@ -213,6 +245,7 @@ export default function ModelSelectModal({
           alias,
           color: providerInfo.color,
           models: [{ id: providerId, name: providerInfo.name, value: providerId }],
+          isConnected,
         };
         return;
       }
@@ -272,6 +305,7 @@ export default function ModelSelectModal({
             alias: alias,
             color: providerInfo.color,
             models: combined,
+            isConnected,
           };
         }
       } else if (isCustomProvider) {
@@ -322,10 +356,12 @@ export default function ModelSelectModal({
           models: modelsToShow,
           isCustom: true,
           hasModels: mergedModels.length > 0,
+          isConnected,
         };
       } else {
-        const hardcodedModels = providerId === "cursor" && cursorModels.length > 0
-          ? cursorModels
+        const providerLiveModels = liveCatalogModels[providerId] || [];
+        const hardcodedModels = providerLiveModels.length > 0
+          ? providerLiveModels
           : getModelsByProviderId(providerId);
         const hardcodedIds = new Set(hardcodedModels.map((m) => m.id));
 
@@ -377,6 +413,7 @@ export default function ModelSelectModal({
             alias: alias,
             color: providerInfo.color,
             models: allModels,
+            isConnected,
           };
         }
       }
@@ -395,7 +432,7 @@ export default function ModelSelectModal({
     });
 
     return groups;
-  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, cursorModels]);
+  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, liveCatalogModels]);
 
   // Filter combos by search query (and hide combos when kindFilter is set — combos are LLM-only by design)
   const filteredCombos = useMemo(() => {
@@ -412,12 +449,13 @@ export default function ModelSelectModal({
     return [...added, ...rest];
   };
 
-  // Filter models by search query
+  // Filter models by search query and connection status
   const filteredGroups = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
 
     const filtered = {};
     Object.entries(groupedModels).forEach(([providerId, group]) => {
+      if (onlyConnected && !group.isConnected) return;
       let models = group.models;
       // Filter by input-modality capability (vision/pdf/audioInput/videoInput).
       if (capFilter) {
@@ -440,7 +478,16 @@ export default function ModelSelectModal({
     });
 
     return filtered;
-  }, [groupedModels, searchQuery, addedModelValues]);
+  }, [groupedModels, searchQuery, addedModelValues, onlyConnected, capFilter]);
+
+  const handleToggleOnlyConnected = (val) => {
+    setOnlyConnected(val);
+    try {
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem("modelSelectOnlyConnected", val ? "1" : "0");
+      }
+    } catch {}
+  };
 
   const handleSelect = (model) => {
     const value = model?.value || model?.name || model;
@@ -476,9 +523,9 @@ export default function ModelSelectModal({
         <span>{translate("Click to add, click again to remove. Changes are saved automatically.")}</span>
       </div>
 
-      {/* Search - compact */}
-      <div className="mb-3">
-        <div className="relative">
+      {/* Search and filter controls - compact */}
+      <div className="mb-3 flex items-center gap-2.5">
+        <div className="relative flex-1 min-w-0">
           <span className="material-symbols-outlined absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted text-[16px]">
             search
           </span>
@@ -490,6 +537,15 @@ export default function ModelSelectModal({
             className="w-full pl-8 pr-3 py-1.5 bg-surface border border-border rounded text-xs focus:outline-none focus:ring-1 focus:ring-primary/50"
           />
         </div>
+        <label className="flex items-center gap-1.5 shrink-0 text-xs text-text-muted cursor-pointer select-none hover:text-text-main transition-colors">
+          <input
+            type="checkbox"
+            checked={onlyConnected}
+            onChange={(e) => handleToggleOnlyConnected(e.target.checked)}
+            className="w-3.5 h-3.5 rounded border-border text-primary focus:ring-primary/50 cursor-pointer accent-primary"
+          />
+          <span>{translate("Connected providers only")}</span>
+        </label>
       </div>
 
       {/* Models grouped by provider - compact */}
@@ -548,6 +604,11 @@ export default function ModelSelectModal({
               <span className="text-[10px] text-text-muted">
                 ({group.models.length})
               </span>
+              {!group.isConnected && (
+                <span className="text-[10px] text-text-muted bg-surface-2 px-1.5 py-0.5 rounded font-normal ml-auto">
+                  {translate("Not connected")}
+                </span>
+              )}
             </div>
 
             <div className="flex flex-wrap gap-1.5">

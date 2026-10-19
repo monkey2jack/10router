@@ -16,6 +16,10 @@ export default {
   category: "oauth",
   transport: {
     baseUrl: "https://api.cline.bot/api/v1/chat/completions",
+    // Cline free-tier models (cline-free/*, *-free, z-ai/*) return an empty
+    // body on non-streaming calls - upstream only serves them over SSE.
+    // Same mechanism as codebuddy-intl/codex/grok-cli/zed forceStream.
+    forceStream: true,
     headers: {
       "HTTP-Referer": "https://cline.bot",
       "X-Title": "Cline",

@@ -11,7 +11,7 @@
  * repairs partial parallel calls, and flattens compacted structured references
  * that can no longer be represented safely.
  *
- * It also handles the 9router-synthetic `-agentic` / `-thinking` suffixes and
+ * It also handles the 10Router-synthetic `-agentic` / `-thinking` suffixes and
  * the `<thinking_mode>enabled</thinking_mode>` reasoning trigger, matching
  * buildKiroPayload.
  */
@@ -35,6 +35,7 @@ import {
   canonicalizeKiroConversation,
   normalizeKiroToolSpecs,
 } from "../concerns/kiroConversation.js";
+import { attachToolNameMap } from "../concerns/geminiTools.js";
 
 /**
  * Convert Claude messages to Kiro history + currentMessage.
@@ -334,6 +335,14 @@ export function claudeToKiroRequest(model, body, stream, credentials) {
     value: upstreamModel,
     enumerable: false,
   });
+
+  // Tool definitions Kiro only accepted after sanitizing (dots/colons don't
+  // survive its [a-zA-Z0-9_-] charset) must come back under the client's
+  // names — chatCore threads the inverted sanitized→original map into the
+  // response translators (streaming state / raw-body decloak).
+  attachToolNameMap(payload, new Map(
+    [...nameMap].filter(([raw, clean]) => raw !== clean).map(([raw, clean]) => [clean, raw])
+  ));
 
   return payload;
 }

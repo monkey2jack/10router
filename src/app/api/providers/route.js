@@ -9,6 +9,7 @@ import {
 import { APIKEY_PROVIDERS } from "@/shared/constants/config";
 import { AI_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider } from "@/shared/constants/providers";
 import { normalizeProviderId, normalizeProviderSpecificData } from "@/lib/providerNormalization";
+import { proxyPoolUrlError } from "@/lib/network/outboundProxy.js";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +20,15 @@ function normalizeProxyConfig(body = {}) {
 
   if (enabled && !url) {
     return { error: "Connection proxy URL is required when connection proxy is enabled" };
+  }
+
+  // Only an enabled proxy is validated: a stale stored URL must never block
+  // the user from switching the proxy off.
+  if (enabled && url) {
+    const urlError = proxyPoolUrlError(url);
+    if (urlError) {
+      return { error: urlError };
+    }
   }
 
   return {
@@ -60,19 +70,37 @@ export async function GET() {
       }
     } catch { }
 
-    // Hide sensitive fields, enrich name for compatible providers
+    // Hide sensitive fields, enrich name for compatible providers.
+    // Tokens are stripped, but the UI still needs to know WHICH credentials a
+    // row holds (e.g. Xiaomi rows can carry a desktop session, an sk- key, or
+    // both) — expose booleans so the badges can reflect real capabilities
+    // without leaking the secrets.
     const safeConnections = connections.map(c => {
       const isCompatible = isOpenAICompatibleProvider(c.provider) || isAnthropicCompatibleProvider(c.provider);
       const name = isCompatible
         ? (c.name || nodeNameMap[c.provider] || c.providerSpecificData?.nodeName || c.provider)
         : c.name;
+      const rawToken = typeof c.accessToken === "string" ? c.accessToken : "";
+      // providerSpecificData rides along wholesale — the Xiaomi desktop
+      // session cookie (mimoPassToken) would otherwise be echoed to any
+      // dashboard consumer in plaintext. The UI only needs the boolean
+      // below; the PUT route merges into existing data, so dropping the
+      // key here cannot wipe the stored value on an edit roundtrip.
+      const psd = { ...(c.providerSpecificData || {}) };
+      delete psd.mimoPassToken;
       return {
         ...c,
+        providerSpecificData: psd,
         name,
         apiKey: undefined,
         accessToken: undefined,
         refreshToken: undefined,
         idToken: undefined,
+        // Internal carrier for undecryptable ciphertext — never expose it.
+        __unreadableCredentials: undefined,
+        // True only for a REAL key — the session placeholder is not a key.
+        hasAccessToken: rawToken.length > 0 && !rawToken.startsWith("mimo-desktop-session"),
+        hasDesktopSession: Boolean(c.providerSpecificData?.mimoPassToken),
       };
     });
 
@@ -183,6 +211,11 @@ export async function POST(request) {
       providerSpecificData: mergedProviderSpecificData,
       isActive: true,
       testStatus: testStatus || "unknown",
+      // 同名 apikey 连接拒绝创建而不是静默覆盖存储的 key（#4311 / 上游 239bcfc5）：
+      // 脚本复用名字（"Key 1"、"Key 2"…）曾把连接池里已有的条目直接覆盖掉，
+      // 无 409 无警告。判定与 409 映射在下方 catch；web-cookie 供应商沿用旧的
+      // 同名覆盖语义（cookie 轮换靠同名更新），oauth 重连等内部 upsert 不受影响。
+      allowOverwrite: isWebCookieProvider ? undefined : false,
     });
 
     // Hide sensitive fields
@@ -191,6 +224,12 @@ export async function POST(request) {
 
     return NextResponse.json({ connection: result }, { status: 201 });
   } catch (error) {
+    if (error?.code === "PROVIDER_NAME_CONFLICT") {
+      return NextResponse.json(
+        { error: error.message, code: error.code, existingId: error.existingId, existingName: error.existingName },
+        { status: 409 }
+      );
+    }
     console.log("Error creating provider:", error);
     return NextResponse.json({ error: "Failed to create provider" }, { status: 500 });
   }

@@ -26,11 +26,14 @@ export default {
     },
   },
   models: [
-    { id: "ultimate", name: "Ultimate" },
+    // 2026-09-19 cleanup: "lite" removed — neither region's live catalog
+    // publishes it (not even as enable:false); it was a marketing-era row.
+    // Ultimate/Performance/Efficient stay: the INTL catalog prices them
+    // (1.6x / 1.1x / 0.3x) and badges render from that live data.
     { id: "auto", name: "Auto" },
+    { id: "ultimate", name: "Ultimate" },
     { id: "performance", name: "Performance" },
     { id: "efficient", name: "Efficient" },
-    { id: "lite", name: "Lite" },
     { id: "qmodel_38max", name: "Qwen3.8-Max" },
     { id: "qmodel_latest", name: "Qwen3.7-Max" },
     { id: "qmodel", name: "Qwen3.7-Plus" },

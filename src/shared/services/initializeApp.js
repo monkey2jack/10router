@@ -14,6 +14,9 @@ import {
   WATCHDOG_INTERVAL_MS, NETWORK_CHECK_INTERVAL_MS, VIRTUAL_IFACE_REGEX,
 } from "@/lib/tunnel";
 import { getMitmStatus, startMitm, loadEncryptedPassword, initDbHooks, restoreToolDNS, sweepStaleDnsEntries, removeAllDNSEntriesSync } from "@/mitm/manager";
+import { repairAllImportedUsageCosts } from "@/lib/db/repos/usageRepo.js";
+import { isAutoUpdateCheckEnabled, syncUpdateCheckMarker } from "@/lib/updateCheck";
+import { applyPasswordResetFile } from "@/lib/auth/passwordReset";
 import { syncToJson as syncMitmAliasCache } from "@/lib/mitmAliasCache";
 import { killAllBridges } from "@/lib/mcp/stdioSseBridge";
 
@@ -81,7 +84,17 @@ export async function initializeApp() {
 
 async function runHeavyStartup() {
   await cleanupProviderConnections();
+  // Price zero-cost usage rows left by older imports and by the sync plugin's
+  // offline --import (which writes straight into the DB). Bounded per run and
+  // resumable (watermark in _meta). Not awaited: it must never hold up the
+  // tunnel / Tailscale / MITM auto-resume below.
+  repairAllImportedUsageCosts().catch((e) => console.log("[InitApp] usage cost repair failed:", e.message));
+  // A reset-password file left while the server was down (issue #33 recovery).
+  await applyPasswordResetFile().catch((e) => console.log("[InitApp] password reset file failed:", e.message));
   const settings = await getSettings();
+  // Re-derive the launcher's update-check marker from the database (it may have
+  // been restored or imported since the marker was written).
+  syncUpdateCheckMarker(isAutoUpdateCheckEnabled(settings));
 
   // Auto-resume tunnel (once per process)
   if (settings.tunnelEnabled && !g.tunnelAutoResumed) {
@@ -124,14 +137,25 @@ async function runHeavyStartup() {
     .then(({ startBackgroundTokenRefresh }) => startBackgroundTokenRefresh())
     .catch((e) => console.log("[BackgroundTokenRefresh] scheduler start failed:", e.message));
 
-  // Experimental CodeBuddy CN auto daily check-in. Started only when the toggle
-  // is on at boot; each scheduled fire re-reads the flag and no-ops when turned
-  // off later, so no restart is needed to disable it. Turning it on at runtime
-  // from the UI is handled by the PATCH /api/settings route.
-  if (settings.codeBuddyCheckin === true) {
+  // Experimental CodeBuddy CN auto daily check-in / compensation / intl session.
+  // Started when any toggle is on at boot; each scheduled fire re-reads the flags
+  // and no-ops when turned off later, so no restart is needed to disable it.
+  // Turning any on at runtime from the UI is handled by the PATCH /api/settings route.
+  if (
+    settings.codeBuddyCheckin === true ||
+    settings.codeBuddyCompensation === true ||
+    settings.codeBuddyIntlSession === true
+  ) {
     import("@/sse/services/codebuddyCheckin.js")
       .then(({ startCodebuddyCheckin }) => startCodebuddyCheckin())
       .catch((e) => console.log("[CodeBuddyCheckin] scheduler start failed:", e.message));
+  }
+
+  // Auto daily credit claim for Qoder & Qoder CN.
+  if (settings.qoderCheckin === true) {
+    import("@/sse/services/qoderCheckin.js")
+      .then(({ startQoderCheckin }) => startQoderCheckin())
+      .catch((e) => console.log("[QoderCheckin] scheduler start failed:", e.message));
   }
 }
 

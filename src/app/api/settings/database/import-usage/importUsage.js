@@ -78,6 +78,15 @@ export function readUsageFromJson(payload) {
 export async function importUsageFromSqlite(buffer, filename = "data.sqlite") {
   const rows = await readUsageFromSqlite(buffer, filename);
   if (rows.length === 0) return { imported: 0, skipped: 0, total: 0, source: filename };
+  // A 9r/10r file's rows that were NATIVE on the source instance are real
+  // gateway observations — stamp them so health scoring keeps them (the
+  // imported-rows exclusion in getUsageDashboard exempts meta.gatewaySync).
+  // Rows the source instance had itself imported (meta.imported already true)
+  // stay excluded, however far they travel.
+  for (const r of rows) {
+    const meta = (r.meta && typeof r.meta === "object") ? r.meta : {};
+    if (meta.imported !== true && meta.gatewaySync !== true) r.meta = { ...meta, gatewaySync: true };
+  }
   const { importUsageRows } = await import("@/lib/db/repos/usageRepo.js");
   const { imported, skipped } = await importUsageRows(rows);
   return { imported, skipped, total: rows.length, source: filename };

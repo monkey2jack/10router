@@ -53,6 +53,8 @@ source/*
 .cursor/*
 docs/*
 !docs/ARCHITECTURE.md
+!docs/en/*.md
+!docs/zh-CN/*.md
 test/*
 open-sse/test/*
 RM.vn.md
@@ -62,7 +64,9 @@ PUBLIC.md
 Thanks.md
 PUBLIC.en.md
 PR/*
-package-lock.json
+# package-lock.json is TRACKED (upstream 9router used to ignore it): the Docker
+# build runs `npm ci` against it for reproducible installs — build-time registry
+# drift hung the QEMU arm64 leg for 6h during v1.4.0. Keep it committed.
 
 
 #Ignore vscode AI rules
@@ -94,6 +98,17 @@ graphify-out/*
 /desktop/node_modules/
 /desktop/dist/
 
+# desktop/test-local.ps1 自己维护的本地测试轮次计数器(见该脚本 step 0)
+/desktop/.test-round
+
+# fnOS fpk packaging artifacts (built on the NAS build dir; a local run must not
+# dirty the workspace with a 76MB server dump or release-named fpk binaries)
+/fnos-packaging/app/server/
+/fnos-packaging/*.fpk
+/fnos-packaging/build.log
+/fnos-packaging/*-server.tar.gz
+/fnos-packaging/SHA256SUMS-fpk-*.txt
+
 # Local tool artifacts
 .v2c/
 .zcode/
@@ -101,3 +116,22 @@ tmpwebapp-node-modulesprepare.log
 
 # npm pack artifacts (repo root, regenerable)
 *.tgz
+desktop/dist2/
+
+# local test-round artifacts (deploy log, vitest JSON report)
+/desktop-test-build.log
+/tests/results-current.json
+
+# browser-probe output (screenshots + JSON reports; the scripts themselves are
+# tracked under scripts/, only what a run emits is ignored)
+/browser-probe.png
+/probe-*.json
+/probe-*.png
+
+# `desktop/dist/` above only covers the release flavor. The 2.0 test flavor
+# writes to `desktop/dist-flavor/` (electron-builder output dir, overridden per
+# build in desktop/test-local.ps1) and it holds a ~375MB win-unpacked tree. It is
+# NOT ignored, so a `git add -A` here pulls 2.8k files from another branch's build
+# into main. Same for the UI-audit screenshot/artifact dir.
+/desktop/dist-flavor/
+/.ui-audit/

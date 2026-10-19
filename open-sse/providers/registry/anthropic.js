@@ -25,6 +25,8 @@ export default {
   // key instead of the subscription OAuth flow. The older ids stay listed so
   // existing combos and saved defaults keep resolving.
   models: [
+    // Mirrors registry/claude.js — opus-5.5 added upstream 2026-09-23.
+    { id: "claude-opus-5-5", name: "Claude Opus 5.5" },
     { id: "claude-opus-5", name: "Claude Opus 5" },
     { id: "claude-fable-5", name: "Claude Fable 5" },
     { id: "claude-sonnet-5", name: "Claude Sonnet 5" },

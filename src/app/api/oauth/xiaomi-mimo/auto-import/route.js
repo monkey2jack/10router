@@ -1,16 +1,18 @@
 import { NextResponse } from "next/server";
 import { readFile, access, constants } from "fs/promises";
-import { homedir } from "os";
-import { join } from "path";
+// Path resolution for MiMo Desktop's on-disk stores is owned by the engine
+// module (same source as the cookie store) so the two can never drift apart.
+import { desktopAuthJsonPaths } from "open-sse/shared/mimoAccount.js";
 
 /**
  * GET /api/oauth/xiaomi-mimo/auto-import
- * Auto-detect Xiaomi MiMo credentials from the local MiMoCode / Desktop auth.json.
+ * Auto-detect Xiaomi MiMo credentials from MiMo Desktop's local auth.json.
  *
- * Sources (in priority order):
- *   1. ~/.local/share/mimocode/auth.json  → xiaomi field
- *   2. %APPDATA%/Xiaomi MiMo/auth.json    → (Windows)
- *   3. ~/Library/Application Support/mimocode/auth.json (macOS)
+ * Source: $XDG_DATA_HOME/mimocode/auth.json (else ~/.local/share/mimocode/auth.json)
+ * — the credential dir Desktop hands to its bundled engine as `authDataDir`.
+ * NOTE: this is deliberately NOT the Electron profile dir; auth.json never lives
+ * there, and the retired mimocode CLI used this same dir, so there is no
+ * CLI-specific path to probe.
  *
  * auth.json shape:
  * {
@@ -27,34 +29,12 @@ import { join } from "path";
  * credential never round-trips through the browser.
  */
 
-function getCandidatePaths() {
-  const home = homedir();
-  const paths = [];
-
-  // MiMoCode / MiMo Desktop shared data dir (cross-platform XDG)
-  paths.push(join(home, ".local", "share", "mimocode", "auth.json"));
-
-  // Windows: also check USERPROFILE-based XDG
-  if (process.platform === "win32") {
-    const appData = process.env.APPDATA || join(home, "AppData", "Roaming");
-    // Desktop's own storage (may have separate credentials in the future)
-    paths.push(join(appData, "Xiaomi MiMo", "auth.json"));
-  }
-
-  // macOS
-  if (process.platform === "darwin") {
-    paths.push(join(home, "Library", "Application Support", "mimocode", "auth.json"));
-  }
-
-  return paths;
-}
-
 /**
  * GET /api/oauth/xiaomi-mimo/auto-import
  */
 export async function GET() {
   try {
-    const candidates = getCandidatePaths();
+    const candidates = desktopAuthJsonPaths();
 
     let authPath = null;
     for (const candidate of candidates) {
@@ -70,23 +50,43 @@ export async function GET() {
     // Whether Desktop's account session is readable — this is what unlocks the
     // Desktop-exclusive Preview models. The token itself stays on the server.
     let hasDesktopSession = false;
+    let desktopSessionInfo = null;
     // A running Desktop holds an exclusive lock on its cookie store. Import can
     // still succeed (the sk- key alone covers the cloud models) — but Preview
     // models need that session, so tell the user why it is missing.
     let desktopLocked = false;
     try {
       const { readDesktopPassToken } = await import("open-sse/shared/mimoAccount.js");
-      hasDesktopSession = Boolean(await readDesktopPassToken());
+      desktopSessionInfo = await readDesktopPassToken();
+      hasDesktopSession = Boolean(desktopSessionInfo?.passToken);
     } catch (e) {
       desktopLocked = e?.code === "DESKTOP_LOCKED";
       console.log("[xiaomi-mimo] passToken read failed (non-fatal):", e.message);
     }
 
     if (!authPath) {
+      if (hasDesktopSession) {
+        // User logged in via MiMo Desktop (e.g. QR scan) — holds account session
+        // which unlocks Desktop-exclusive Preview models even without auth.json.
+        return NextResponse.json({
+          found: true,
+          hasDesktopSession: true,
+          sessionOnly: true,
+          uid: desktopSessionInfo?.userId || null,
+          desktopLocked: false,
+          source: "Xiaomi MiMo Desktop Session",
+        });
+      }
+
+      // Machine-readable code + the raw details the UI may append. The UI maps
+      // `code` to a localized sentence (the dashboard is trilingual; returning a
+      // full English sentence here produced mixed-language dialogs).
       return NextResponse.json({
         found: false,
         hasDesktopSession,
         desktopLocked,
+        code: desktopLocked ? "DESKTOP_LOCKED" : "AUTH_FILE_MISSING",
+        details: desktopLocked ? undefined : candidates.join("\n"),
         error: desktopLocked
           ? "Xiaomi MiMo Desktop is running and is holding its credential store, so no local credentials could be read. Quit the desktop app completely (including the tray icon) and retry."
           : `Xiaomi MiMo Desktop auth file not found. Checked:\n${candidates.join("\n")}\n\nMake sure Xiaomi MiMo Desktop is installed and you are signed in.`,
@@ -131,6 +131,7 @@ export async function GET() {
 
     return NextResponse.json({
       found: true,
+      sessionOnly: false,
       apiKey: key,
       uid: metadata.uid || null,
       baseUrl: metadata.base_url || "https://api.xiaomimimo.com/v1",
@@ -140,6 +141,7 @@ export async function GET() {
     });
   } catch (error) {
     console.log("Xiaomi MiMo auto-import error:", error);
-    return NextResponse.json({ found: false, error: error.message }, { status: 500 });
+    // Generic message only: error.message can carry host paths / env fingerprints.
+    return NextResponse.json({ found: false, error: "Failed to auto-import Xiaomi MiMo credentials" }, { status: 500 });
   }
 }

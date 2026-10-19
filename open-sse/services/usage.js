@@ -4,10 +4,10 @@
 
 import { getGitHubUsage } from "./usage/github.js";
 import { getGeminiUsage, getAntigravityUsage } from "./usage/google.js";
-import { getClaudeUsage } from "./usage/claude.js";
+import { getClaudeUsage, consumeClaudeResetGrant } from "./usage/claude.js";
 import { getCodexUsage, consumeCodexRateLimitResetCredit, getCodexRateLimitResetCredits } from "./usage/codex.js";
 
-export { consumeCodexRateLimitResetCredit, getCodexRateLimitResetCredits };
+export { consumeCodexRateLimitResetCredit, getCodexRateLimitResetCredits, consumeClaudeResetGrant };
 import { getKiroUsage } from "./usage/kiro.js";
 import { getMiniMaxUsage } from "./usage/minimax.js";
 import { getCodeBuddyCnUsage, getCodeBuddyIntlUsage } from "./usage/codebuddy-cn.js";
@@ -15,15 +15,20 @@ import { getGrokCliUsage } from "./usage/grok-cli.js";
 import { getKimiUsage } from "./usage/kimi.js";
 import { getDeepseekUsage } from "./usage/deepseek.js";
 import { getOpencodeGoUsage } from "./usage/opencode-go.js";
-import { getXiaomiMimoUsage } from "./usage/xiaomi-mimo.js";
+import { getOpenCodeZenUsage } from "./usage/opencode-zen.js";
+import { getXiaomiMimoUsage, getXiaomiTokenPlanUsage } from "./usage/xiaomi-mimo.js";
+import { getStepfunUsage, STEPFUN_ACCOUNTS_HOSTS } from "./usage/stepfun.js";
 import { resolveQoderCredentials } from "./qoderModels.js";
 import {
   getIflowUsage,
   getOllamaUsage,
-  getGlmUsage,
   getVercelAiGatewayUsage,
   getQoderUsage,
 } from "./usage/misc.js";
+import { getGlmUsage } from "./usage/glm.js";
+import { getCommandCodeUsage } from "./usage/commandcode.js";
+import { getMiniMaxCodeUsage } from "./usage/minimax-code.js";
+import { extractEarliestPackageExpiry } from "./usage/expiryExtractor.js";
 
 /**
  * Get usage data for a provider connection
@@ -42,12 +47,17 @@ const USAGE_HANDLERS = {
     // PAT (pt-...) connections must be exchanged to a job token before the
     // quota endpoint accepts them.
     const resolved = await resolveQoderCredentials(c, c.proxyOptions).catch(() => null);
-    return getQoderUsage(resolved?.accessToken || c.accessToken, c.proxyOptions);
+    return getQoderUsage(resolved?.accessToken || c.accessToken, c.proxyOptions, "qoder", c.providerSpecificData);
+  },
+  "qoder-cn": async (c) => {
+    const resolved = await resolveQoderCredentials(c, c.proxyOptions).catch(() => null);
+    return getQoderUsage(resolved?.accessToken || c.accessToken, c.proxyOptions, "qoder-cn", c.providerSpecificData);
   },
   iflow: (c) => getIflowUsage(c.accessToken),
   ollama: (c) => getOllamaUsage(c.apiKey, c.providerSpecificData, c.proxyOptions),
-  glm: (c) => getGlmUsage(c.apiKey, c.provider, c.proxyOptions),
-  "glm-cn": (c) => getGlmUsage(c.apiKey, c.provider, c.proxyOptions),
+  // GLM 双认证：粘贴 apikey 或 OAuth 登录（coding-plan key 存在 accessToken 上）
+  glm: (c) => getGlmUsage(c.apiKey || c.accessToken, c.provider, c.proxyOptions),
+  "glm-cn": (c) => getGlmUsage(c.apiKey || c.accessToken, c.provider, c.proxyOptions),
   minimax: (c) => getMiniMaxUsage(c.apiKey, c.provider, c.proxyOptions),
   "minimax-cn": (c) => getMiniMaxUsage(c.apiKey, c.provider, c.proxyOptions),
   "vercel-ai-gateway": (c) => getVercelAiGatewayUsage(c.apiKey, c.proxyOptions),
@@ -57,7 +67,31 @@ const USAGE_HANDLERS = {
   kimi: (c) => getKimiUsage(c.accessToken, c.apiKey, c.proxyOptions, c.providerSpecificData),
   deepseek: (c) => getDeepseekUsage(c.apiKey, c.proxyOptions),
   "opencode-go": (c) => getOpencodeGoUsage(c.apiKey, c.proxyOptions),
-  "xiaomi-mimo": (c) => getXiaomiMimoUsage(c.accessToken, c.providerSpecificData, c.proxyOptions),
+  "opencode-zen": (c) => getOpenCodeZenUsage(c.apiKey, c.proxyOptions),
+  // The cloud card bills through the plan / API at formal rates and owns NO
+  // Desktop surface, so it reports no quota at all: no session read (that is how
+  // it advertised a "Desktop session" it never had) and no key probe (whose 401
+  // fallback printed a weekly-quota notice it also does not own). The handler
+  // short-circuits to an empty result on this flag.
+  "xiaomi-mimo": (c) =>
+    getXiaomiMimoUsage(c.accessToken, c.providerSpecificData, c.proxyOptions, { allowMachineSession: false }),
+  // The Desktop card, split out of xiaomi-mimo. It reads the SAME weekly allowance
+  // through the account session — and its connection is the one that actually
+  // carries mimoPassToken. Without this entry the card fell through to "Usage API
+  // not implemented for mimo-desktop" and showed no quota at all, while the cloud
+  // card showed one. Missed when the three-card split added the id.
+  // Machine-session fallback stays enabled: a Desktop row with no stored passToken
+  // reads the running Desktop's own cookie store, exactly like the executor does.
+  "mimo-desktop": (c) => getXiaomiMimoUsage(c.accessToken, c.providerSpecificData, c.proxyOptions),
+  // Token Plan keys (tp-) live on a cluster with no quota endpoint at all — the
+  // handler exists so the row can explain that instead of falling through to
+  // "Usage API not implemented for xiaomi-tokenplan".
+  "xiaomi-tokenplan": (c) => getXiaomiTokenPlanUsage(c.apiKey, c.providerSpecificData, c.proxyOptions),
+  stepfun: (c) => getStepfunUsage(c.apiKey, c.proxyOptions, STEPFUN_ACCOUNTS_HOSTS.stepfun),
+  "stepfun-cn": (c) => getStepfunUsage(c.apiKey, c.proxyOptions, STEPFUN_ACCOUNTS_HOSTS["stepfun-cn"]),
+  commandcode: (c) => getCommandCodeUsage(c.apiKey, c.proxyOptions),
+  "minimax-code": (c) => getMiniMaxCodeUsage(c.accessToken, "minimax-code", c.proxyOptions, c.providerSpecificData),
+  "minimax-code-global": (c) => getMiniMaxCodeUsage(c.accessToken, "minimax-code-global", c.proxyOptions, c.providerSpecificData),
 };
 
 export async function getUsageForProvider(connection, proxyOptions = null, options = {}) {
@@ -79,3 +113,5 @@ export async function getUsageForProvider(connection, proxyOptions = null, optio
     force: options.force === true,
   });
 }
+
+export { extractEarliestPackageExpiry };

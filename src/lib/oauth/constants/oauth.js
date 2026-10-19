@@ -141,8 +141,16 @@ export const XIAOMI_MIMO_CONFIG = {
   platformUrl: process.env.MIMO_PLATFORM_URL || "https://platform.xiaomimimo.com",
   defaultBaseUrl: "https://api.xiaomimimo.com/v1",
   kn: "mimocode",
-  callbackPath: "/",
-  timeoutMs: 300000, // 5 minutes
+  // Identifies us as the MiMo client to the platform. The official builder always
+  // sends it; without it the platform mints the authorization code for a different
+  // client, so the blob it hands back cannot be decrypted by the key we registered.
+  app: "MiMo",
+  timeoutMs: 300000, // 5 minutes — how long the local callback listener waits
+  // How long a pending private key stays usable for a PASTED authorization code.
+  // The platform's code page makes the user copy the code by hand, so the local
+  // 5-minute window is far too short; MiMo Desktop keeps its own pending keys for
+  // 24 h for exactly this reason (pendingKeyTtlMs in its login engine).
+  pendingTtlMs: 24 * 60 * 60 * 1000,
 };
 
 export const TRAE_CONFIG = {
@@ -198,6 +206,20 @@ export const WINDSURF_CONFIG = {
   oauthTimeoutMs: 600_000,
 };
 
+// Zai GLM Coding OAuth — ZCode CLI 轮询流程（非 PKCE）：init 签发一次性 poll
+// token，浏览器打开服务端生成的 authorize_url，poll/ready 返回 token；随后
+// Z.AI OAuth token 换平台业务 JWT，再换长期 coding-plan API key（无 refresh
+// 授权，到期重新登录）。
+export const GLM_OAUTH_CONFIG = { ...PROVIDER_OAUTH["glm"] };
+
+// Muse —— 订阅型 device code 流程打到 auth.meta.com，无 refresh（Meta 拒绝
+// refresh_token 授权；铸造的 Model API key 不过期，401 只能重新登录）。
+export const MUSE_CONFIG = { ...PROVIDER_OAUTH["muse"] };
+
+// MiniMax Code (Device Code Flow)
+export const MINIMAX_CODE_CONFIG = { ...PROVIDER_OAUTH["minimax-code"] };
+export const MINIMAX_CODE_GLOBAL_CONFIG = { ...PROVIDER_OAUTH["minimax-code-global"] };
+
 // Zed hosted LLM aggregator — RSA keypair native-app auth (NOT OAuth).
 // Client generates ephemeral RSA-2048 keypair; user signs in at zed.dev/native_app_signin;
 // Zed redirects to local callback with access_token RSA-encrypted against our public key.
@@ -237,5 +259,9 @@ export const PROVIDERS = {
   GROK_CLI: "grok-cli",
   TRAE: "trae",
   WINDSURF: "windsurf",
+  GLM: "glm",
+  MUSE: "muse",
   ZED: "zed",
+  MINIMAX_CODE: "minimax-code",
+  MINIMAX_CODE_GLOBAL: "minimax-code-global",
 };

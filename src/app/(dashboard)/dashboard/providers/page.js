@@ -8,6 +8,8 @@ import {
   Badge,
   Button,
   Toggle,
+  Popover,
+  MenuItem,
 } from "@/shared/components";
 import ProviderIcon from "@/shared/components/ProviderIcon";
 import { getProviderIconSrc } from "@/shared/utils/providerIcon";
@@ -26,6 +28,21 @@ import { useHeaderSearchStore } from "@/store/headerSearchStore";
 import { translate } from "@/i18n/runtime";
 import ModelAvailabilityBadge from "./components/ModelAvailabilityBadge";
 import AddCompatibleModal from "./components/AddCompatibleModal";
+import DraggableCard from "@/shared/components/DraggableCard";
+import {
+  effectiveConnectionStatus,
+  computeConnectionStats,
+  connectionRank,
+  moveCardInOrder,
+  saveProviderCardOrder,
+} from "@/shared/utils/providerCardOrder";
+
+// One implementation, shared with the media-providers listing pages
+// (@/shared/components/DraggableCard). Declared at module top level so it is
+// initialised before ProvidersPage() can render it — the previous local
+// `function DraggableCardWrapper` was hoisted; a bare `const` beside
+// ProviderCard() would leave a use-before-init (TDZ) window on first paint.
+const DraggableCardWrapper = DraggableCard;
 
 function getStatusDisplay(connected, error, errorCode) {
   const parts = [];
@@ -96,12 +113,24 @@ function getConnectionErrorTag(connection) {
 
 const APIKEY_INITIAL_VISIBLE = 20;
 
+// Connection-status buckets for the wall filter. The "active" bucket is the
+// same vocabulary as the cards' top rank (connectionRank): a provider with a
+// live connection OR a no-auth provider whose topology toggle is on — one
+// classifier, not a second one.
+const STATUS_FILTER_OPTIONS = [
+  { value: "all", label: "All", icon: "apps" },
+  { value: "active", label: "Active", icon: "check_circle" },
+  { value: "error", label: "Error", icon: "error" },
+  { value: "disabled", label: "Inactive", icon: "block" },
+  { value: "none", label: "No connections", icon: "link_off" },
+];
+
 export default function ProvidersPage() {
   const [connections, setConnections] = useState([]);
   const [providerNodes, setProviderNodes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAllApikey, setShowAllApikey] = useState(false);
-  // Community welfare providers (公益站: gorouter/tabiauto) show by default;
+  // Trial providers (体验: opencode/mimo-free) show by default;
   // hidden only when the settings toggle (Profile → Providers) is turned off.
   const [showCommunityProviders, setShowCommunityProviders] = useState(true);
   const [showAddCompatibleModal, setShowAddCompatibleModal] = useState(false);
@@ -110,7 +139,18 @@ export default function ProvidersPage() {
   const [testingMode, setTestingMode] = useState(null);
   const [testResults, setTestResults] = useState(null);
   const [topologyVisibility, setTopologyVisibility] = useState({});
-  const [disabledLastSort, setDisabledLastSort] = useState(false);
+  const [cardOrder, setCardOrder] = useState([]);
+  const [draggingCardId, setDraggingCardId] = useState(null);
+  const [dragOverCardId, setDragOverCardId] = useState(null);
+  // Connection-status filter for the whole wall (all / active / error /
+  // disabled / none). Same buckets the cards already rank by (connectionRank),
+  // so "active" here means exactly what rank 0 means: a live connection, or a
+  // no-auth provider whose topology toggle is on.
+  // A Popover menu, not a native <select>: the OS chrome of a select (white
+  // box, blue highlight, untranslated options) is the one control language
+  // this dashboard does not speak.
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [statusFilterOpen, setStatusFilterOpen] = useState(false);
   const notify = useNotificationStore();
   const searchQuery = useHeaderSearchStore((s) => s.query);
   const registerSearch = useHeaderSearchStore((s) => s.register);
@@ -137,41 +177,46 @@ export default function ProvidersPage() {
         : !info.topologyHiddenByDefault;
   };
 
-  // Connection state drives the primary sort key for every section, gated by
-  // the providerDisabledLastSort toggle (profile setting).
+  // Connection state drives the primary sort key for every section.
   //
-  // When the toggle is ON:
   //   0 connected (connected>0) or a noAuth provider shown on the topology
   //     canvas (enabled) → floats to the top
-  //   1 a noAuth provider hidden from the topology canvas (disabled) → sits
-  //     just below connected providers, above fully-disabled ones
-  //   2 configured but all connections disabled
-  //   3 never configured (no connections at all)  →  sinks last
+  //   1 a noAuth provider hidden from the topology canvas (disabled)
+  //   2 configured but all connections disabled → auto-sinks below connected
+  //   3 never configured (no connections at all) → auto-sinks last
   //
-  // When OFF, only connected-first applies (connected providers surface, the
-  // rest interleave by priority/name) — the disabled/never-configured
-  // distinction is dropped.
-  const providerRank = (stats, info, key) => {
-    if (stats.connected > 0) return 0;
-    // noAuth free providers (opencode, mimo-free) have no connections; their
-    // on/off is the topology toggle. Shown → top; hidden → just below connected.
-    if (info?.noAuth) {
-      return topologyVisibleFor(info, key) ? 0 : 1;
-    }
-    if (!disabledLastSort) return 1;
-    if (stats.total === 0) return 3; // never configured → sinks last
-    return 2; // configured but all connections disabled
+  // Disabled providers always sink below connected ones, but stay BEFORE
+  // never-configured providers (the old toggle is removed; this is now fixed).
+  const providerRank = (stats, info, key) =>
+    connectionRank(stats, {
+      noAuth: !!info?.noAuth,
+      // noAuth free providers (opencode, mimo-free) have no connections; their
+      // on/off is the topology toggle. Shown → top; hidden → just below connected.
+      noAuthEnabled: topologyVisibleFor(info, key),
+    });
+
+  const getCardOrderIndex = (key) => {
+    const idx = cardOrder.indexOf(key);
+    return idx === -1 ? Number.MAX_SAFE_INTEGER : idx;
   };
 
-  const sortByPriority = (entries, authType) =>
+  const sortByPriority = (entries) =>
     [...entries].sort(([ka, a], [kb, b]) => {
       // Connection state is the primary axis: active/connected providers always
-      // surface before unconnected ones, then priority, then name.
-      const sa = getProviderStats(ka, authType);
-      const sb = getProviderStats(kb, authType);
+      // surface before unconnected ones, then manual drag order, then priority, then name.
+      // Count connections under EVERY auth type the provider can store (dualAuthTypes),
+      // NOT a flat "oauth": a dual-auth card stores its credential as authType
+      // "api_key"/"apikey" (mimo-desktop's account session, a qoder PAT), so the old
+      // flat filter counted a live card as unconnected and sank it below empty ones —
+      // while its badge (which already uses dualAuthTypes) showed it connected.
+      const sa = getProviderStats(ka, dualAuthTypes(a, ka));
+      const sb = getProviderStats(kb, dualAuthTypes(b, kb));
       const ra = providerRank(sa, a, ka);
       const rb = providerRank(sb, b, kb);
       if (ra !== rb) return ra - rb;
+      const oa = getCardOrderIndex(ka);
+      const ob = getCardOrderIndex(kb);
+      if (oa !== ob) return oa - ob;
       const pa = a.priority ?? 999;
       const pb = b.priority ?? 999;
       if (pa !== pb) return pa - pb;
@@ -185,6 +230,9 @@ export default function ProvidersPage() {
       const ra = providerRank(sa, a, a.id);
       const rb = providerRank(sb, b, b.id);
       if (ra !== rb) return ra - rb;
+      const oa = getCardOrderIndex(a.id);
+      const ob = getCardOrderIndex(b.id);
+      if (oa !== ob) return oa - ob;
       const pa = a.priority ?? 999;
       const pb = b.priority ?? 999;
       if (pa !== pb) return pa - pb;
@@ -207,8 +255,10 @@ export default function ProvidersPage() {
         if (settingsRes.ok) {
           const settingsData = await settingsRes.json();
           setTopologyVisibility(settingsData.topologyVisibility || {});
-          setDisabledLastSort(settingsData.providerDisabledLastSort === true);
           setShowCommunityProviders(settingsData.showCommunityProviders !== false);
+          if (Array.isArray(settingsData.providerCardOrder)) {
+            setCardOrder(settingsData.providerCardOrder);
+          }
         }
       } catch (error) {
         console.log("Error fetching data:", error);
@@ -239,51 +289,57 @@ export default function ProvidersPage() {
 
   const getProviderStats = (providerId, authType) => {
     const authTypes = Array.isArray(authType) ? authType : [authType];
-    const providerConnections = connections.filter(
-      (c) => c.provider === providerId && authTypes.includes(c.authType),
-    );
-
-    const getEffectiveStatus = (conn) => {
-      const isCooldown = Object.entries(conn).some(
-        ([k, v]) =>
-          k.startsWith("modelLock_") && v && new Date(v).getTime() > Date.now(),
-      );
-      return conn.testStatus === "unavailable" && !isCooldown
-        ? "active"
-        : conn.testStatus;
-    };
-
-    const connected = providerConnections.filter((c) => {
-      // A disabled connection (isActive=false) must not count as connected,
-      // even if its testStatus is "active" — otherwise a fully-disabled
-      // provider would still rank as active and float to the top instead of
-      // sinking behind configured-but-disabled ones.
-      if (c.isActive === false) return false;
-      const status = getEffectiveStatus(c);
-      return status === "active" || status === "success";
-    }).length;
-
-    const errorConns = providerConnections.filter((c) => {
-      const status = getEffectiveStatus(c);
-      return (
-        status === "error" || status === "expired" || status === "unavailable"
-      );
-    });
-
-    const error = errorConns.length;
-    const total = providerConnections.length;
-    const allDisabled =
-      total > 0 && providerConnections.every((c) => c.isActive === false);
+    // Connection counting (connected / error / total / allDisabled) is shared
+    // with the media-providers pages; the error tag/time below is page-specific.
+    const stats = computeConnectionStats(connections, providerId, authTypes);
+    const errorConns = connections
+      .filter((c) => c.provider === providerId && authTypes.includes(c.authType))
+      .filter((c) => {
+        const status = effectiveConnectionStatus(c);
+        return (
+          status === "error" || status === "expired" || status === "unavailable"
+        );
+      });
 
     const latestError = errorConns.sort(
       (a, b) => new Date(b.lastErrorAt || 0) - new Date(a.lastErrorAt || 0),
     )[0];
-    const errorCode = latestError ? getConnectionErrorTag(latestError) : null;
-    const errorTime = latestError?.lastErrorAt
-      ? getRelativeTime(latestError.lastErrorAt)
-      : null;
 
-    return { connected, error, total, errorCode, errorTime, allDisabled };
+    return {
+      ...stats,
+      errorCode: latestError ? getConnectionErrorTag(latestError) : null,
+      errorTime: latestError?.lastErrorAt
+        ? getRelativeTime(latestError.lastErrorAt)
+        : null,
+    };
+  };
+
+  // Bucket a provider's connection stats into the wall filter's states.
+  // Precedence mirrors what the card shows first: a live connection wins over
+  // a stale error badge, and an all-disabled provider is "Inactive" rather
+  // than "Error" (its errors are history, not the current state). An enabled
+  // no-auth provider (keyless free hosts, badge "Ready") counts as Active —
+  // it has no connections row at all, so stats alone would misbucket it.
+  const matchesStatusFilter = (stats, info, key) => {
+    if (statusFilter === "all") return true;
+    if (!stats) return statusFilter === "none";
+    if (statusFilter === "active") {
+      if (stats.connected > 0) return true;
+      // noAuth free providers: on the topology canvas → active; hidden → Inactive.
+      return !!info?.noAuth && providerRank(stats, info, key) === 0;
+    }
+    if (info?.noAuth) {
+      // noAuth buckets beyond Active: topology-off is its only "Inactive" state;
+      // it can never be Error (no connections) and lands in "none" otherwise.
+      if (statusFilter === "disabled") return providerRank(stats, info, key) === 1;
+      return statusFilter === "none";
+    }
+    // All-disabled wins over a stale error badge: every connection is off, so
+    // the errors are history, not the current state.
+    if (statusFilter === "disabled") return stats.allDisabled === true;
+    if (statusFilter === "error") return stats.connected === 0 && stats.error > 0 && !stats.allDisabled;
+    if (statusFilter === "none") return stats.total === 0;
+    return true;
   };
 
   // Toggle all connections for a provider on/off. authType may be a single
@@ -358,6 +414,12 @@ export default function ProvidersPage() {
   // kiro has no authModes in registry but accepts both (headless uses "api_key").
   const dualAuthTypes = (info, key) => {
     if (key === "kiro") return ["oauth", "apikey", "api_key"];
+    // mimo-desktop declares authModes ["oauth"] (its credential is the account
+    // session, not a key), but its ONLY connect path — the shared MiMo modal
+    // through /api/oauth/xiaomi-mimo/api-key — writes rows with authType
+    // "api_key" (placeholder token). Counting "oauth" only made the card show
+    // "No connections" next to a live, tested connection on the detail page.
+    if (key === "mimo-desktop") return ["oauth", "apikey", "api_key"];
     const modes = info?.authModes;
     // Free-tier and API-key providers default to supporting apikey even when the
     // registry entry omits authModes (e.g. cloudflare-ai, byteplus, ollama,
@@ -373,8 +435,7 @@ export default function ProvidersPage() {
 
   const oauthEntries = sortByPriority(
     Object.entries(OAUTH_PROVIDERS).filter(([, info]) => !info.hidden && matchSearch(info.name)),
-    "oauth",
-  );
+  ).filter(([key, info]) => matchesStatusFilter(getProviderStats(key, dualAuthTypes(info, key)), info, key));
   // Merge free (noAuth/connectionless) and free-tier (api-key) providers into
   // ONE list sorted by the shared connection-state rule. Without this, the two
   // arrays render sequentially and a connected free-tier provider (e.g. Dots)
@@ -398,18 +459,21 @@ export default function ProvidersPage() {
           (info.serviceKinds ?? ["llm"]).includes("llm"),
       )
       .map(([k, info]) => ({ key: k, info, stats: getProviderStats(k, dualAuthTypes(info, k)), isFreeTier: true })),
-  ].sort((a, b) => {
+  ].filter((item) => matchesStatusFilter(item.stats, item.info, item.key)).sort((a, b) => {
     const ra = providerRank(a.stats, a.info, a.key);
     const rb = providerRank(b.stats, b.info, b.key);
     if (ra !== rb) return ra - rb;
     const noAuthDiff = (b.info.noAuth ? 1 : 0) - (a.info.noAuth ? 1 : 0);
     if (noAuthDiff !== 0) return noAuthDiff;
-    // Community welfare providers (公益站: gorouter/tabiauto) cluster together
+    // Trial providers (体验: opencode/mimo-free) cluster together
     // as one contiguous block at the end of their rank group, instead of
     // interleaving with the regular free-tier providers by priority/name.
     const ca = a.info.community ? 1 : 0;
     const cb = b.info.community ? 1 : 0;
     if (ca !== cb) return ca - cb;
+    const oa = getCardOrderIndex(a.key);
+    const ob = getCardOrderIndex(b.key);
+    if (oa !== ob) return oa - ob;
     const pa = a.info.priority ?? 999;
     const pb = b.info.priority ?? 999;
     if (pa !== pb) return pa - pb;
@@ -431,11 +495,62 @@ export default function ProvidersPage() {
       const ra = providerRank(sa, a, ka);
       const rb = providerRank(sb, b, kb);
       if (ra !== rb) return ra - rb;
+      const oa = getCardOrderIndex(ka);
+      const ob = getCardOrderIndex(kb);
+      if (oa !== ob) return oa - ob;
       const pa = a.priority ?? 999;
       const pb = b.priority ?? 999;
       if (pa !== pb) return pa - pb;
       return (a.name || "").localeCompare(b.name || "");
-    });
+    })
+    .filter(([k, info]) => matchesStatusFilter(getProviderStats(k, "apikey"), info, k));
+
+  const customProviders = [...compatibleProviders, ...anthropicCompatibleProviders]
+    .filter((p) => matchesStatusFilter(getProviderStats(p.id, "apikey"), null, p.id))
+    .sort((a, b) => {
+    const oa = getCardOrderIndex(a.id);
+    const ob = getCardOrderIndex(b.id);
+    if (oa !== ob) return oa - ob;
+    return (a.name || "").localeCompare(b.name || "");
+  });
+
+  const allDisplayKeys = useCallback(() => {
+    const keys = [];
+    for (const p of [...compatibleProviders, ...anthropicCompatibleProviders]) {
+      if (!keys.includes(p.id)) keys.push(p.id);
+    }
+    for (const [k] of oauthEntries) {
+      if (!keys.includes(k)) keys.push(k);
+    }
+    for (const item of freeAllEntries) {
+      if (!keys.includes(item.key)) keys.push(item.key);
+    }
+    for (const [k] of apikeyEntries) {
+      if (!keys.includes(k)) keys.push(k);
+    }
+    return keys;
+  }, [compatibleProviders, anthropicCompatibleProviders, oauthEntries, freeAllEntries, apikeyEntries]);
+
+  const handleCardDrop = useCallback(
+    (targetId) => {
+      const sourceId = draggingCardId;
+      setDraggingCardId(null);
+      setDragOverCardId(null);
+      if (!sourceId || !targetId || sourceId === targetId) return;
+
+      setCardOrder((prev) => {
+        // Shared reorder math (merge known keys → splice) lives in
+        // shared/utils/providerCardOrder.js so every surface stays identical.
+        const base = moveCardInOrder(prev, allDisplayKeys(), sourceId, targetId);
+        if (base === prev) return prev;
+        saveProviderCardOrder(base).catch((err) =>
+          console.log("Failed to save provider card order:", err),
+        );
+        return base;
+      });
+    },
+    [draggingCardId, allDisplayKeys],
+  );
   const isApikeySearching = !!searchQuery.trim();
   const visibleApikeyEntries =
     isApikeySearching || showAllApikey
@@ -452,21 +567,84 @@ export default function ProvidersPage() {
     );
   }
 
+  // Reads the FILTERED lists (customProviders is the merged+filtered custom
+  // set), so a status filter that hides everything surfaces the empty state
+  // instead of four blank section headers.
   const hasAnyResult =
     oauthEntries.length > 0 ||
     freeAllEntries.length > 0 ||
     apikeyEntries.length > 0 ||
-    compatibleProviders.length > 0 ||
-    anthropicCompatibleProviders.length > 0;
+    customProviders.length > 0;
+
+  const activeStatusOption =
+    STATUS_FILTER_OPTIONS.find((o) => o.value === statusFilter) || STATUS_FILTER_OPTIONS[0];
 
   return (
     <div className="flex min-w-0 flex-col gap-6 px-1 sm:px-0">
+      {/* Connection-status filter for the whole wall. A Popover menu in the
+          dashboard's own control language (surface panel + item rows), not a
+          native <select> — the OS chrome of a select is the one visual
+          dialect this UI does not speak, and its option text would skip
+          translate() entirely. */}
+      <div className="flex items-center justify-end gap-2">
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setStatusFilterOpen((v) => !v)}
+            aria-haspopup="menu"
+            aria-expanded={statusFilterOpen}
+            title={translate("Filter providers by connection status")}
+            aria-label={translate("Filter providers by connection status")}
+            className={`flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs transition-colors ${
+              statusFilter === "all"
+                ? "border-black/10 bg-surface text-text-muted hover:bg-black/[0.04] dark:border-white/10 dark:hover:bg-white/[0.06]"
+                : "border-primary/30 bg-primary/10 text-primary"
+            }`}
+          >
+            <span className="material-symbols-outlined text-[16px] leading-none">
+              {activeStatusOption.icon}
+            </span>
+            <span>{translate(activeStatusOption.label)}</span>
+            <span className="material-symbols-outlined text-[14px] leading-none text-text-muted">
+              expand_more
+            </span>
+          </button>
+          <Popover
+            open={statusFilterOpen}
+            onClose={() => setStatusFilterOpen(false)}
+            align="right"
+            className="w-48"
+          >
+            {STATUS_FILTER_OPTIONS.map((option) => (
+              <MenuItem
+                key={option.value}
+                selected={statusFilter === option.value}
+                icon={
+                  <span className="material-symbols-outlined mt-px text-[16px] leading-none text-text-muted">
+                    {option.icon}
+                  </span>
+                }
+                onClick={() => {
+                  setStatusFilter(option.value);
+                  setStatusFilterOpen(false);
+                }}
+              >
+                {translate(option.label)}
+              </MenuItem>
+            ))}
+          </Popover>
+        </div>
+      </div>
       {!hasAnyResult && (
         <div className="text-center py-8 border border-dashed border-border rounded-xl">
           <span className="material-symbols-outlined text-[32px] text-text-muted mb-2">
             search_off
           </span>
-          <p className="text-text-muted text-sm">No providers match your search</p>
+          <p className="text-text-muted text-sm">
+            {statusFilter !== "all" && !searchQuery.trim()
+              ? translate("No providers match this filter")
+              : translate("No providers match your search")}
+          </p>
         </div>
       )}
 
@@ -496,18 +674,32 @@ export default function ProvidersPage() {
             </Button>
           </div>
         </div>
-        {compatibleProviders.length === 0 &&
-        anthropicCompatibleProviders.length === 0 ? (
+        {customProviders.length === 0 ? (
           <div className="flex items-center justify-center gap-2 py-2 border border-dashed border-border rounded-xl text-text-muted text-sm">
             <span className="material-symbols-outlined text-[18px]">extension</span>
-            <span>No custom providers — use buttons above to add OpenAI/Anthropic compatible endpoints</span>
+            <span>
+              {statusFilter !== "all"
+                ? translate("No custom providers match this filter")
+                : "No custom providers — use buttons above to add OpenAI/Anthropic compatible endpoints"}
+            </span>
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
-            {[...compatibleProviders, ...anthropicCompatibleProviders].map(
-              (info) => (
+            {customProviders.map((info) => (
+              <DraggableCardWrapper
+                key={info.id}
+                cardId={info.id}
+                isDragging={draggingCardId === info.id}
+                isOver={dragOverCardId === info.id}
+                onDragStart={setDraggingCardId}
+                onDragOver={setDragOverCardId}
+                onDrop={handleCardDrop}
+                onDragEnd={() => {
+                  setDraggingCardId(null);
+                  setDragOverCardId(null);
+                }}
+              >
                 <ApiKeyProviderCard
-                  key={info.id}
                   providerId={info.id}
                   provider={info}
                   stats={getProviderStats(info.id, "apikey")}
@@ -516,8 +708,8 @@ export default function ProvidersPage() {
                     handleToggleProvider(info.id, "apikey", active)
                   }
                 />
-              ),
-            )}
+              </DraggableCardWrapper>
+            ))}
           </div>
         )}
       </div>
@@ -555,14 +747,27 @@ export default function ProvidersPage() {
           {oauthEntries.map(([key, info]) => {
             const authTypes = dualAuthTypes(info, key);
             return (
-              <ProviderCard
+              <DraggableCardWrapper
                 key={key}
-                providerId={key}
-                provider={info}
-                stats={getProviderStats(key, authTypes)}
-                authType="oauth"
-                onToggle={(active) => handleToggleProvider(key, authTypes, active)}
-              />
+                cardId={key}
+                isDragging={draggingCardId === key}
+                isOver={dragOverCardId === key}
+                onDragStart={setDraggingCardId}
+                onDragOver={setDragOverCardId}
+                onDrop={handleCardDrop}
+                onDragEnd={() => {
+                  setDraggingCardId(null);
+                  setDragOverCardId(null);
+                }}
+              >
+                <ProviderCard
+                  providerId={key}
+                  provider={info}
+                  stats={getProviderStats(key, authTypes)}
+                  authType="oauth"
+                  onToggle={(active) => handleToggleProvider(key, authTypes, active)}
+                />
+              </DraggableCardWrapper>
             );
           })}
         </div>
@@ -600,42 +805,53 @@ export default function ProvidersPage() {
             const freeAuthTypes = dualAuthTypes(info, key);
             // noAuth free providers (opencode, mimo-free) get a topology
             // visibility toggle instead of an enable/disable switch.
-            if (!isFreeTier) {
-              const topologySetting = topologyVisibility?.[key];
-              const topologyVisible =
-                topologySetting === false
-                  ? false
-                  : topologySetting === true
-                    ? true
-                    : !info.topologyHiddenByDefault;
-              return (
-                <ProviderCard
-                  key={key}
-                  providerId={key}
-                  provider={info}
-                  stats={getProviderStats(key, freeAuthTypes)}
-                  authType="free"
-                  onToggle={(active) =>
-                    handleToggleProvider(key, freeAuthTypes, active)
-                  }
-                  topologyVisible={topologyVisible}
-                  onToggleTopology={
-                    info.noAuth
-                      ? (visible) => handleToggleTopology(key, visible)
-                      : undefined
-                  }
-                />
-              );
-            }
+            const topologySetting = topologyVisibility?.[key];
+            const topologyVisible =
+              topologySetting === false
+                ? false
+                : topologySetting === true
+                  ? true
+                  : !info.topologyHiddenByDefault;
             return (
-              <ApiKeyProviderCard
+              <DraggableCardWrapper
                 key={key}
-                providerId={key}
-                provider={info}
-                stats={getProviderStats(key, freeAuthTypes)}
-                authType={Array.isArray(freeAuthTypes) ? (freeAuthTypes[0] ?? "apikey") : freeAuthTypes}
-                onToggle={(active) => handleToggleProvider(key, freeAuthTypes, active)}
-              />
+                cardId={key}
+                isDragging={draggingCardId === key}
+                isOver={dragOverCardId === key}
+                onDragStart={setDraggingCardId}
+                onDragOver={setDragOverCardId}
+                onDrop={handleCardDrop}
+                onDragEnd={() => {
+                  setDraggingCardId(null);
+                  setDragOverCardId(null);
+                }}
+              >
+                {!isFreeTier ? (
+                  <ProviderCard
+                    providerId={key}
+                    provider={info}
+                    stats={getProviderStats(key, freeAuthTypes)}
+                    authType="free"
+                    onToggle={(active) =>
+                      handleToggleProvider(key, freeAuthTypes, active)
+                    }
+                    topologyVisible={topologyVisible}
+                    onToggleTopology={
+                      info.noAuth
+                        ? (visible) => handleToggleTopology(key, visible)
+                        : undefined
+                    }
+                  />
+                ) : (
+                  <ApiKeyProviderCard
+                    providerId={key}
+                    provider={info}
+                    stats={getProviderStats(key, freeAuthTypes)}
+                    authType={Array.isArray(freeAuthTypes) ? (freeAuthTypes[0] ?? "apikey") : freeAuthTypes}
+                    onToggle={(active) => handleToggleProvider(key, freeAuthTypes, active)}
+                  />
+                )}
+              </DraggableCardWrapper>
             );
           })}
         </div>
@@ -670,14 +886,27 @@ export default function ProvidersPage() {
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
           {visibleApikeyEntries.map(([key, info]) => (
-            <ApiKeyProviderCard
+            <DraggableCardWrapper
               key={key}
-              providerId={key}
-              provider={info}
-              stats={getProviderStats(key, "apikey")}
-              authType="apikey"
-              onToggle={(active) => handleToggleProvider(key, "apikey", active)}
-            />
+              cardId={key}
+              isDragging={draggingCardId === key}
+              isOver={dragOverCardId === key}
+              onDragStart={setDraggingCardId}
+              onDragOver={setDragOverCardId}
+              onDrop={handleCardDrop}
+              onDragEnd={() => {
+                setDraggingCardId(null);
+                setDragOverCardId(null);
+              }}
+            >
+              <ApiKeyProviderCard
+                providerId={key}
+                provider={info}
+                stats={getProviderStats(key, "apikey")}
+                authType="apikey"
+                onToggle={(active) => handleToggleProvider(key, "apikey", active)}
+              />
+            </DraggableCardWrapper>
           ))}
         </div>
         {!isApikeySearching && !showAllApikey && hiddenApikeyCount > 0 && (
@@ -763,6 +992,8 @@ export default function ProvidersPage() {
   );
 }
 
+// (Aliased to the shared DraggableCard at module top level.)
+
 function ProviderCard({ providerId, provider, stats, authType, onToggle, topologyVisible, onToggleTopology }) {
   const { connected, error, errorCode, errorTime, allDisabled } = stats;
   const isNoAuth = !!provider.noAuth;
@@ -817,7 +1048,7 @@ function ProviderCard({ providerId, provider, stats, authType, onToggle, topolog
                 {provider.name}
                 {provider.community && (
                   <Badge variant="warning" size="sm" className="shrink-0">
-                    {translate("Community")}
+                    {translate("Trial")}
                   </Badge>
                 )}
               </h3>
@@ -977,7 +1208,7 @@ function ApiKeyProviderCard({
                 {provider.name}
                 {provider.community && (
                   <Badge variant="warning" size="sm" className="shrink-0">
-                    {translate("Community")}
+                    {translate("Trial")}
                   </Badge>
                 )}
               </h3>

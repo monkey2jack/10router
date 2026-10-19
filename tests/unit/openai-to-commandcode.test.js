@@ -138,6 +138,56 @@ describe("openaiToCommandCodeRequest — assistant tool_calls / tool-call", () =
   });
 });
 
+describe("openaiToCommandCodeRequest — image blocks", () => {
+  it("converts an image_url data URI into a native {type:\"image\"} block", () => {
+    const dataUri = "data:image/png;base64,aGVsbG8=";
+    const out = openaiToCommandCodeRequest(MODEL, {
+      messages: [
+        { role: "user", content: [
+          { type: "text", text: "what is this" },
+          { type: "image_url", image_url: { url: dataUri } },
+        ] },
+      ],
+    }, true);
+
+    const blocks = out.params.messages[0].content;
+    expect(blocks[0]).toEqual({ type: "text", text: "what is this" });
+    expect(blocks[1]).toEqual({ type: "image", image: dataUri, mimeType: "image/png" });
+  });
+
+  it("converts a Claude base64 image source into the same native block", () => {
+    const out = openaiToCommandCodeRequest(MODEL, {
+      messages: [
+        { role: "user", content: [
+          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "anM=" } },
+        ] },
+      ],
+    }, true);
+
+    expect(out.params.messages[0].content[0]).toEqual({
+      type: "image",
+      image: "data:image/jpeg;base64,anM=",
+      mimeType: "image/jpeg",
+    });
+  });
+
+  it("keeps emitting content as an Array even when only an image is present", () => {
+    const out = openaiToCommandCodeRequest(MODEL, {
+      messages: [
+        { role: "user", content: [
+          { type: "image_url", image_url: { url: "data:image/webp;base64,YWJj" } },
+        ] },
+      ],
+    }, true);
+
+    const content = out.params.messages[0].content;
+    expect(Array.isArray(content)).toBe(true);
+    expect(content).toHaveLength(1);
+    expect(content[0].type).toBe("image");
+    expect(content[0].mimeType).toBe("image/webp");
+  });
+});
+
 describe("openaiToCommandCodeRequest — tools schema conversion", () => {
   it("converts OpenAI {type:\"function\", function:{...}} to Anthropic plain {name, input_schema}", () => {
     const out = openaiToCommandCodeRequest(MODEL, {

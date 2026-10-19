@@ -34,7 +34,9 @@ describe("provider quota visibility", () => {
       "claude",
     ]);
     expect(quotas[0].name).toBe("Gemini (Flash / Pro)");
-    expect(quotas[1].name).toBe("Claude (Sonnet / Opus)");
+    expect(quotas[1].name).toBe("Claude (Sonnet / Opus / GPT)");
+    expect(quotas[0].percentScale).toBe(true);
+    expect(quotas[1].percentScale).toBe(true);
   });
 
   it("shows all quotas by default and hides configured provider rows", () => {
@@ -193,19 +195,35 @@ describe("antigravity family grouping (multi-account)", () => {
       "gemini-3-pro": { displayName: "Gemini 3 Pro", used: 10, total: 100, remainingPercentage: 90, resetAt: null },
       "gemini-3-flash": { displayName: "Gemini 3 Flash", used: 50, total: 100, remainingPercentage: 50, resetAt: null },
       "claude-sonnet-5": { displayName: "Claude Sonnet 5", used: 80, total: 100, remainingPercentage: 20, resetAt: null },
-      "gemini-3-pro-image": { displayName: "Gemini 3 Pro Image", used: 1, total: 10, remainingPercentage: 90, resetAt: null },
+      "gemini-3-custom-image": { displayName: "Gemini 3 Custom Image", used: 1, total: 10, remainingPercentage: 90, resetAt: null },
     },
   };
 
   it("groups gemini/claude rows and keeps image models individual", () => {
     const quotas = parseQuotaData("antigravity", agyData);
     const names = quotas.map((q) => q.modelKey);
-    expect(names).toEqual(["gemini", "claude", "gemini-3-pro-image"]);
+    expect(names).toEqual(["gemini", "claude", "gemini-3-custom-image"]);
     // Group representative = most exhausted member of the family
     const gemini = quotas.find((q) => q.modelKey === "gemini");
     expect(gemini.remainingPercentage).toBe(50);
     const claude = quotas.find((q) => q.modelKey === "claude");
     expect(claude.remainingPercentage).toBe(20);
+  });
+
+  it("groups gpt-oss models into claude-gpt family and sets percentScale true", () => {
+    const dataWithGpt = {
+      quotas: {
+        "gpt-oss-120b-medium": { displayName: "GPT-OSS 120B (Medium)", used: 0, total: 1000, remainingPercentage: 100 },
+        "claude-sonnet-4-6": { displayName: "Claude Sonnet 4.6", used: 100, total: 1000, remainingPercentage: 90 },
+        "gemini-3.1-flash-image": { displayName: "Gemini 3.1 Flash Image", used: 0, total: 1000, remainingPercentage: 100 },
+      },
+    };
+    const quotas = parseQuotaData("antigravity", dataWithGpt);
+    expect(quotas.map((q) => q.modelKey)).toEqual(["gemini-3.1-flash-image", "claude"]);
+    expect(quotas[1].name).toBe("Claude (Sonnet / Opus / GPT)");
+    expect(quotas[1].remainingPercentage).toBe(90);
+    expect(quotas[0].percentScale).toBe(true);
+    expect(quotas[1].percentScale).toBe(true);
   });
 
   it("trimHiddenQuotaKeys drops stale keys per connection snapshot only", () => {
@@ -229,11 +247,11 @@ describe("antigravity family grouping (multi-account)", () => {
       connA: { hidden: ["gemini-3-pro", "gemini-3-flash"] }, // stale pre-grouping keys
     };
     const visible = filterQuotasByVisibility("connA", quotas, visibility);
-    expect(visible.map((q) => q.modelKey)).toEqual(["gemini", "claude", "gemini-3-pro-image"]);
+    expect(visible.map((q) => q.modelKey)).toEqual(["gemini", "claude", "gemini-3-custom-image"]);
     // Hiding the group hides just the group row, not the image model
     const hiddenGroup = filterQuotasByVisibility("connA", quotas, {
       connA: { hidden: ["gemini"] },
     });
-    expect(hiddenGroup.map((q) => q.modelKey)).toEqual(["claude", "gemini-3-pro-image"]);
+    expect(hiddenGroup.map((q) => q.modelKey)).toEqual(["claude", "gemini-3-custom-image"]);
   });
 });

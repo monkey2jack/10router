@@ -1,6 +1,8 @@
 "use client";
 
+import { useState } from "react";
 import { cn } from "@/shared/utils/cn";
+import { translate } from "@/i18n/runtime";
 
 export default function Input({
   label,
@@ -13,10 +15,16 @@ export default function Input({
   icon,
   disabled = false,
   required = false,
+  // Optional eye toggle for password fields: reveals the value as plain
+  // text while held on. Only meaningful with type="password" — the input
+  // keeps its real type otherwise.
+  reveal = false,
   className,
   inputClassName,
   ...props
 }) {
+  const [revealed, setRevealed] = useState(false);
+  const revealable = reveal && type === "password";
   return (
     <div className={cn("flex flex-col gap-1.5", className)}>
       {label && (
@@ -32,7 +40,7 @@ export default function Input({
           </div>
         )}
         <input
-          type={type}
+          type={revealable && revealed ? "text" : type}
           placeholder={placeholder}
           value={value}
           onChange={onChange}
@@ -45,11 +53,23 @@ export default function Input({
             // iOS zoom fix
             "text-[16px] sm:text-sm",
             icon && "pl-10",
+            revealable && "pr-11",
             error && "ring-1 ring-red-500 focus:ring-2 focus:ring-red-500/40 border-red-500/40",
             inputClassName
           )}
           {...props}
         />
+        {revealable && (
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-label={revealed ? translate("Hide password") : translate("Show password")}
+            onClick={() => setRevealed((v) => !v)}
+            className="absolute inset-y-0 right-0 flex items-center pr-3 text-text-muted hover:text-text-main transition-colors"
+          >
+            <span className="material-symbols-outlined text-[20px]">{revealed ? "visibility_off" : "visibility"}</span>
+          </button>
+        )}
       </div>
       {error && (
         <p className="text-xs text-red-500 flex items-center gap-1">

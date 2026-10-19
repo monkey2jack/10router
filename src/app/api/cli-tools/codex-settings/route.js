@@ -1,5 +1,3 @@
-"use server";
-
 import { NextResponse } from "next/server";
 import { exec } from "child_process";
 import { promisify } from "util";
@@ -7,6 +5,11 @@ import fs from "fs/promises";
 import path from "path";
 import os from "os";
 import { parseTOML, stringifyTOML } from "confbox";
+
+// Route Handlers already run on the server; a Server Action directive would
+// reject this export. force-dynamic so the status read reflects the on-disk
+// config instead of a cached render.
+export const dynamic = "force-dynamic";
 
 const execAsync = promisify(exec);
 
@@ -74,7 +77,7 @@ const readConfig = async () => {
 };
 
 // Check if config has 10Router settings
-const has9RouterConfig = (config) => {
+const has10RouterConfig = (config) => {
   if (!config) return false;
   return config.includes("model_provider = \"10router\"") || config.includes("[model_providers.10router]");
 };
@@ -97,7 +100,7 @@ export async function GET() {
     return NextResponse.json({
       installed: true,
       config,
-      has10Router: has9RouterConfig(config),
+      has10Router: has10RouterConfig(config),
       configPath: getCodexConfigPath(),
     });
   } catch (error) {

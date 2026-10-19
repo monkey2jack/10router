@@ -9,6 +9,7 @@ import { Card, Button, Modal, Input, CardSkeleton, ModelSelectModal, ConfirmModa
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
+import { aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
 import { translate } from "@/i18n/runtime";
 
 // Validate combo name: only a-z, A-Z, 0-9, -, _
@@ -22,7 +23,9 @@ const CAPACITY_ADAPTER_CAPS = [
   // pdf, videoInput temporarily hidden — no translator support yet for those blocks.
   { key: "audioInput", label: "Audio", icon: "graphic_eq", desc: "Audio input" },
 ];
-const DEFAULT_FALLBACK_MODEL = "oc/mimo-v2.5-free";
+// Kept in sync with capacityAdapter's DEFAULT_FALLBACK_MODEL — v2.5-free is
+// retiring; the live zen free list serves the v2.6 flash id.
+const DEFAULT_FALLBACK_MODEL = "oc/mimo-v2.6-flash-free";
 const EMPTY_CAP_ENTRY = { enabled: true, roundRobin: false, models: [] };
 const EMPTY_CAPACITY_ADAPTER = {
   vision: { ...EMPTY_CAP_ENTRY },
@@ -166,8 +169,10 @@ export default function CombosPage() {
     try {
       const updated = { ...comboStrategies };
       const next = { ...(updated[comboName] || {}), ...patch };
-      // Prune to keep settings clean: default fallback with no extras = no entry.
-      if (!next.fallbackStrategy || next.fallbackStrategy === "fallback") {
+      // Prune to keep settings clean: default strategy with no extras = no entry.
+      // retryOnEmpty is an extra that must survive the default "fallback" strategy.
+      const isDefaultStrategy = !next.fallbackStrategy || next.fallbackStrategy === "fallback";
+      if (isDefaultStrategy && !next.retryOnEmpty) {
         delete updated[comboName];
       } else {
         updated[comboName] = next;
@@ -229,20 +234,24 @@ export default function CombosPage() {
         </Card>
       ) : (
         <div className="flex flex-col gap-4">
-          {combos.map((combo) => (
-            <ComboCard
-              key={combo.id}
-              combo={combo}
-              getCaps={getCaps}
-              activeProviders={activeProviders}
-              copied={copied}
-              onCopy={copy}
-              onEdit={() => setEditingCombo(combo)}
-              onDelete={() => handleDelete(combo.id)}
-              strategy={comboStrategies[combo.name] || {}}
-              onSetStrategy={(patch) => handleSetComboStrategy(combo.name, patch)}
-            />
-          ))}
+          {(() => {
+            const comboByName = Object.fromEntries(combos.map((c) => [c.name, c.models]));
+            return combos.map((combo) => (
+              <ComboCard
+                key={combo.id}
+                combo={combo}
+                getCaps={getCaps}
+                comboByName={comboByName}
+                activeProviders={activeProviders}
+                copied={copied}
+                onCopy={copy}
+                onEdit={() => setEditingCombo(combo)}
+                onDelete={() => handleDelete(combo.id)}
+                strategy={comboStrategies[combo.name] || {}}
+                onSetStrategy={(patch) => handleSetComboStrategy(combo.name, patch)}
+              />
+            ));
+          })()}
         </div>
       )}
 
@@ -289,17 +298,30 @@ export default function CombosPage() {
   );
 }
 
+const fmtK = (n) => {
+  if (!n) return "?";
+  if (n >= 1000000) {
+    const m = n / 1000000;
+    return `${Number.isInteger(m) ? m : m.toFixed(1)}M`;
+  }
+  return `${Math.round(n / 1000)}k`;
+};
+
 const STRATEGY_OPTIONS = [
   { value: "fallback", label: "Fallback — try in order" },
   { value: "round-robin", label: "Round Robin — rotate" },
   { value: "fusion", label: "Fusion — panel + judge" },
 ];
 
-function ComboCard({ combo, getCaps, activeProviders = [], copied, onCopy, onEdit, onDelete, strategy = {}, onSetStrategy }) {
+function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], copied, onCopy, onEdit, onDelete, strategy = {}, onSetStrategy }) {
   const [showJudgeSelect, setShowJudgeSelect] = useState(false);
   const current = strategy.fallbackStrategy || "fallback";
   const judge = strategy.judgeModel || "";
   const isFusion = current === "fusion";
+  // The synced catalog is server-only, so resolving here would fall back to the
+  // generic patterns and under-report the limits. getCaps carries the server's
+  // answer for /api/models; the local tables still own tools/pdf/thinking*.
+  const comboCaps = aggregateComboCapabilities(combo.models, comboByName, getCaps);
 
   return (
     <Card padding="sm" className="group">
@@ -319,7 +341,11 @@ function ComboCard({ combo, getCaps, activeProviders = [], copied, onCopy, onEdi
                 combo.models.slice(0, 3).map((model, index) => (
                   <code key={index} className="inline-flex items-center gap-1 rounded bg-black/5 px-1.5 py-0.5 font-mono text-xs text-text-muted dark:bg-white/5">
                     <span>{model}</span>
-                    <CapacityBadges caps={getCaps?.(model)} />
+                    <CapacityBadges caps={
+                      comboByName[model]
+                        ? aggregateComboCapabilities(comboByName[model], comboByName, getCaps)
+                        : getCaps?.(model)
+                    } />
                   </code>
                 ))
               )}
@@ -327,6 +353,13 @@ function ComboCard({ combo, getCaps, activeProviders = [], copied, onCopy, onEdi
                 <span className="text-[10px] text-text-muted">+{combo.models.length - 3} {translate("more")}</span>
               )}
             </div>
+            {comboCaps && (
+              <div className="mt-1 flex items-center gap-2 text-[10px] text-text-muted">
+                <span>ctx {fmtK(comboCaps.contextWindow)}</span>
+                <span className="opacity-40">·</span>
+                <span>max {fmtK(comboCaps.maxOutput)}</span>
+              </div>
+            )}
             {/* Fusion: judge picker (Auto = first model) */}
             {isFusion && (
               <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
@@ -363,6 +396,21 @@ function ComboCard({ combo, getCaps, activeProviders = [], copied, onCopy, onEdi
               onChange={(e) => onSetStrategy({ fallbackStrategy: e.target.value })}
               selectClassName="py-1.5 text-xs"
             />
+            {/* Issue #10: opt-in empty-answer fallback. Fusion has its own quality
+                pipeline (panel + judge), so the toggle only shows for fallback/RR. */}
+            {current !== "fusion" && (
+              <label
+                className="mt-1 flex cursor-pointer items-center gap-1.5 text-[11px] text-text-muted"
+                title={translate("When the model returns an empty answer (content filter or zero output), fall through to the next model. The abandoned attempt still consumes its input tokens.")}
+              >
+                <Toggle
+                  size="sm"
+                  checked={!!strategy.retryOnEmpty}
+                  onChange={(v) => onSetStrategy({ retryOnEmpty: v })}
+                />
+                <span>{translate("Retry on empty")}</span>
+              </label>
+            )}
           </div>
 
           <div className="grid grid-cols-3 gap-1 sm:flex">
@@ -454,6 +502,13 @@ function CapacityAdapterCap({ cap, entry, onChange, activeProviders, getCaps }) 
     patch({ models: [...models, model.value] });
   };
 
+  // Modal checkbox unselect — keep the pool in sync, never empty (the adapter
+  // falls back to the free default when the last model leaves).
+  const handleDeselect = (model) => {
+    const next = models.filter((m) => m !== model.value);
+    patch({ models: next.length === 0 ? [DEFAULT_FALLBACK_MODEL] : next });
+  };
+
   const handleRemove = (index) => {
     const next = models.filter((_, i) => i !== index);
     patch({ models: next.length === 0 ? [DEFAULT_FALLBACK_MODEL] : next });
@@ -470,7 +525,7 @@ function CapacityAdapterCap({ cap, entry, onChange, activeProviders, getCaps }) 
   return (
     <Card padding="sm" className={`group ${!enabled ? "opacity-50" : ""}`}>
       <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        {/* Master toggle + icon + label + chips */}
+        {/* Master toggle + icon + label */}
         <div className="flex min-w-0 flex-1 items-start gap-2.5 sm:items-center">
           <Toggle
             checked={enabled}
@@ -484,33 +539,6 @@ function CapacityAdapterCap({ cap, entry, onChange, activeProviders, getCaps }) 
             <div className="flex items-center gap-1.5">
               <code className="font-mono text-sm font-medium">{cap.label}</code>
               <span className="text-[10px] text-text-muted">— {translate(cap.desc)}</span>
-            </div>
-            {/* This chip list is the adapter's only editor (hover reveals move
-                up/down + remove), so it must render every model: truncating it
-                would leave the 4th onward impossible to reorder or delete. */}
-            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
-              {models.length === 0 ? (
-                <span className="text-xs text-text-muted italic">{translate("No models")}</span>
-              ) : (
-                models.map((model, index) => (
-                  <code
-                    key={`${model}-${index}`}
-                    className="group/chip inline-flex items-center gap-1 rounded bg-black/5 px-1.5 py-0.5 font-mono text-xs text-text-muted dark:bg-white/5"
-                  >
-                    <span>{model}</span>
-                    <CapacityBadges caps={getCaps?.(model)} />
-                    <button onClick={() => handleMove(index, -1)} disabled={index === 0} className={`leading-none opacity-0 group-hover/chip:opacity-100 ${index === 0 ? "text-text-muted/20" : "text-text-muted hover:text-primary"}`}>
-                      <span className="material-symbols-outlined text-[12px]">arrow_upward</span>
-                    </button>
-                    <button onClick={() => handleMove(index, 1)} disabled={index === models.length - 1} className={`leading-none opacity-0 group-hover/chip:opacity-100 ${index === models.length - 1 ? "text-text-muted/20" : "text-text-muted hover:text-primary"}`}>
-                      <span className="material-symbols-outlined text-[12px]">arrow_downward</span>
-                    </button>
-                    <button onClick={() => handleRemove(index)} className="leading-none opacity-0 group-hover/chip:opacity-100 text-text-muted hover:text-red-500">
-                      <span className="material-symbols-outlined text-[12px]">close</span>
-                    </button>
-                  </code>
-                ))
-              )}
             </div>
           </div>
         </div>
@@ -539,11 +567,99 @@ function CapacityAdapterCap({ cap, entry, onChange, activeProviders, getCaps }) 
         </div>
       </div>
 
+      {/* Model pool table — the adapter's editor. One row per model with its
+          priority explicit, so long pools stay readable and reorderable (the
+          old hover-revealed chips cramped both). */}
+      {models.length === 0 ? (
+        <div className="mt-3 py-2 text-center text-xs text-text-muted italic">
+          {translate("No models in pool")} ({translate("will fallback to")} <code className="font-mono">{DEFAULT_FALLBACK_MODEL}</code>)
+        </div>
+      ) : (
+        <div className="mt-3 overflow-hidden rounded-lg border border-border/50">
+          <table className="w-full text-left text-xs">
+            <thead>
+              <tr className="border-b border-border/40 bg-black/[0.02] text-text-muted dark:bg-white/[0.02]">
+                <th className="w-12 px-3 py-1.5 text-center font-medium">#</th>
+                <th className="px-3 py-1.5 font-medium">{translate("Model")}</th>
+                <th className="w-24 px-3 py-1.5 text-center font-medium">{translate("Order")}</th>
+                <th className="w-12 px-3 py-1.5 text-right"></th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/30 font-mono">
+              {models.map((model, index) => (
+                <tr key={`${model}-${index}`} className="transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.02]">
+                  <td className="px-3 py-2 text-center font-sans text-[11px] text-text-muted">
+                    #{index + 1}
+                  </td>
+                  <td className="px-3 py-2 text-text-main">
+                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <span className="truncate">{model}</span>
+                      <CapacityBadges caps={getCaps?.(model)} />
+                      {model === DEFAULT_FALLBACK_MODEL && (
+                        <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-sans text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                          free default
+                        </span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="flex items-center justify-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => handleMove(index, -1)}
+                        disabled={!enabled || index === 0}
+                        className={`rounded p-1 transition-colors ${
+                          !enabled || index === 0
+                            ? "cursor-not-allowed text-text-muted/20"
+                            : "text-text-muted hover:bg-black/5 hover:text-primary dark:hover:bg-white/5"
+                        }`}
+                        title={translate("Move up")}
+                      >
+                        <span className="material-symbols-outlined text-[16px] leading-none">arrow_upward</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleMove(index, 1)}
+                        disabled={!enabled || index === models.length - 1}
+                        className={`rounded p-1 transition-colors ${
+                          !enabled || index === models.length - 1
+                            ? "cursor-not-allowed text-text-muted/20"
+                            : "text-text-muted hover:bg-black/5 hover:text-primary dark:hover:bg-white/5"
+                        }`}
+                        title={translate("Move down")}
+                      >
+                        <span className="material-symbols-outlined text-[16px] leading-none">arrow_downward</span>
+                      </button>
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    <button
+                      type="button"
+                      onClick={() => handleRemove(index)}
+                      disabled={!enabled}
+                      className={`rounded p-1 transition-colors ${
+                        !enabled
+                          ? "cursor-not-allowed text-text-muted/20"
+                          : "text-text-muted hover:bg-red-500/10 hover:text-red-500"
+                      }`}
+                      title={translate("Remove model")}
+                    >
+                      <span className="material-symbols-outlined text-[16px] leading-none">close</span>
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       {showModelSelect && (
         <ModelSelectModal
           isOpen={showModelSelect}
           onClose={() => setShowModelSelect(false)}
           onSelect={handleAdd}
+          onDeselect={handleDeselect}
           activeProviders={activeProviders}
           title={`Add ${cap.label} Model`}
           addedModelValues={models}

@@ -24,6 +24,7 @@ import {
   canonicalizeKiroConversation,
   normalizeKiroToolSpecs,
 } from "../concerns/kiroConversation.js";
+import { attachToolNameMap } from "../concerns/geminiTools.js";
 
 /**
  * Safely parse JSON string, returning fallback on failure.
@@ -291,7 +292,7 @@ function convertMessages(messages, model) {
 /**
  * Build Kiro payload from OpenAI format
  *
- * Two 9router-specific behaviours implemented here:
+ * Two 10Router-specific behaviours implemented here:
  *
  * 1. `-agentic` model suffix. Synthetic variant — same upstream model, but we
  *    inject a chunked-write system prompt to keep large file writes under
@@ -427,6 +428,12 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
     value: upstreamModel,
     enumerable: false
   });
+
+  // Same as claude-to-kiro: expose real renames as sanitized→original so
+  // chatCore can decloak the response side.
+  attachToolNameMap(payload, new Map(
+    [...nameMap].filter(([raw, clean]) => raw !== clean).map(([raw, clean]) => [clean, raw])
+  ));
 
   return payload;
 }

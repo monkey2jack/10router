@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   validateApiKey: vi.fn(),
   getConsistentMachineId: vi.fn(),
   verifyDashboardAuthToken: vi.fn(),
+  isDashboardAuthConfigured: vi.fn(() => true),
 }));
 
 vi.mock("next/server", () => ({
@@ -31,6 +32,9 @@ vi.mock("@/shared/utils/machineId", () => ({
 
 vi.mock("@/lib/auth/dashboardSession", () => ({
   verifyDashboardAuthToken: mocks.verifyDashboardAuthToken,
+  // Defaults to "a password is configured", which is the steady state: the
+  // bootstrap-loopback rule below only fires when nothing is configured at all.
+  isDashboardAuthConfigured: mocks.isDashboardAuthConfigured,
 }));
 
 const { proxy, __test__ } = await import("../../src/dashboardGuard.js");
@@ -50,13 +54,13 @@ function request(pathname, headers = {}) {
 // A request that actually came through custom-server.js: peer IP stamped from the TCP
 // socket and proven by the per-process secret.
 function localRequest(pathname, headers = {}) {
-  return request(pathname, { "x-9r-peer-token": PEER_TOKEN, "x-9r-real-ip": "127.0.0.1", ...headers });
+  return request(pathname, { "x-10r-peer-token": PEER_TOKEN, "x-10r-real-ip": "127.0.0.1", ...headers });
 }
 
 describe("dashboard guard public LLM API access", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    process.env.NINEROUTER_PEER_TOKEN = PEER_TOKEN;
+    process.env.TENROUTER_PEER_TOKEN = PEER_TOKEN;
     mocks.getSettings.mockResolvedValue({ requireLogin: true });
     mocks.validateApiKey.mockResolvedValue(false);
     mocks.getConsistentMachineId.mockResolvedValue("cli-token");
@@ -73,7 +77,7 @@ describe("dashboard guard public LLM API access", () => {
   it("rejects remote Host-spoof when real peer IP is non-loopback", async () => {
     const response = await proxy(localRequest("/v1/chat/completions", {
       host: "localhost",
-      "x-9r-real-ip": "10.204.111.34",
+      "x-10r-real-ip": "10.204.111.34",
     }));
 
     expect(response.status).toBe(401);
@@ -83,7 +87,7 @@ describe("dashboard guard public LLM API access", () => {
   it("allows loopback peer IP regardless of Host", async () => {
     const response = await proxy(localRequest("/v1/chat/completions", {
       host: "localhost:20128",
-      "x-9r-real-ip": "127.0.0.1",
+      "x-10r-real-ip": "127.0.0.1",
     }));
 
     expect(response).toBe(mocks.nextResponse);
@@ -219,7 +223,7 @@ describe("dashboard guard public LLM API access", () => {
 describe("dashboard guard local-only access", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    process.env.NINEROUTER_PEER_TOKEN = PEER_TOKEN;
+    process.env.TENROUTER_PEER_TOKEN = PEER_TOKEN;
     mocks.getSettings.mockResolvedValue({ requireLogin: true });
     mocks.validateApiKey.mockResolvedValue(false);
     mocks.getConsistentMachineId.mockResolvedValue("cli-token");
@@ -280,8 +284,179 @@ describe("dashboard guard local-only access", () => {
   it("allows local-only route with valid CLI token", async () => {
     const response = await proxy(request("/api/mcp/filesystem/sse", {
       host: "router.example.com",
+      "x-10r-cli-token": "cli-token",
+    }));
+
+    expect(response).toBe(mocks.nextResponse);
+  });
+
+  // Installed CLI launchers / sync plugins that predate the x-10r rename still
+  // send only the old header — it must keep authenticating.
+  it("still accepts the legacy x-9r-cli-token header", async () => {
+    const response = await proxy(request("/api/mcp/filesystem/sse", {
+      host: "router.example.com",
       "x-9r-cli-token": "cli-token",
     }));
+
+    expect(response).toBe(mocks.nextResponse);
+  });
+
+  it("validates the token value under either name (wrong legacy value is refused)", async () => {
+    const response = await proxy(request("/api/mcp/filesystem/sse", {
+      host: "router.example.com",
+      "x-9r-cli-token": "wrong",
+    }));
+
+    expect(response.status).toBe(403);
+  });
+});
+
+describe("dashboard guard xiaomi-mimo auto-import (credential-bearing, P1)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.TENROUTER_PEER_TOKEN = PEER_TOKEN;
+    mocks.getSettings.mockResolvedValue({ requireLogin: false });
+    mocks.validateApiKey.mockResolvedValue(false);
+    mocks.getConsistentMachineId.mockResolvedValue("cli-token");
+    mocks.verifyDashboardAuthToken.mockResolvedValue(false);
+  });
+
+  it("rejects remote request outright (local-only gate)", async () => {
+    const response = await proxy(request("/api/oauth/xiaomi-mimo/auto-import", {
+      host: "router.example.com",
+    }));
+
+    expect(response.status).toBe(403);
+    expect(response.body.error).toBe("Local only: CLI token required");
+  });
+
+  it("allows loopback with requireLogin=false (same-machine bypass for desktop detection)", async () => {
+    const response = await proxy(localRequest("/api/oauth/xiaomi-mimo/auto-import", {
+      host: "localhost:20128",
+      origin: "http://localhost:20128",
+    }));
+
+    expect(response).toBe(mocks.nextResponse);
+  });
+
+  it("rejects loopback with requireLogin=true and no JWT/CLI token", async () => {
+    mocks.getSettings.mockResolvedValue({ requireLogin: true });
+
+    const response = await proxy(localRequest("/api/oauth/xiaomi-mimo/auto-import", {
+      host: "localhost:20128",
+      origin: "http://localhost:20128",
+    }));
+
+    expect(response.status).toBe(403);
+  });
+
+  it("allows loopback with a valid JWT cookie", async () => {
+    mocks.verifyDashboardAuthToken.mockResolvedValue(true);
+
+    const response = await proxy(localRequest("/api/oauth/xiaomi-mimo/auto-import", {
+      host: "localhost:20128",
+      origin: "http://localhost:20128",
+    }));
+
+    expect(response).toBe(mocks.nextResponse);
+  });
+
+  it("allows remote request with a valid CLI token", async () => {
+    const response = await proxy(request("/api/oauth/xiaomi-mimo/auto-import", {
+      host: "router.example.com",
+      "x-10r-cli-token": "cli-token",
+    }));
+
+    expect(response).toBe(mocks.nextResponse);
+  });
+});
+
+describe("dashboard guard bootstrap state (no password configured)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.TENROUTER_PEER_TOKEN = PEER_TOKEN;
+    // The state itself: getSettings has no password hash and no SSO keys.
+    mocks.getSettings.mockResolvedValue({ requireLogin: true });
+    mocks.validateApiKey.mockResolvedValue(false);
+    mocks.getConsistentMachineId.mockResolvedValue("cli-token");
+    mocks.verifyDashboardAuthToken.mockResolvedValue(false);
+    mocks.isDashboardAuthConfigured.mockReturnValue(false);
+  });
+
+  it("lets the loopback operator into the dashboard so a password can be set", async () => {
+    const response = await proxy(localRequest("/dashboard/profile", { host: "localhost:20128" }));
+
+    expect(response).toBe(mocks.nextResponse);
+  });
+
+  it("lets loopback management APIs through (the bootstrap UI needs them)", async () => {
+    const response = await proxy(localRequest("/api/settings", { host: "localhost:20128" }));
+
+    expect(response).toBe(mocks.nextResponse);
+  });
+
+  it("still redirects a remote client to the login page (which explains why)", async () => {
+    const response = await proxy(request("/dashboard", { host: "router.example.com" }));
+
+    expect(response.status).toBe(307);
+    expect(String(response.url)).toContain("/login");
+  });
+
+  it("still refuses remote management APIs — there is no secret to present", async () => {
+    const response = await proxy(request("/api/settings", { host: "router.example.com" }));
+
+    expect(response.status).toBe(401);
+    expect(response.body.error).toBe("Unauthorized");
+  });
+
+  it("keeps the public LLM API on its own API-key auth (unaffected by bootstrap)", async () => {
+    mocks.validateApiKey.mockResolvedValue(true);
+
+    const response = await proxy(request("/v1/chat/completions", {
+      host: "router.example.com",
+      authorization: "Bearer sk-valid",
+    }));
+
+    expect(response).toBe(mocks.nextResponse);
+  });
+});
+
+describe("dashboard guard dashboardLocalOnly switch", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.TENROUTER_PEER_TOKEN = PEER_TOKEN;
+    mocks.getSettings.mockResolvedValue({ requireLogin: true, password: "$2a$hash", dashboardLocalOnly: true });
+    mocks.validateApiKey.mockResolvedValue(false);
+    mocks.getConsistentMachineId.mockResolvedValue("cli-token");
+    mocks.verifyDashboardAuthToken.mockResolvedValue(true);
+  });
+
+  it("refuses a remote dashboard request even with a valid session cookie", async () => {
+    const response = await proxy(request("/dashboard", { host: "router.example.com" }));
+
+    expect(response.status).toBe(403);
+    expect(String(response.body.error)).toContain("local-only");
+  });
+
+  it("refuses remote management APIs", async () => {
+    const response = await proxy(request("/api/providers", { host: "router.example.com" }));
+
+    expect(response.status).toBe(403);
+  });
+
+  it("still serves the LLM API to remote callers — keys, not the dashboard switch", async () => {
+    mocks.validateApiKey.mockResolvedValue(true);
+
+    const response = await proxy(request("/v1/chat/completions", {
+      host: "router.example.com",
+      authorization: "Bearer sk-valid",
+    }));
+
+    expect(response).toBe(mocks.nextResponse);
+  });
+
+  it("leaves loopback access untouched", async () => {
+    const response = await proxy(localRequest("/dashboard", { host: "localhost:20128" }));
 
     expect(response).toBe(mocks.nextResponse);
   });

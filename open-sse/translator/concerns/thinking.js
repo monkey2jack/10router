@@ -41,7 +41,10 @@ export function budgetToLevel(budget) {
   if (b <= 4096) return "low";
   if (b <= 16384) return "medium";
   if (b <= 28672) return "high";
-  return "xhigh";
+  // Thresholds are midpoints between LEVEL_TO_BUDGET values: max (128000) is
+  // reachable, with the xhigh/max boundary at the 32768/128000 midpoint (80384).
+  if (b <= 80384) return "xhigh";
+  return "max";
 }
 
 // Gemini thinkingBudget (numeric) → OpenAI reasoning_effort (antigravity reverse map).

@@ -2,8 +2,28 @@
 //
 // Fallback order (first match wins):
 //   1. PROVIDER_PRICING[provider][model]  — provider-specific override
-//   2. MODEL_PRICING[model]               — canonical model price (provider-agnostic)
-//   3. PATTERN_PRICING                    — glob pattern match (e.g. "codex-*")
+//   2. FREE_MODEL_NAMESPACES               — upstream bills these at $0
+//   3. MODEL_PRICING[model]               — canonical model price (provider-agnostic)
+//   4. PATTERN_PRICING                    — glob pattern match (e.g. "codex-*")
+
+/**
+ * Namespaces upstream meters at $0. A free model must never inherit a paid
+ * rate: the vendor-prefix strip in getPricingForModel() would turn
+ * "cline-free/deepseek-v4.1-flash" into "deepseek-v4.1-flash" and match
+ * MODEL_PRICING, so the namespace is checked before both fallbacks.
+ */
+export const FREE_MODEL_NAMESPACES = ["cline-free/"];
+
+export const ZERO_PRICING = {
+  input: 0, output: 0, cached: 0, reasoning: 0, cache_creation: 0,
+};
+
+/** True when the model id sits in a namespace upstream bills at $0. */
+export function isFreeModel(model) {
+  if (!model) return false;
+  const lower = String(model).toLowerCase();
+  return FREE_MODEL_NAMESPACES.some((ns) => lower.startsWith(ns));
+}
 
 /**
  * Canonical model pricing — provider-agnostic.
@@ -53,11 +73,21 @@ export const MODEL_PRICING = {
   "gpt-5.6-luna":                 { input: 1.00,  output: 6.00,  cached: 0.10,  reasoning: 6.00,   cache_creation: 1.00  },
   "gpt-5.6-terra":                { input: 2.50,  output: 15.00, cached: 0.25,  reasoning: 15.00,  cache_creation: 2.50  },
   "gpt-5.6-sol":                  { input: 5.00,  output: 30.00, cached: 0.50,  reasoning: 30.00,  cache_creation: 5.00  },
-  "gpt-6-astra":                  { input: 5.00,  output: 30.00, cached: 0.50,  reasoning: 30.00,  cache_creation: 5.00  },
+  // OpenAI Standard 短上下文官方价（developers.openai.com/api/docs/pricing）。
+  // 长上下文档更贵，但本表一模型只存一档价（上游 92c7bdd5 / dec820b9 同口径）。
+  "gpt-6-astra":                  { input: 10.00, output: 50.00, cached: 1.00,  reasoning: 50.00,  cache_creation: 12.50 },
+  "gpt-6.1-sol":                  { input: 2.00,  output: 10.00, cached: 0.10,  reasoning: 10.00,  cache_creation: 2.50  },
+  "gpt-6-sol":                    { input: 2.00,  output: 10.00, cached: 0.20,  reasoning: 10.00,  cache_creation: 2.50  },
+  "gpt-6-luna":                   { input: 0.10,  output: 0.50,  cached: 0.01,  reasoning: 0.50,   cache_creation: 0.125 },
   "o1":                           { input: 15.00, output: 60.00, cached: 7.50,  reasoning: 90.00,  cache_creation: 15.00 },
   "o1-mini":                      { input: 3.00,  output: 12.00, cached: 1.50,  reasoning: 18.00,  cache_creation: 3.00  },
 
   // === Gemini ===
+  // Gemini 4 "Argon" (2026-09-30). Input/output confirmed via Artificial
+  // Analysis. cached / reasoning / cache_creation are not published yet, so
+  // they are left off rather than guessed: entries are returned verbatim, and
+  // a fabricated 0 there would silently mis-bill cached and reasoning tokens.
+  "gemini-4-argon":                 { input: 2.00,  output: 10.00 },
   "gemini-3.8-flash":              { input: 1.50,  output: 7.50,  cached: 0.15,  reasoning: 11.25,  cache_creation: 1.875 },
   "gemini-3.8-flash-high":         { input: 1.50,  output: 7.50,  cached: 0.15,  reasoning: 11.25,  cache_creation: 1.875 },
   "gemini-3.8-flash-medium":       { input: 1.50,  output: 7.50,  cached: 0.15,  reasoning: 11.25,  cache_creation: 1.875 },
@@ -86,6 +116,28 @@ export const MODEL_PRICING = {
   "gemini-2.5-flash-lite":        { input: 0.15,  output: 1.25,  cached: 0.015, reasoning: 1.875,  cache_creation: 0.15  },
 
   // === Qwen ===
+  // Source: Alibaba Cloud Model Studio「Model inference pricing」(intl, USD/1M tokens),
+  // fetched 2026-09-24. Base-tier prices (flagship tiers have no tiering; Plus/
+  // Flash long-context tiers, where they exist, are 2-3× — same convention as the
+  // other tiered entries here). cached / cache_creation follow that doc's explicit
+  // cache: hit = 10% of input, creation = 125% of input. reasoning = thinking-mode
+  // output where the table separates it (qwen-plus legacy).
+  "qwen3.8-max":                  { input: 2.00,  output: 6.00,  cached: 0.20,  reasoning: 6.00,   cache_creation: 2.50  },
+  "qwen3.8-max-0902":             { input: 2.00,  output: 6.00,  cached: 0.20,  reasoning: 6.00,   cache_creation: 2.50  },
+  "qwen3.7-max":                  { input: 2.50,  output: 7.50,  cached: 0.25,  reasoning: 7.50,   cache_creation: 3.13  },
+  "qwen3.7-max-2026-05-20":       { input: 2.50,  output: 7.50,  cached: 0.25,  reasoning: 7.50,   cache_creation: 3.13  },
+  "qwen3.7-plus":                 { input: 0.40,  output: 1.60,  cached: 0.04,  reasoning: 1.60,   cache_creation: 0.50  },
+  "qwen3.6-plus":                 { input: 0.50,  output: 3.00,  cached: 0.05,  reasoning: 3.00,   cache_creation: 0.63  },
+  "qwen3.5-plus":                 { input: 0.40,  output: 2.40,  cached: 0.04,  reasoning: 2.40,   cache_creation: 0.50  },
+  "qwen-plus":                    { input: 0.40,  output: 1.20,  cached: 0.04,  reasoning: 4.00,   cache_creation: 0.50  },
+  "qwen3.8-flash":                { input: 0.15,  output: 0.47,  cached: 0.015, reasoning: 0.47,   cache_creation: 0.19  },
+  "qwen3.6-flash":                { input: 0.25,  output: 1.50,  cached: 0.025, reasoning: 1.50,   cache_creation: 0.31  },
+  "qwen3.5-flash":                { input: 0.10,  output: 0.40,  cached: 0.01,  reasoning: 0.40,   cache_creation: 0.13  },
+  "qwen-flash":                   { input: 0.05,  output: 0.40,  cached: 0.005, reasoning: 0.40,   cache_creation: 0.06  },
+  // 已知边界：qwen3.5-omni-plus / qwen3.8-omni-* 按模态分段计价（文本/音频/图像各异），
+  // 平铺 {input,output} 会系统性算错 → 刻意保持无价（audit-pricing 豁免表注明），
+  // 宁可 $0 + 可解释，不要一个看着可信的错数。qwen3.8-flash-next 是 opencode-go
+  // 渠道别名、无官方价目，同样豁免。
   "qwen3-coder-plus":             { input: 1.00,  output: 4.00,  cached: 0.50,  reasoning: 6.00,   cache_creation: 1.00  },
   "qwen3-coder-flash":            { input: 0.50,  output: 2.00,  cached: 0.25,  reasoning: 3.00,   cache_creation: 0.50  },
 
@@ -132,6 +184,46 @@ export const MODEL_PRICING = {
   // === Grok ===
   "grok-code-fast-1":             { input: 0.50,  output: 2.00,  cached: 0.25,  reasoning: 3.00,   cache_creation: 0.50  },
 
+  // === Muse (Meta Model API) ===
+  // 价格取自 https://dev.meta.ai/docs/pricing-rate-limits（contributor 档更
+  // 便宜，代价是 Meta 可用数据训练）；数值录入自上游 decolua/9router 28809807。
+  "muse-spark-1.3":                { input: 1.25, output: 4.25, cached: 0.15,  reasoning: 4.25,   cache_creation: 0 },
+  "muse-spark-1.2":                { input: 1.25, output: 4.25, cached: 0.15,  reasoning: 4.25,   cache_creation: 0 },
+  "muse-spark-1.1":                { input: 1.25, output: 4.25, cached: 0.15,  reasoning: 4.25,   cache_creation: 0 },
+  "muse-spark-1.3-contributor":    { input: 0.10, output: 0.20, cached: 0.002, reasoning: 0.20,   cache_creation: 0 },
+  "muse-spark-1.2-contributor":    { input: 0.10, output: 0.20, cached: 0.002, reasoning: 0.20,   cache_creation: 0 },
+
+  // === Xiaomi MiMo ===
+  // Official price page (mimo.mi.com/static/docs/price/pay-as-you-go.md, fetched
+  // 2026-09-22), overseas table — this file is $/1M tokens, and the page's
+  // domestic table is RMB, so the USD column is the one that belongs here.
+  // First-party ids are bare (`mimo-v2.6-pro`) on both xiaomi-mimo and
+  // xiaomi-tokenplan, so one canonical entry prices both cards; resellers that
+  // prefix their ids (`xiaomi/mimo-…`) keep their own PROVIDER_PRICING rows.
+  // Until now no first-party MiMo model had any price at all — getPricingForModel
+  // returned null for mimo-v2.5-pro too — so usage against these cards reported
+  // no cost. The retiring V2.5 pair is deliberately NOT backfilled: the page
+  // prices v2.5-pro with v2.6-pro and v2.5 with v2.6-flash, but adding them now
+  // would start reporting costs for historical usage that never showed one.
+  // reasoning == output: upstream bills thinking tokens as output
+  // (max_completion_tokens covers thinking + answer together).
+  //
+  // These are pay-as-you-go rates. They also resolve for xiaomi-tokenplan (same
+  // bare ids), but Token Plan is a flat Credits subscription — $6/$16/$50/$100
+  // per month for Lite/Standard/Pro/Max — so a cost shown against a tp-
+  // connection is a pay-as-you-go equivalent, not what that user was charged.
+  "mimo-v2.6-pro":                { input: 0.435, output: 0.87,  cached: 0.0036, reasoning: 0.87  },
+  // Token Plan 的 Claude 原生变体：upstreamModelId 就是 mimo-v2.6-pro，费率必须相同。
+  // 显式建行与 capabilities.js 同理 —— 缺了它，该 id 既无按量估价（成本恒 $0），
+  // 也逃不开别处的通配兜底拿错价。
+  "mimo-v2.6-pro-claude":         { input: 0.435, output: 0.87,  cached: 0.0036, reasoning: 0.87  },
+  "mimo-v2.6-flash":              { input: 0.14,  output: 0.28,  cached: 0.0028, reasoning: 0.28  },
+  // 定制服务 upstream (contact sales). The cloud + Token Plan cards list it so a
+  // contracted user gets it out of the box; a key without the contract just errors.
+  // Real-time rates — Batch API is exactly half of these, and ultraspeed does not
+  // support Batch at all.
+  "mimo-v2.6-pro-ultraspeed":     { input: 4.35,  output: 8.70,  cached: 0.036,  reasoning: 8.70  },
+
   // === OpenRouter fallback ===
   "auto":                         { input: 2.00,  output: 8.00,  cached: 1.00,  reasoning: 12.00,  cache_creation: 2.00  },
 
@@ -151,6 +243,15 @@ export const PROVIDER_PRICING = {
   // GitHub Copilot (gh) — explicit override, matches canonical gpt-5.3-codex rate
   gh: {
     "gpt-5.3-codex": { input: 1.75, output: 14.00, cached: 0.175, reasoning: 14.00, cache_creation: 1.75 },
+  },
+  // SiliconFlow 中国区 (issue #19-3) — 官方价目 ¥/1M ÷ 7.15 → $/1M
+  // (https://siliconflow.cn/pricing, 2026-09-16)。key 用 SF 原始 id(含 org 前缀、
+  // 原大小写)——查不到的长尾模型由用户侧「导入 /models」目录 + 手工定价覆盖。
+  "siliconflow-cn": {
+    "deepseek-ai/DeepSeek-V3.2": { input: 0.56, output: 0.85, cached: 0.06, reasoning: 0.85 },
+    "deepseek-ai/DeepSeek-V4-Pro": { input: 1.68, output: 3.36, cached: 0.14, reasoning: 3.36 },
+    "deepseek-ai/DeepSeek-V4-Flash": { input: 0.21, output: 0.63, cached: 0.02, reasoning: 0.63 },
+    "moonshotai/Kimi-K2.6": { input: 0.91, output: 3.78, cached: 0.15, reasoning: 3.78 },
   },
   // TokenRouter — exact rates from https://api.tokenrouter.com/api/pricing ($1/1M tokens).
   // Ratio→USD: input = model_ratio×2, output = model_ratio×completion_ratio×2.
@@ -378,12 +479,15 @@ export function getPricingForModel(provider, model) {
     return PROVIDER_PRICING[provider][model];
   }
 
-  // 2. Canonical model pricing (strip vendor prefix if needed: "deepseek/deepseek-chat" → "deepseek-chat")
+  // 2. Free namespaces bill $0 regardless of the model name behind them.
+  if (isFreeModel(model)) return ZERO_PRICING;
+
+  // 3. Canonical model pricing (strip vendor prefix if needed: "deepseek/deepseek-chat" → "deepseek-chat")
   const baseModel = model.includes("/") ? model.split("/").pop() : model;
   if (MODEL_PRICING[baseModel]) return MODEL_PRICING[baseModel];
   if (MODEL_PRICING[model]) return MODEL_PRICING[model];
 
-  // 3. Pattern match
+  // 4. Pattern match
   for (const { pattern, pricing } of PATTERN_PRICING) {
     if (matchPattern(pattern, baseModel) || matchPattern(pattern, model)) {
       return pricing;

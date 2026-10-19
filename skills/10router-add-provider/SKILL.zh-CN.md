@@ -34,6 +34,7 @@ AUTH="Authorization: Bearer ${TENROUTER_KEY}"    # TENROUTER_KEY = dashboard LLM
 
 > 部署者也可在 NAS 上从 `machine-id` + `cli-secret` 推演 CLI token：
 > `sha256(machine-id + "9r-cli-auth" + cli-secret).slice(0,16)`，salt 固定 `9r-cli-auth`。
+> 放在请求头 `x-10r-cli-token` 里（不是 `Authorization: Bearer`）；改名前的老服务端读 `x-9r-cli-token`。
 > 自定义数据的实际路径见你的 DATA_DIR（`~/.10router/` 或 fnOS 的 `/vol4/@appdata/10router/`）。
 
 ## 两步注册流程

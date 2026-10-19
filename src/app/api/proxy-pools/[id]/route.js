@@ -5,6 +5,7 @@ import {
   getProxyPoolById,
   updateProxyPool,
 } from "@/models";
+import { proxyPoolUrlError } from "@/lib/network/outboundProxy.js";
 
 function normalizeProxyPoolUpdate(body = {}) {
   const updates = {};
@@ -21,6 +22,10 @@ function normalizeProxyPoolUpdate(body = {}) {
     const proxyUrl = typeof body?.proxyUrl === "string" ? body.proxyUrl.trim() : "";
     if (!proxyUrl) {
       return { error: "Proxy URL is required" };
+    }
+    const proxyUrlError = proxyPoolUrlError(proxyUrl);
+    if (proxyUrlError) {
+      return { error: proxyUrlError };
     }
     updates.proxyUrl = proxyUrl;
   }

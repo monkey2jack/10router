@@ -127,7 +127,7 @@ function mapKimchiMetadata(raw) {
 }
 
 describe("kimchiModels", () => {
-  it("maps Kimchi metadata entries to 9router model shape", () => {
+  it("maps Kimchi metadata entries to 10Router model shape", () => {
     const raw = [{
       slug: "glm-5.2-fp8",
       display_name: "GLM 5.2",

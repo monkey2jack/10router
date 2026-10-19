@@ -11,6 +11,10 @@
   "utils.modelSelector.combosHeader": "[Combos]",
   "utils.modelSelector.cancelOption": "  0. Cancel\n",
   "utils.modelSelector.enterNumber": "Enter number: ",
+  "utils.modelSelector.noProvidersHeader": "\n  No connected providers found.",
+  "utils.modelSelector.connectHint": "  Please connect a provider in Providers menu first.\n",
+  "utils.modelSelector.customOption": "  m. ✍️  Enter custom model ID",
+  "utils.modelSelector.enterCustom": "Enter custom model ID: ",
 
   "utils.format.invalidDate": "Invalid Date",
   "utils.format.justNow": "just now",

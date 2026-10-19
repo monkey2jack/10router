@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Card, Button, Toggle, Input } from "@/shared/components";
 import Modal, { ConfirmModal } from "@/shared/components/Modal";
+import { SECURITY_STATUS_CHANGED } from "@/shared/components/SecurityBanner";
 import LanguageSwitcher from "@/shared/components/LanguageSwitcher";
 import { useTheme } from "@/shared/hooks/useTheme";
 import { cn } from "@/shared/utils/cn";
@@ -10,6 +11,8 @@ import { APP_CONFIG } from "@/shared/constants/config";
 import { LOCALE_COOKIE, normalizeLocale } from "@/i18n/config";
 import { LOCALE_FLAGS } from "@/shared/constants/locales";
 import { isRegionalCurrencyEnabled } from "@/shared/utils/currency";
+import { isCompactUnitsEnabled } from "@/shared/utils/compactNumber";
+import { copyTextToClipboard } from "@/shared/utils/clipboard";
 import { translate } from "@/i18n/runtime";
 
 function getLocaleFromCookie() {
@@ -25,8 +28,22 @@ export default function ProfilePage() {
   const { theme, setTheme, isDark } = useTheme();
   const [locale, setLocale] = useState(() => getLocaleFromCookie());
   const [regional, setRegional] = useState(true);
+  const [compactUnits, setCompactUnits] = useState(true);
   const [langOpen, setLangOpen] = useState(false);
   const [shutdownOpen, setShutdownOpen] = useState(false);
+  // Turning the login check off is a one-click way to publish every provider and
+  // credential to anyone who can route to this port (issue #9, item 4), so it
+  // goes through a confirmation the way "require API key" already does.
+  const [loginOffConfirmOpen, setLoginOffConfirmOpen] = useState(false);
+  const [bannerHideConfirmOpen, setBannerHideConfirmOpen] = useState(false);
+  // Turning the log-in check on without a password of your own (issue #33): set
+  // one here and enable the check in the same request.
+  const [loginOnPassword, setLoginOnPassword] = useState({ open: false, value: "", confirm: "", error: "", loading: false });
+  const [updateCheckStatus, setUpdateCheckStatus] = useState({ loading: false, message: "", type: "" });
+  // Last explicit check's result (only what the desktop-shell handoff needs):
+  // hasUpdate + which install channel this server was launched by.
+  const [updateInfo, setUpdateInfo] = useState(null);
+  const [shellNotifyStatus, setShellNotifyStatus] = useState({ loading: false, message: "", type: "" });
   const [isShuttingDown, setIsShuttingDown] = useState(false);
   const [settings, setSettings] = useState({ fallbackStrategy: "fill-first" });
   const [loading, setLoading] = useState(true);
@@ -97,6 +114,7 @@ export default function ProfilePage() {
   useEffect(() => {
     setLocale(getLocaleFromCookie());
     setRegional(isRegionalCurrencyEnabled());
+    setCompactUnits(isCompactUnitsEnabled());
   }, [langOpen]);
 
   const toggleCurrency = () => {
@@ -107,21 +125,12 @@ export default function ProfilePage() {
     setRegional(next);
   };
 
-  const toggleProviderDisabledLastSort = async () => {
-    const next = !(settings.providerDisabledLastSort === true);
-    try {
-      const res = await fetch("/api/settings", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ providerDisabledLastSort: next }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setSettings((prev) => ({ ...prev, ...data }));
-      }
-    } catch (error) {
-      console.log("Error toggling provider disabled-last sort:", error);
+  const toggleCompactUnits = () => {
+    const next = !isCompactUnitsEnabled();
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("compactUnits", next ? "1" : "0");
     }
+    setCompactUnits(next);
   };
 
   const toggleShowCommunityProviders = async () => {
@@ -139,40 +148,6 @@ export default function ProfilePage() {
       }
     } catch (error) {
       console.log("Error toggling show-community-providers:", error);
-    }
-  };
-
-  const toggleCodeBuddyOAuthImport = async () => {
-    const next = !(settings.codeBuddyOAuthImport === true);
-    try {
-      const res = await fetch("/api/settings", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ codeBuddyOAuthImport: next }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setSettings((prev) => ({ ...prev, ...data }));
-      }
-    } catch (error) {
-      console.log("Error toggling codebuddy OAuth import:", error);
-    }
-  };
-
-  const toggleCodeBuddyCheckin = async () => {
-    const next = !(settings.codeBuddyCheckin === true);
-    try {
-      const res = await fetch("/api/settings", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ codeBuddyCheckin: next }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setSettings((prev) => ({ ...prev, ...data }));
-      }
-    } catch (error) {
-      console.log("Error toggling codebuddy auto check-in:", error);
     }
   };
 
@@ -318,6 +293,10 @@ export default function ProfilePage() {
 
   const handlePasswordChange = async (e) => {
     e.preventDefault();
+    if (!passwords.new.trim()) {
+      setPassStatus({ type: "error", message: translate("Password cannot be empty") });
+      return;
+    }
     if (passwords.new !== passwords.confirm) {
       setPassStatus({ type: "error", message: "Passwords do not match" });
       return;
@@ -424,11 +403,125 @@ export default function ProfilePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ requireLogin }),
       });
+      if (!res.ok) {
+        // No password of your own yet: the server refuses rather than lock you out
+        // behind the hidden first-login password. Ask for one instead.
+        const data = await res.json().catch(() => ({}));
+        if (data?.code === "PASSWORD_REQUIRED") setLoginOnPassword({ open: true, value: "", confirm: "", error: "", loading: false });
+        return;
+      }
       if (res.ok) {
-        setSettings(prev => ({ ...prev, requireLogin }));
+        // Server clears hideLoginOffBanner when the check goes back on — mirror it.
+        setSettings(prev => ({ ...prev, requireLogin, ...(requireLogin ? { hideLoginOffBanner: false } : {}) }));
+        window.dispatchEvent(new Event(SECURITY_STATUS_CHANGED));
       }
     } catch (err) {
       console.error("Failed to update require login:", err);
+    }
+  };
+
+  const enableLoginWithPassword = async () => {
+    const { value, confirm } = loginOnPassword;
+    if (!value.trim()) {
+      setLoginOnPassword((s) => ({ ...s, error: translate("Password cannot be empty") }));
+      return;
+    }
+    if (value !== confirm) {
+      setLoginOnPassword((s) => ({ ...s, error: translate("Passwords do not match") }));
+      return;
+    }
+    setLoginOnPassword((s) => ({ ...s, loading: true, error: "" }));
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ newPassword: value, requireLogin: true }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setLoginOnPassword((s) => ({ ...s, loading: false, error: data?.error || translate("Failed to update password") }));
+        return;
+      }
+      setSettings((prev) => ({ ...prev, requireLogin: true, hasPassword: true, hideLoginOffBanner: false }));
+      setLoginOnPassword({ open: false, value: "", confirm: "", error: "", loading: false });
+      window.dispatchEvent(new Event(SECURITY_STATUS_CHANGED));
+    } catch {
+      setLoginOnPassword((s) => ({ ...s, loading: false, error: translate("An error occurred") }));
+    }
+  };
+
+  const updateAutoUpdateCheck = async (autoUpdateCheck) => {
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ autoUpdateCheck }),
+      });
+      if (res.ok) {
+        setSettings(prev => ({ ...prev, autoUpdateCheck }));
+        setUpdateCheckStatus({ loading: false, message: "", type: "" });
+      }
+    } catch (err) {
+      console.error("Failed to update automatic update check:", err);
+    }
+  };
+
+  // Explicit check — works with automatic checks off (?check=1 asks the registry now).
+  const checkForUpdatesNow = async () => {
+    setUpdateCheckStatus({ loading: true, message: "", type: "" });
+    setUpdateInfo(null);
+    setShellNotifyStatus({ loading: false, message: "", type: "" });
+    try {
+      const res = await fetch("/api/version?check=1", { cache: "no-store" });
+      const data = res.ok ? await res.json() : null;
+      if (!data?.latestVersion) {
+        setUpdateCheckStatus({ loading: false, type: "error", message: translate("Could not reach the update server. Try again later.") });
+      } else if (data.hasUpdate) {
+        setUpdateCheckStatus({ loading: false, type: "info", message: translate("New version available: v${latest} (installed v${current})").replace("${latest}", data.latestVersion).replace("${current}", data.currentVersion) });
+        setUpdateInfo({ latestVersion: data.latestVersion, installChannel: data.installChannel || "" });
+      } else {
+        setUpdateCheckStatus({ loading: false, type: "ok", message: translate("You are on the latest version (v${current}).").replace("${current}", data.currentVersion) });
+      }
+    } catch {
+      setUpdateCheckStatus({ loading: false, type: "error", message: translate("Could not reach the update server. Try again later.") });
+    }
+  };
+
+  // Desktop install (tray shell): hand the update over to the shell, which owns
+  // the download → SHA256 → install flow. The shell reacts to the marker with
+  // its own update window; this page cannot reach Electron directly.
+  const notifyShellUpdate = async () => {
+    setShellNotifyStatus({ loading: true, message: "", type: "" });
+    const failMessage = translate("Could not notify the desktop shell. Use the Releases page instead.");
+    try {
+      const res = await fetch("/api/version/shell-update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ version: updateInfo?.latestVersion || "" }),
+      });
+      setShellNotifyStatus(
+        res.ok
+          ? { loading: false, type: "ok", message: translate("Desktop shell notified — confirm the download in its update window (system tray).") }
+          : { loading: false, type: "error", message: failMessage }
+      );
+    } catch {
+      setShellNotifyStatus({ loading: false, type: "error", message: failMessage });
+    }
+  };
+
+  const updateHideLoginOffBanner = async (hideLoginOffBanner) => {
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hideLoginOffBanner }),
+      });
+      if (res.ok) {
+        setSettings(prev => ({ ...prev, hideLoginOffBanner }));
+        window.dispatchEvent(new Event(SECURITY_STATUS_CHANGED));
+      }
+    } catch (err) {
+      console.error("Failed to update login-off banner:", err);
     }
   };
 
@@ -754,7 +847,7 @@ export default function ProfilePage() {
     setDbStatus({ type: "", message: "" });
     try {
       const res = await fetch("/api/settings/database", {
-        headers: { "x-9r-password": password },
+        headers: { "x-10r-password": password },
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -774,7 +867,24 @@ export default function ProfilePage() {
       document.body.removeChild(anchor);
       URL.revokeObjectURL(url);
 
-      setDbStatus({ type: "success", message: "Database backup downloaded" });
+      // A backup taken while some credentials could not be decrypted still
+      // downloads — the ciphertext is carried through rather than dropped — but
+      // calling that a plain success would hide the one thing the operator needs
+      // to know: those rows are only restorable on a machine holding the key
+      // they were encrypted with.
+      const credentialErrors = Array.isArray(payload?.credentialErrors)
+        ? payload.credentialErrors
+        : [];
+      if (credentialErrors.length > 0) {
+        setDbStatus({
+          type: "error",
+          message: translate(
+            "Backup downloaded, but {count} connection(s) could not be decrypted — their credentials are stored as ciphertext and can only be restored with the original key.",
+          ).replace("{count}", String(credentialErrors.length)),
+        });
+      } else {
+        setDbStatus({ type: "success", message: "Database backup downloaded" });
+      }
     } catch (err) {
       setDbStatus({ type: "error", message: err.message || "Failed to export database" });
     } finally {
@@ -819,7 +929,7 @@ export default function ProfilePage() {
     try {
       const isJson = isJsonFile(file) && !isSqliteFile(file);
       const headers = {};
-      if (password) headers["x-9r-password"] = password;
+      if (password) headers["x-10r-password"] = password;
 
       let body;
       if (isJson) {
@@ -1019,6 +1129,9 @@ export default function ProfilePage() {
                 onChange={handleUsageImportFile}
               />
             </div>
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              {translate("The backup file contains provider credentials in readable form — store it like a password.")}
+            </p>
             {dbStatus.message && (
               <p className={`text-sm ${dbStatus.type === "error" ? "text-red-500" : "text-green-600 dark:text-green-400"}`}>
                 {dbStatus.message}
@@ -1055,6 +1168,13 @@ export default function ProfilePage() {
             </div>
             <Toggle checked={regional} onChange={toggleCurrency} />
           </div>
+          <div className="flex items-center justify-between gap-4 mt-3 p-3 rounded-lg bg-bg border border-border">
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium">{translate("Unit abbreviation")}</p>
+              <p className="text-xs text-text-muted">Large numbers as 亿/万 (zh) or M/B (en); off → full numbers</p>
+            </div>
+            <Toggle checked={compactUnits} onChange={toggleCompactUnits} />
+          </div>
         </Card>
 
         {/* Security */}
@@ -1074,12 +1194,40 @@ export default function ProfilePage() {
                 </p>
               </div>
               <Toggle
-                checked={settings.requireLogin === true}
-                onChange={() => updateRequireLogin(!settings.requireLogin)}
+                checked={settings.requireLogin !== false}
+                onChange={() => {
+                  if (settings.requireLogin === false) updateRequireLogin(true);
+                  else setLoginOffConfirmOpen(true);
+                }}
                 disabled={loading}
               />
             </div>
-            {settings.requireLogin === true && (
+            {/* Only while the check is off: the banner it controls exists only then.
+                Hiding takes a confirmation; showing it again is immediate. */}
+            {settings.requireLogin === false && (
+              <div className="flex items-start sm:items-center justify-between gap-4 pl-3 border-l-2 border-red-500/40">
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-sm sm:text-base">{translate("Show the log-in-off warning banner")}</p>
+                  <p className="text-xs sm:text-sm text-text-muted">
+                    {translate("The red banner at the top of every page while the log-in check is off. Turning log-in back on shows it again next time.")}
+                  </p>
+                </div>
+                <Toggle
+                  checked={settings.hideLoginOffBanner !== true}
+                  onChange={() => {
+                    if (settings.hideLoginOffBanner === true) updateHideLoginOffBanner(false);
+                    else setBannerHideConfirmOpen(true);
+                  }}
+                  disabled={loading}
+                />
+              </div>
+            )}
+            {/* Default is ON — the server only treats an explicit `false` as off
+                (`requireLogin !== false` everywhere in the guard). Testing
+                `=== true` here hid the form on every install that never touched
+                this setting, i.e. exactly the installations that still need to
+                set a first password. */}
+            {settings.requireLogin !== false && (
               <form onSubmit={handlePasswordChange} className="flex flex-col gap-4 pt-4 border-t border-border/50">
                 {settings.hasPassword && (
                   <div className="flex flex-col gap-2">
@@ -1093,13 +1241,6 @@ export default function ProfilePage() {
                     />
                   </div>
                 )}
-                {/* {!settings.hasPassword && (
-                  <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
-                    <p className="text-sm text-blue-600 dark:text-blue-400">
-                      Setting password for the first time. Leave current password empty or use default: <code className="bg-blue-500/20 px-1 rounded">123456</code>
-                    </p>
-                  </div>
-                )} */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="flex flex-col gap-2">
                     <label className="text-xs sm:text-sm font-medium">New Password</label>
@@ -1136,6 +1277,44 @@ export default function ProfilePage() {
                 </div>
               </form>
             )}
+            {/* Automatic update checks. Off = nothing polls the npm registry on
+                its own (dashboard, tray balloon, CLI launcher); "Check now" and
+                the tray's "Check for updates" still ask on demand. */}
+            <div className="flex flex-col gap-2 pt-4 border-t border-border/50">
+              <div className="flex items-start sm:items-center justify-between gap-4">
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-sm sm:text-base">{translate("Check for updates automatically")}</p>
+                  <p className="text-xs sm:text-sm text-text-muted">
+                    {translate("When OFF, 10Router no longer contacts the update server on its own or shows new-version notices — including security fixes. You can still check by hand.")}
+                  </p>
+                </div>
+                <Toggle
+                  checked={settings.autoUpdateCheck !== false}
+                  onChange={() => updateAutoUpdateCheck(settings.autoUpdateCheck === false)}
+                  disabled={loading}
+                />
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <Button type="button" variant="secondary" size="sm" onClick={checkForUpdatesNow} loading={updateCheckStatus.loading}>
+                  {translate("Check now")}
+                </Button>
+                {updateInfo && updateInfo.installChannel === "desktop" && (
+                  <Button type="button" variant="secondary" size="sm" onClick={notifyShellUpdate} loading={shellNotifyStatus.loading}>
+                    {translate("Update via desktop shell")}
+                  </Button>
+                )}
+                {updateCheckStatus.message && (
+                  <p className={`text-xs sm:text-sm ${updateCheckStatus.type === "error" ? "text-red-500" : updateCheckStatus.type === "info" ? "text-primary" : "text-green-500"}`}>
+                    {updateCheckStatus.message}
+                  </p>
+                )}
+                {shellNotifyStatus.message && (
+                  <p className={`text-xs sm:text-sm ${shellNotifyStatus.type === "error" ? "text-red-500" : "text-green-500"}`}>
+                    {shellNotifyStatus.message}
+                  </p>
+                )}
+              </div>
+            </div>
           </div>
         </Card>
 
@@ -1474,8 +1653,10 @@ export default function ProfilePage() {
                         variant="outline"
                         size="sm"
                         icon="content_copy"
-                        onClick={() => {
-                          navigator.clipboard.writeText(samlAcsUrl);
+                        onClick={async () => {
+                          // 此前是裸 navigator.clipboard 调用:非安全上下文(LAN IP)下
+                          // 直接 TypeError,却照样弹「已复制」——统一走带兜底的 helper
+                          await copyTextToClipboard(samlAcsUrl);
                           setSamlStatus({ type: "success", message: "ACS URL copied to clipboard!" });
                         }}
                       >
@@ -1733,26 +1914,12 @@ export default function ProfilePage() {
             <h3 className="text-base sm:text-lg font-semibold">{translate("Providers")}</h3>
           </div>
           <div className="flex flex-col gap-4">
-            {/* Disabled providers sort last (behind no-connection providers) */}
+            {/* Show community welfare / trial providers (体验) */}
             <div className="flex items-start sm:items-center justify-between gap-4">
               <div className="flex-1 min-w-0">
-                <p className="font-medium text-sm sm:text-base">{translate("Disabled providers sort last")}</p>
+                <p className="font-medium text-sm sm:text-base">{translate("Show trial providers")}</p>
                 <p className="text-xs sm:text-sm text-text-muted">
-                  Push providers with all connections disabled behind those with no connections
-                </p>
-              </div>
-              <Toggle
-                checked={settings.providerDisabledLastSort === true}
-                onChange={toggleProviderDisabledLastSort}
-              />
-            </div>
-
-            {/* Show community welfare providers (公益站) */}
-            <div className="flex items-start sm:items-center justify-between gap-4 pt-4 border-t border-border/50">
-              <div className="flex-1 min-w-0">
-                <p className="font-medium text-sm sm:text-base">{translate("Show community welfare providers")}</p>
-                <p className="text-xs sm:text-sm text-text-muted">
-                  Show free community gateways with no recharge entry (GoRouter / TaBiAI)
+                  {translate("Show public unauthenticated trial channels (e.g. OpenCode Free)")}
                 </p>
               </div>
               <Toggle
@@ -1760,49 +1927,6 @@ export default function ProfilePage() {
                 onChange={toggleShowCommunityProviders}
               />
             </div>
-          </div>
-        </Card>
-
-        {/* Experimental — developer / beta toggles (default off), gathered for easy future expansion */}
-        <Card>
-          <div className="flex items-center gap-3 mb-4">
-            <div className="size-10 rounded-lg flex items-center justify-center bg-amber-500/10 text-amber-500 shrink-0">
-              <span className="material-symbols-outlined text-[20px]">science</span>
-            </div>
-            <h3 className="text-base sm:text-lg font-semibold">{translate("Experimental")}</h3>
-          </div>
-          <div className="flex flex-col gap-4">
-            {/* CodeBuddy CN account import/export (provider detail page) */}
-            <div className="flex items-start sm:items-center justify-between gap-4 pt-4 border-t border-border/50">
-              <div className="flex-1 min-w-0">
-                <p className="font-medium text-sm sm:text-base">{translate("CodeBuddy CN OAuth import / export")}</p>
-                <p className="text-xs sm:text-sm text-text-muted">
-                  {translate("Show Import / Export buttons on the CodeBuddy CN page (experimental)")}
-                </p>
-              </div>
-              <Toggle
-                checked={settings.codeBuddyOAuthImport === true}
-                onChange={toggleCodeBuddyOAuthImport}
-              />
-            </div>
-
-            {/* CodeBuddy CN auto daily check-in (mutually exclusive UI with import/export) */}
-            <div className="flex items-start sm:items-center justify-between gap-4 pt-4 border-t border-border/50">
-              <div className="flex-1 min-w-0">
-                <p className="font-medium text-sm sm:text-base">{translate("CodeBuddy CN auto daily check-in")}</p>
-                <p className="text-xs sm:text-sm text-text-muted">
-                  {translate("Automatically check in accounts once a day (random 00:00–06:00 local)")}
-                </p>
-              </div>
-              <Toggle
-                checked={settings.codeBuddyCheckin === true}
-                onChange={toggleCodeBuddyCheckin}
-              />
-            </div>
-
-            <p className="text-xs text-text-muted italic pt-2 border-t border-border/50">
-              {translate("When enabled, the Import / Export buttons on the CodeBuddy CN page are replaced")}
-            </p>
           </div>
         </Card>
 
@@ -1938,6 +2062,32 @@ export default function ProfilePage() {
         }}
       />
       <ConfirmModal
+        isOpen={loginOffConfirmOpen}
+        onClose={() => setLoginOffConfirmOpen(false)}
+        onConfirm={() => {
+          setLoginOffConfirmOpen(false);
+          updateRequireLogin(false);
+        }}
+        title={translate("Turn off the log-in check?")}
+        message={translate("Anyone who can reach this port will be able to manage every provider, key and credential without a password. The dashboard keeps a warning banner while it is off.")}
+        confirmText={translate("Turn it off")}
+        cancelText={translate("Cancel")}
+        variant="danger"
+      />
+      <ConfirmModal
+        isOpen={bannerHideConfirmOpen}
+        onClose={() => setBannerHideConfirmOpen(false)}
+        onConfirm={() => {
+          setBannerHideConfirmOpen(false);
+          updateHideLoginOffBanner(true);
+        }}
+        title={translate("Hide the log-in-off warning?")}
+        message={translate("The dashboard stays open to anyone who can reach this port — hiding the banner only removes the reminder, not the risk. It comes back automatically if you turn the log-in check on and off again.")}
+        confirmText={translate("Hide it")}
+        cancelText={translate("Cancel")}
+        variant="danger"
+      />
+      <ConfirmModal
         isOpen={shutdownOpen}
         onClose={() => setShutdownOpen(false)}
         onConfirm={handleShutdown}
@@ -1948,6 +2098,44 @@ export default function ProfilePage() {
         variant="danger"
         loading={isShuttingDown}
       />
+
+      <Modal
+        isOpen={loginOnPassword.open}
+        onClose={() => setLoginOnPassword({ open: false, value: "", confirm: "", error: "", loading: false })}
+        title={translate("Set a password to turn on the log-in check")}
+        size="sm"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setLoginOnPassword({ open: false, value: "", confirm: "", error: "", loading: false })} disabled={loginOnPassword.loading}>
+              {translate("Cancel")}
+            </Button>
+            <Button variant="primary" onClick={enableLoginWithPassword} loading={loginOnPassword.loading}>
+              {translate("Set password and turn on")}
+            </Button>
+          </>
+        }
+      >
+        <p className="text-text-muted mb-3 text-sm">
+          {translate("You have not set a dashboard password of your own yet. Choose one now — you will need it to sign in from then on.")}
+        </p>
+        <div className="flex flex-col gap-3">
+          <Input
+            type="password"
+            value={loginOnPassword.value}
+            onChange={(e) => setLoginOnPassword((s) => ({ ...s, value: e.target.value, error: "" }))}
+            placeholder={translate("New password")}
+            autoFocus
+          />
+          <Input
+            type="password"
+            value={loginOnPassword.confirm}
+            onChange={(e) => setLoginOnPassword((s) => ({ ...s, confirm: e.target.value, error: "" }))}
+            onKeyDown={(e) => { if (e.key === "Enter") enableLoginWithPassword(); }}
+            placeholder={translate("Confirm new password")}
+          />
+          {loginOnPassword.error && <p className="text-xs text-red-500">{loginOnPassword.error}</p>}
+        </div>
+      </Modal>
 
       <Modal
         isOpen={dbAuth.open}

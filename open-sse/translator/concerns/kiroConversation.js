@@ -31,10 +31,12 @@ function trimCodePoints(value, limit) {
 }
 
 function uniqueName(rawName, index, usedNames) {
+  // Consecutive underscores stay as-is: MCP names like mcp__srv__tool are
+  // already legal for Kiro ([a-zA-Z0-9_-]) and collapsing them would force a
+  // rename the response side would have to undo.
   const cleaned = String(rawName || "")
     .trim()
     .replace(TOOL_NAME_PATTERN, "_")
-    .replace(/_+/g, "_")
     .replace(/^_+|_+$/g, "");
   const base = trimCodePoints(cleaned || `tool_${index + 1}`, KIRO_TOOL_NAME_MAX_LENGTH);
   let candidate = base;

@@ -4,6 +4,7 @@ import {
   clearAccountError,
   extractApiKey,
   isValidApiKey,
+  checkApiKeyDailyLimit,
 } from "../services/auth.js";
 import { getSettings, getCombos } from "@/lib/localDb";
 import { AI_PROVIDERS, resolveProviderId } from "@/shared/constants/providers.js";
@@ -11,7 +12,7 @@ import { handleSearchCore } from "open-sse/handlers/search/index.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import * as log from "../utils/logger.js";
-import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
+import { checkAndRefreshToken, persistRefreshedCredentials } from "../services/tokenRefresh.js";
 import { handleComboChat, getComboModelsFromData } from "open-sse/services/combo.js";
 
 /**
@@ -57,6 +58,9 @@ export async function handleSearch(request) {
       return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
     }
   }
+
+  const limitResponse = await checkApiKeyDailyLimit(apiKey, { request, model: providerInput });
+  if (limitResponse) return limitResponse;
 
   if (!providerInput || typeof providerInput !== "string") {
     log.warn("SEARCH", "Missing provider/model");
@@ -201,16 +205,21 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
       providerConfig,
       credentials: refreshedCredentials,
       log,
+      // Shared with every other handler — see persistRefreshedCredentials.
       onCredentialsRefreshed: async (newCreds) => {
-        await updateProviderCredentials(credentials.connectionId, {
-          accessToken: newCreds.accessToken,
-          refreshToken: newCreds.refreshToken,
-          providerSpecificData: newCreds.providerSpecificData,
-          testStatus: "active"
+        await persistRefreshedCredentials(credentials.connectionId, newCreds, {
+          providerSpecificData: credentials.providerSpecificData,
+          provider,
+          log,
         });
       },
       onRequestSuccess: async () => {
-        await clearAccountError(credentials.connectionId, credentials);
+        // Must carry the same lock key the credentials were resolved under
+        // (searchLockKey), or this handler can never clear the per-model lock
+        // it wrote on failure — clearAccountError nulls `modelLock_<model>` for
+        // the model it is given, and without it the search lock outlives a
+        // success.
+        await clearAccountError(credentials.connectionId, credentials, searchLockKey);
       }
     });
 

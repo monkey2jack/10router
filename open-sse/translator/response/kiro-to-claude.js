@@ -42,6 +42,16 @@ function convertFinishReason(reason) {
   }
 }
 
+// Kiro only accepts [a-zA-Z0-9_-] tool names; the request translators leave the
+// sanitized→original map on the stream state (chatCore threads it from
+// `_toolNameMap`) so calls come back under the client's names. The defensive
+// non-streaming helper reads it off the aggregated body instead.
+function restoreToolName(stateOrData, name) {
+  const raw = name || "";
+  const map = stateOrData?.toolNameMap || stateOrData?._toolNameMap;
+  return map && typeof map.get === "function" && map.has(raw) ? map.get(raw) : raw;
+}
+
 /**
  * Convert one OpenAI-format chunk (from KiroExecutor) into Claude SSE events.
  * Returns an array of Claude events, or null when the chunk yields nothing.
@@ -159,9 +169,10 @@ export function kiroToClaudeResponse(chunk, state) {
         stopThinkingBlock(state, results);
         stopTextBlock(state, results);
         const toolBlockIndex = state.nextBlockIndex++;
+        const toolName = restoreToolName(state, tc.function?.name);
         state.toolCalls.set(idx, {
           id: tc.id,
-          name: tc.function?.name || "",
+          name: toolName,
           blockIndex: toolBlockIndex,
         });
         results.push({
@@ -170,7 +181,7 @@ export function kiroToClaudeResponse(chunk, state) {
           content_block: {
             type: "tool_use",
             id: tc.id,
-            name: tc.function?.name || "",
+            name: toolName,
             input: {},
           },
         });
@@ -246,7 +257,7 @@ export function kiroToClaudeNonStreaming(data) {
       content.push({
         type: "tool_use",
         id: tc.id || `toolu_${Date.now()}`,
-        name: tc.function?.name || "",
+        name: restoreToolName(data, tc.function?.name),
         input,
       });
     }

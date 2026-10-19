@@ -3,23 +3,33 @@
 import { useEffect, useState, useRef } from "react";
 import { createPortal } from "react-dom";
 import PropTypes from "prop-types";
-import { marked } from "marked";
 import { translate, getCurrentLocale } from "@/i18n/runtime";
 import { GITHUB_CONFIG } from "@/shared/constants/config";
+import { resolveChangelogCap, capChangelogByVersion } from "@/shared/utils/changelogCap";
 
-marked.setOptions({ gfm: true, breaks: true });
-
-// External links (e.g. the full CHANGELOG.md link) must open in a new tab —
-// navigating inside the app window breaks the SPA. marked v18 passes a token
-// object {href, title, tokens} to the link renderer (NOT positional args);
-// use this.parser to render the link text so nested inline tokens survive.
-const renderer = {
-  link({ href, title, tokens }) {
-    const text = tokens ? this.parser.parseInline(tokens) : (title || href);
-    return `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`;
-  },
-};
-marked.use({ renderer });
+let markedPromise = null;
+// marked is only needed when the modal opens — load it on demand instead of
+// taxing the initial bundle. Registered once per page load: the custom
+// renderer cannot live at module scope anymore, it needs the lazy instance.
+function loadMarked() {
+  if (!markedPromise) {
+    markedPromise = import("marked").then(({ marked }) => {
+      marked.setOptions({ gfm: true, breaks: true });
+      // External links (e.g. the full CHANGELOG.md link) must open in a new tab —
+      // navigating inside the app window breaks the SPA. marked v18 passes a token
+      // object {href, title, tokens} to the link renderer (NOT positional args);
+      // use this.parser to render the link text so nested inline tokens survive.
+      marked.use({
+        link({ href, title, tokens }) {
+          const text = tokens ? this.parser.parseInline(tokens) : (title || href);
+          return `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+        },
+      });
+      return marked;
+    });
+  }
+  return markedPromise;
+}
 
 // Locales with a dedicated changelog translation. Everything else (including
 // ja/ko until they're translated) falls back to en.md. The file name uses the
@@ -50,6 +60,17 @@ function fetchChangelog(urls) {
   return fetchWithTimeout(first).catch(() => fetchChangelog(rest));
 }
 
+// Which versions may be rendered: /api/version reports the published npm release
+// plus this build's own version. Fetched in parallel with the markdown so it
+// costs no extra latency, and swallowed on failure (offline install, blocked
+// registry) — losing the cap must never take the changelog down with it.
+function fetchChangelogCap() {
+  return fetchWithTimeout("/api/version")
+    .then((r) => r.json())
+    .then(resolveChangelogCap)
+    .catch(() => null);
+}
+
 export default function ChangelogModal({ isOpen, onClose }) {
   const [html, setHtml] = useState("");
   const [loading, setLoading] = useState(false);
@@ -66,10 +87,15 @@ export default function ChangelogModal({ isOpen, onClose }) {
       `${GITHUB_CONFIG.changelogUrlBase}${file}.md`,                               // GitHub raw
       `${GITHUB_CONFIG.changelogUrlFallbackBase}${file}.md`,                       // Gitee raw
     ];
+    const capPromise = fetchChangelogCap();
+    // main carries the next release's notes before it ships; render only what
+    // this client could actually have installed. See utils/changelogCap.js.
+    const show = (md, cap) =>
+      loadMarked().then((marked) => setHtml(marked.parse(capChangelogByVersion(md, cap))));
 
-    fetchChangelog(urls)
-      .then((md) => {
-        setHtml(marked.parse(md));
+    Promise.all([fetchChangelog(urls), capPromise])
+      .then(([md, cap]) => show(md, cap))
+      .then(() => {
         setError("");
         setLoading(false);
       })
@@ -82,8 +108,8 @@ export default function ChangelogModal({ isOpen, onClose }) {
             `${GITHUB_CONFIG.changelogUrlFallbackBase}en.md`,
           ];
           fetchChangelog(enUrls)
-            .then((md) => { setHtml(marked.parse(md)); setError(""); setLoading(false); })
-            .catch((enErr) => setError(enErr.message || "Failed to load"))
+            .then((md) => capPromise.then((cap) => show(md, cap)))
+            .then(() => setError("")).catch((enErr) => setError(enErr.message || "Failed to load"))
             .finally(() => setLoading(false));
         } else {
           setError("Failed to load");

@@ -8,18 +8,20 @@ import { getModelsByProviderId } from "open-sse/config/providerModels.js";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveKimchiModels } from "open-sse/services/kimchiModels.js";
 import { resolveQoderModels } from "open-sse/services/qoderModels.js";
+import { resolveMimoModels } from "open-sse/services/mimoModels.js";
 import { resolveGrokCliModels } from "open-sse/services/grokCliModels.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { resolveCursorModels } from "open-sse/services/cursorModels.js";
+import { resolveZedModels } from "open-sse/shared/zedAuth.js";
+import codexProvider from "open-sse/providers/registry/codex.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
-// The /codex/models endpoint gates each entry by minimal_client_version against this
-// value, and codex CLI's own manifest (openai/codex codex-rs/models-manager/models.json)
-// already requires 0.144.0 for its newest models, so a stale client_version here comes
-// back 200 with those entries quietly missing instead of erroring.
-const CODEX_CLIENT_VERSION = "0.144.6";
-const CODEX_MODELS_URL = `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CLIENT_VERSION}`;
+// 模型发现必须伪装成与推理完全一致的 Codex CLI 版本（registry.transport.cliVersion
+// 是唯一来源）：/codex/models 按 minimal_client_version 门控逐项过滤，发现侧的
+// client_version 一旦落后于推理侧版本，新模型会以 200 但静默缺项的形式消失
+// （上游 v0.5.95, 9f41ee75 的 DRY 化）。
+const CODEX_MODELS_URL = `https://chatgpt.com/backend-api/codex/models?client_version=${codexProvider.transport.cliVersion}`;
 
 const parseOpenAIStyleModels = (data) => {
   if (Array.isArray(data)) return data;
@@ -125,8 +127,74 @@ const buildOAuthResolver = ({ refreshFn, fetchFn, parseFn, errorLabel }) => asyn
   return { models: [], warning };
 };
 
+// Qoder (intl + CN share one resolver; fetchQoderCatalogRaw branches on
+// credentials.provider for the gateway URL). Passes the provider through so
+// a qoder-cn connection no longer dials the intl host, and forwards the
+// server-published pricing (rateMultiplier / promotion) the dashboard badges
+// render. Registered under both provider keys in PROVIDER_MODELS_CONFIG.
+const resolveQoderCatalog = async (connection) => {
+  const credentials = {
+    provider: connection.provider,
+    accessToken: connection.accessToken,
+    apiKey: connection.apiKey,
+    refreshToken: connection.refreshToken,
+    email: connection.email,
+    displayName: connection.displayName,
+    providerSpecificData: connection.providerSpecificData || {},
+  };
+  let warning;
+  try {
+    const result = await resolveQoderModels(credentials, { forceRefresh: true });
+    if (result?.models?.length) {
+      return {
+        models: result.models.map((m) => ({
+          // Canonical "<provider>/<key>" id so the dashboard surfaces the
+          // same identifier the chat router expects.
+          id: `${connection.provider}/${m.id}`,
+          name: m.name,
+          contextLength: m.contextLength,
+          isVL: m.isVL,
+          isReasoning: m.isReasoning,
+          maxOutputTokens: m.maxOutputTokens,
+          description: m.description,
+          rateMultiplier: m.rateMultiplier,
+          promotion: m.promotion,
+        })),
+      };
+    }
+    warning = "Qoder returned no models; falling back to static catalog.";
+  } catch (error) {
+    warning = `Failed to fetch Qoder models: ${error.message}`;
+    console.log("Failed to fetch Qoder models dynamically, falling back to static:", error.message);
+  }
+  return { models: [], warning };
+};
+
 // Provider models endpoints configuration
 const PROVIDER_MODELS_CONFIG = {
+  // Muse (Meta Model API) —— OAuth 铸造 key 与粘贴的 API key 通用；x-api-version
+  // 按官方文档要求固定带上。
+  "muse": {
+    url: "https://api.meta.ai/v1/models",
+    method: "GET",
+    headers: { "Content-Type": "application/json", "x-api-version": "1.0.0" },
+    authHeader: "Authorization",
+    authPrefix: "Bearer ",
+    parseResponse: (data) => data.data || [],
+  },
+  cline: {
+    url: "https://api.cline.bot/api/v1/models",
+    method: "GET",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+      "HTTP-Referer": "https://cline.bot",
+      "X-Title": "Cline",
+    },
+    authHeader: "Authorization",
+    authPrefix: "Bearer workos:",
+    parseResponse: (data) => (Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : [])),
+  },
   claude: {
     url: "https://api.anthropic.com/v1/models",
     method: "GET",
@@ -200,6 +268,8 @@ const PROVIDER_MODELS_CONFIG = {
   openrouter: createOpenAIModelsConfig("https://openrouter.ai/api/v1/models"),
   "opencode-go": createOpenAIModelsConfig("https://opencode.ai/zen/go/v1/models"),
   bai: createOpenAIModelsConfig("https://api.b.ai/v1/models"),
+  atria: createOpenAIModelsConfig("https://api.atria-asi.ai/v1/models"),
+  tokenharbor: createOpenAIModelsConfig("https://tokenharbor.ai/v1/models"),
   anthropic: {
     url: "https://api.anthropic.com/v1/models",
     method: "GET",
@@ -251,6 +321,7 @@ const PROVIDER_MODELS_CONFIG = {
   cohere: createOpenAIModelsConfig("https://api.cohere.ai/v1/models"),
   nebius: createOpenAIModelsConfig("https://api.studio.nebius.ai/v1/models"),
   siliconflow: createOpenAIModelsConfig("https://api.siliconflow.com/v1/models"),
+  "siliconflow-cn": createOpenAIModelsConfig("https://api.siliconflow.cn/v1/models"),
   hyperbolic: createOpenAIModelsConfig("https://api.hyperbolic.xyz/v1/models"),
   ollama: createOpenAIModelsConfig("https://ollama.com/api/tags"),
   // ollama-local: url resolved dynamically below via providerSpecificData.baseUrl
@@ -285,6 +356,27 @@ const PROVIDER_MODELS_CONFIG = {
       return {
         models: getStaticProviderModels("cursor"),
         warning: "Cursor returned no live models; falling back to static catalog.",
+      };
+    },
+  },
+  zed: {
+    customResolver: async (connection) => {
+      const result = await resolveZedModels({
+        accessToken: connection.accessToken,
+        providerSpecificData: connection.providerSpecificData || {},
+      }, { forceRefresh: true });
+      // Mirrors the /api/v1/models zed resolver: hosted-disabled rows stay out.
+      const models = (result?.models || [])
+        .filter((m) => !m.isDisabled)
+        .map((m) => ({
+          id: m.id,
+          name: m.name,
+          capabilities: m.supportsTools ? { tools: true } : undefined,
+        }));
+      if (models.length) return { models };
+      return {
+        models: getStaticProviderModels("zed"),
+        warning: "Zed returned no live models; falling back to static catalog.",
       };
     },
   },
@@ -335,40 +427,17 @@ const PROVIDER_MODELS_CONFIG = {
     }
   },
   qoder: {
-    customResolver: async (connection) => {
-      const credentials = {
-        accessToken: connection.accessToken,
-        apiKey: connection.apiKey,
-        refreshToken: connection.refreshToken,
-        email: connection.email,
-        displayName: connection.displayName,
-        providerSpecificData: connection.providerSpecificData || {},
-      };
-      let warning;
-      try {
-        const result = await resolveQoderModels(credentials, { forceRefresh: true });
-        if (result?.models?.length) {
-          return {
-            models: result.models.map((m) => ({
-              // Use the canonical "qoder/<key>" id so the dashboard
-              // surfaces the same identifier the chat router expects.
-              id: `qoder/${m.id}`,
-              name: m.name,
-              contextLength: m.contextLength,
-              isVL: m.isVL,
-              isReasoning: m.isReasoning,
-              maxOutputTokens: m.maxOutputTokens,
-              description: m.description,
-            })),
-          };
-        }
-        warning = "Qoder returned no models; falling back to static catalog.";
-      } catch (error) {
-        warning = `Failed to fetch Qoder models: ${error.message}`;
-        console.log("Failed to fetch Qoder models dynamically, falling back to static:", error.message);
-      }
-      return { models: [], warning };
-    },
+    customResolver: resolveQoderCatalog,
+  },
+  "qoder-cn": {
+    customResolver: resolveQoderCatalog,
+  },
+  // MiMo: official public catalog (api.xiaomimimo.com/v1/models). Powers the
+  // "Fetch MiMo Models" import button. The resolver itself filters the two
+  // client-internal mimo-x preview models — they exist only in the local
+  // registry and route through the signed in-client path.
+  "xiaomi-mimo": {
+    customResolver: async (connection) => await resolveMimoModels(connection),
   },
   "gemini-cli": {
     customResolver: buildOAuthResolver({

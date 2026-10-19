@@ -31,6 +31,16 @@ npm run cli:pack       # build + npm pack from root
 cd cli && npm run dev  # nodemon watch
 ```
 
+Local test build (stamp a throwaway version, build, replace in place, verify):
+```bash
+npm run test-version 1.1.0-test.1   # 三处 package.json + fnos manifest 同号, uncommitted
+npm run test-version -- --check     # 看当前状态; --revert 回退 (refuses if those files carry other changes)
+```
+Never rebuild with a **released** version number — that is how 1.0.8 ended up with three different payloads
+under one version. Full flow (Windows desktop / fnOS fpk), verification method and traps:
+`docs/zh-CN/local-build-and-verify.md`. Note `ELECTRON_RUN_AS_NODE=1` in your shell makes `10Router.exe`
+run as plain Node (no tray, no logs, silent exit) — looks exactly like a broken build.
+
 Tests (vitest, in `tests/`, an **independent** ESM package — not wired into root `npm test`):
 ```bash
 npm install                             # ROOT deps first — tests import from src/ which needs `open`, `undici`, etc.
@@ -92,7 +102,18 @@ Pre-translate hooks that compress `tool_result` content in-place to cut tokens. 
 
 - Plain JavaScript (ESM), no TypeScript. `@/*` path alias → `src/*` (`jsconfig.json`).
 - `custom-server.js` wraps the Next standalone server to derive client IP from the TCP socket and strip attacker-controlled `X-Forwarded-For` — trusting forwarding headers only from a loopback reverse proxy. Preserve this when touching request/IP/rate-limit code.
-- Security-sensitive env: `JWT_SECRET` (session cookie), `INITIAL_PASSWORD` (default `123456` — must override), `API_KEY_SECRET`, `MACHINE_ID_SALT`. Full env contract in `.env.example` and ARCHITECTURE.md's env matrix.
+- Security-sensitive env: `JWT_SECRET` (session cookie), `INITIAL_PASSWORD` (the ONLY bootstrap dashboard password — there is no built-in default; with none set and no SSO the dashboard is loopback-only and remote callers are refused), `API_KEY_SECRET`, `MACHINE_ID_SALT`. Full env contract in `.env.example` and ARCHITECTURE.md's env matrix.
 - Binary/protobuf upstreams (kiro EventStream, cursor protobuf, commandcode NDJSON) don't round-trip through OpenAI — they're handled inside their own executor, not the translator.
+- App startup (tunnel / Tailscale / MITM auto-resume, watchdog, usage cost repair) runs from `src/instrumentation.js` `register()` at server start. Never make startup work depend on a page render again — before 1.2.1 it did, and a restarted `/v1`-only instance never initialized.
 - Versioning: root and `cli/` are versioned independently; changes are logged in `CHANGELOG.md`. Commit style is Conventional Commits (`fix(translator): …`, `feat(...)`).
 - **Upstream features are re-implemented, never merged.** This fork's git history is deliberately rewritten (only techysy/ShiYanG Yu commits) and the contributor set is clean — that property is load-bearing. When upstream (decolua/9router) ships a feature, read the upstream implementation to learn the approach, then write it here in this repo's own style as your own commit(s). Never `git merge`/cherry-pick upstream branches, and never overlay an upstream tarball (`curl … | tar xz`) — both drag upstream commits and unreviewed code into the tree (this is how the qoder-cn registry-regen incident wiped deliberate provider hiding).
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

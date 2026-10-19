@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useNotificationStore } from "@/store/notificationStore";
 import Sidebar from "../Sidebar";
 import Header from "../Header";
+import SecurityBanner from "../SecurityBanner";
 
 function getToastStyle(type) {
   if (type === "success") {
@@ -34,22 +35,40 @@ function getToastStyle(type) {
 export default function DashboardLayout({ children }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // Desktop sidebar can be collapsed to free up viewport (persisted).
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return window.localStorage.getItem("sidebarCollapsed") === "1";
-  });
+  // The persisted value is applied AFTER mount, not in the initializer:
+  // SSR can't read localStorage, so a client-only initial `true` hydrates
+  // against server HTML that says expanded — React keeps the server DOM
+  // while state says collapsed, and the first click then toggles the
+  // (invisible) state instead of the visible sidebar: the "collapse needs
+  // two clicks" report. Same start on both sides + one sync = one click.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  useEffect(() => {
+    setSidebarCollapsed(window.localStorage.getItem("sidebarCollapsed") === "1");
+  }, []);
   const toggleSidebarCollapsed = () => {
-    setSidebarCollapsed((prev) => {
-      const next = !prev;
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem("sidebarCollapsed", next ? "1" : "0");
-      }
-      return next;
-    });
+    const next = !sidebarCollapsed;
+    window.localStorage.setItem("sidebarCollapsed", next ? "1" : "0");
+    setSidebarCollapsed(next);
   };
   const pathname = usePathname();
   const notifications = useNotificationStore((state) => state.notifications);
   const removeNotification = useNotificationStore((state) => state.removeNotification);
+
+  // Preload the lazy usage charts in the background once the browser is idle,
+  // so opening the usage page doesn't wait on a cold recharts fetch.
+  useEffect(() => {
+    const preload = () => {
+      import("@/shared/components/UsageStats").catch(() => {});
+      import("@/app/(dashboard)/dashboard/usage/components/UsageChart").catch(() => {});
+    };
+    if (typeof window === "undefined") return undefined;
+    if ("requestIdleCallback" in window) {
+      const id = window.requestIdleCallback(preload, { timeout: 4000 });
+      return () => window.cancelIdleCallback(id);
+    }
+    const timer = setTimeout(preload, 2500);
+    return () => clearTimeout(timer);
+  }, []);
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-bg">
@@ -108,7 +127,10 @@ export default function DashboardLayout({ children }) {
       <main className="flex flex-col flex-1 h-full min-w-0 relative transition-colors duration-300 isolate">
         {/* Faint grid background */}
         <div className="landing-grid absolute inset-0 pointer-events-none -z-10" aria-hidden="true" />
-        <Header key={pathname} onMenuClick={() => setSidebarOpen(true)} onDesktopMenuClick={toggleSidebarCollapsed} />
+        <Header key={pathname} onMenuClick={() => setSidebarOpen(true)} onDesktopMenuClick={toggleSidebarCollapsed} sidebarCollapsed={sidebarCollapsed} />
+        {/* Stays visible on every page until the instance is not open: no
+            dashboard password, or the login check switched off. */}
+        <SecurityBanner />
         <div className={`flex-1 overflow-y-auto custom-scrollbar ${pathname === "/dashboard/basic-chat" ? "" : "p-6 lg:p-10"} ${pathname === "/dashboard/basic-chat" ? "flex flex-col overflow-hidden" : ""}`}>
           <div className={`${pathname === "/dashboard/basic-chat" ? "flex-1 w-full h-full flex flex-col" : "max-w-7xl mx-auto"}`}>{children}</div>
         </div>

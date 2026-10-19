@@ -14,6 +14,9 @@ export const CLAUDE_STOP = {
   MAX_TOKENS: "max_tokens",
   TOOL_USE: "tool_use",
   STOP_SEQUENCE: "stop_sequence",
+  // Anthropic 的 API 级拒绝（流式分类器 / ToS）。随 message_delta 到达，输出 token 为 0；
+  // stop_details 携带原因。
+  REFUSAL: "refusal",
 };
 
 // Gemini finishReason values.

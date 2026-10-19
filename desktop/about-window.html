@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>10Router</title>
+<style>
+/* 与 update-window.html 同款:设计 token 直抄仪表盘唯一真源 src/app/globals.css */
+:root {
+  --brand-500: #E56A4A;
+  --brand-600: #cc5236;
+  --brand-700: #a64027;
+  --bg: #FDFAF6;
+  --surface: #ffffff;
+  --surface-2: #f4f4f5;
+  --border-subtle: #f1f1f3;
+  --text-main: #0a0a0a;
+  --text-muted: #6B7280;
+  --shadow-soft: 0 1px 2px 0 rgba(0,0,0,0.04);
+  --shadow-elev: inset 0 1px 0 0 rgba(255,255,255,0.8), 0 1px 2px rgba(15,23,42,0.04), 0 12px 36px -8px rgba(15,23,42,0.10);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1a1a1a;
+    --surface: #262626;
+    --surface-2: #303030;
+    --border-subtle: #2a2a2a;
+    --text-main: #ededed;
+    --text-muted: #9ca3af;
+    --shadow-soft: 0 1px 2px 0 rgba(0,0,0,0.3);
+    --shadow-elev: inset 0 1px 0 0 rgba(255,255,255,0.06), 0 1px 2px rgba(0,0,0,0.4), 0 16px 48px -8px rgba(0,0,0,0.55);
+  }
+}
+* { box-sizing: border-box; }
+/* 固定尺寸无边框窗:见 update-window.html 同名注释,overflow:hidden 兜亚像素滚动条 */
+html, body { margin: 0; padding: 0; overflow: hidden; }
+body {
+  font: 13px/1.55 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--bg);
+  color: var(--text-main);
+  user-select: none;
+  -webkit-user-select: none;
+}
+svg.ic { fill: currentColor; display: block; }
+.sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+.titlebar {
+  display: flex; align-items: center; justify-content: space-between;
+  height: 38px; padding: 0 6px 0 14px;
+  -webkit-app-region: drag;
+}
+.titlebar .brand { font-size: 12px; font-weight: 600; color: var(--text-muted); letter-spacing: .02em; }
+#closeBtn {
+  -webkit-app-region: no-drag;
+  width: 30px; height: 30px; border: 0; border-radius: 10px;
+  background: transparent; color: var(--text-muted);
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: background .15s ease-out, color .15s ease-out;
+}
+#closeBtn:hover { background: var(--surface-2); color: var(--text-main); }
+#closeBtn svg { width: 18px; height: 18px; }
+.card {
+  margin: 4px 12px 12px;
+  padding: 18px 18px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  box-shadow: var(--shadow-elev);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.iconRow { display: flex; align-items: center; gap: 12px; }
+/* 品牌图标位:update 窗 .tile.brand 同款 */
+.tile {
+  width: 40px; height: 40px; flex: none; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+}
+.tile svg { width: 22px; height: 22px; }
+.tile.brand { background: rgba(229, 106, 74, .12); color: var(--brand-500); }
+.headCol { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+#title { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.35; color: var(--text-main); }
+#tagline { margin: 0; font-size: 12px; color: var(--text-muted); }
+#version {
+  /* Badge.js primary:bg-brand-500/10 text-brand-600 */
+  display: none; align-self: flex-start;
+  padding: 2px 10px; border-radius: 999px;
+  background: rgba(229, 106, 74, .1); color: var(--brand-600);
+  font-size: 12px; font-weight: 600;
+}
+@media (prefers-color-scheme: dark) {
+  #version { color: #ee8d6a; }
+}
+/* 数据目录是长 Windows 路径,无自然断点 —— break-all 防横向溢出 */
+#body { margin: 0; font-size: 13px; color: var(--text-muted); white-space: pre-line; word-break: break-all; }
+#buttons { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+#buttons:empty { display: none; }
+#buttons button {
+  height: 36px; padding: 0 16px; font-size: 14px; font-weight: 600; border-radius: 10px;
+  display: inline-flex; align-items: center; gap: 8px;
+  border: 0; background: transparent; color: var(--text-muted); cursor: pointer;
+  transition: all .15s ease-out;
+}
+#buttons button:hover { background: var(--surface-2); color: var(--text-main); }
+#buttons button:active { transform: scale(.97); }
+#buttons button.primary {
+  background: var(--brand-500); color: #fff;
+  box-shadow: var(--shadow-soft);
+}
+#buttons button.primary:hover { background: var(--brand-600); color: #fff; }
+#buttons button svg { width: 18px; height: 18px; }
+</style>
+</head>
+<body>
+<!-- 图标:Material Symbols 24px outlined 官方 path,内联 symbol 精灵,无字体无外链 -->
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-info" viewBox="0 -960 960 960"><path d="M440-280h80v-240h-80v240Zm40-320q17 0 28.5-11.5T520-640q0-17-11.5-28.5T480-680q-17 0-28.5 11.5T440-640q0 17 11.5 28.5T480-600Zm0 520q-83 0-156-31.5T197-197q-54-54-85.5-127T80-480q0-83 31.5-156T197-763q54-54 127-85.5T480-880q83 0 156 31.5T763-763q54 54 85.5 127T880-480q0 83-31.5 156T763-197q-54 54-127 85.5T480-80Zm0-80q134 0 227-93t93-227q0-134-93-227t-227-93q-134 0-227 93t-93 227q0 134 93 227t227 93Zm0-320Z"/></symbol>
+  <symbol id="i-open-in-new" viewBox="0 -960 960 960"><path d="M200-120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h280v80H200v560h560v-280h80v280q0 33-23.5 56.5T760-120H200Zm188-212-56-56 372-372H560v-80h280v280h-80v-144L388-332Z"/></symbol>
+  <symbol id="i-close" viewBox="0 -960 960 960"><path d="m256-200-56-56 224-224-224-224 56-56 224 224 224-224 56 56-224 224 224 224-56 56-224-224-224 224Z"/></symbol>
+</svg>
+<div class="titlebar">
+  <span class="brand" id="brand">10Router</span>
+  <button id="closeBtn" aria-label="close"><svg class="ic"><use href="#i-close"/></svg></button>
+</div>
+<div class="card">
+  <div class="iconRow">
+    <div class="tile brand"><svg class="ic"><use href="#i-info"/></svg></div>
+    <div class="headCol">
+      <h1 id="title">10Router</h1>
+      <p id="tagline"></p>
+    </div>
+  </div>
+  <span id="version"></span>
+  <p id="body"></p>
+  <div id="buttons"></div>
+</div>
+<script>
+(function () {
+  'use strict';
+  var api = window.aboutApi;
+  var $ = function (id) { return document.getElementById(id); };
+  var strings = {};
+  var SVGNS = 'http://www.w3.org/2000/svg';
+
+  function fit() {
+    requestAnimationFrame(function () {
+      api.fitHeight(Math.ceil(document.body.getBoundingClientRect().height));
+    });
+  }
+
+  function addBtn(label, action, opts) {
+    opts = opts || {};
+    var b = document.createElement('button');
+    if (opts.primary) b.className = 'primary';
+    if (opts.icon) {
+      var svg = document.createElementNS(SVGNS, 'svg');
+      svg.setAttribute('class', 'ic');
+      var use = document.createElementNS(SVGNS, 'use');
+      use.setAttribute('href', '#' + opts.icon);
+      svg.appendChild(use);
+      b.appendChild(svg);
+    }
+    b.appendChild(document.createTextNode(label));
+    b.addEventListener('click', function () { api.action(action); });
+    $('buttons').appendChild(b);
+  }
+
+  function render(view) {
+    $('tagline').textContent = strings.tagline || '';
+    var ver = $('version');
+    if (view && view.version) {
+      ver.textContent = 'v' + view.version;
+      ver.style.display = 'inline-block';
+    }
+    var bodyEl = $('body');
+    bodyEl.textContent = (view && view.detail) || '';
+    bodyEl.style.display = bodyEl.textContent ? 'block' : 'none';
+    addBtn(strings.github || 'GitHub', 'github', { primary: true, icon: 'i-open-in-new' });
+    addBtn(strings.close || 'Close', 'close');
+    fit();
+  }
+
+  $('closeBtn').addEventListener('click', function () { api.action('close'); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') api.action('close'); });
+  if (window.ResizeObserver) new ResizeObserver(fit).observe(document.body);
+  api.bootstrap().then(function (boot) {
+    if (!boot) return;
+    strings = boot.strings || {};
+    $('brand').textContent = strings.windowTitle || '10Router';
+    document.title = strings.windowTitle || '10Router';
+    render(boot.view || {});
+    fit();
+  });
+})();
+</script>
+</body>
+</html>

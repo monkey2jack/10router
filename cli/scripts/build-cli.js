@@ -8,7 +8,11 @@ const { execSync } = require("child_process");
 const cliDir = path.resolve(__dirname, "..");
 const appDir = path.resolve(cliDir, "..");
 const rootDir = path.resolve(appDir, "..");
-const cliAppDir = process.env.NINEROUTER_CLI_APP_DIR || path.join(cliDir, "app");
+// TENROUTER_* is the current name; NINEROUTER_* stays as a fallback so an
+// operator's existing build wrapper keeps working across the rename.
+const cliAppDir = process.env.TENROUTER_CLI_APP_DIR
+  || process.env.NINEROUTER_CLI_APP_DIR
+  || path.join(cliDir, "app");
 // Build-time HOME must stay OUTSIDE the repo: the Next build initializes the
 // app (jwt-secret / machine-id / data.sqlite) in APPDATA, and output tracing
 // would copy anything inside the tracing root into the standalone bundle —
@@ -370,6 +374,20 @@ function buildCliPackage() {
     console.log("✅ Copied updater files\n");
   } else {
     console.log("⏭️  No updater files found\n");
+  }
+
+  // Step 7c: Copy console archive tee (custom-server.js imports it at boot from
+  // <app>/src/lib — selective src copies only, so it must be shipped explicitly
+  // or the dynamic import silently no-ops and the archive never appears).
+  console.log("7️⃣ c Copying console archive module...");
+  const consoleArchiveSrc = path.join(appDir, "src", "lib", "consoleArchiveStandalone.mjs");
+  const consoleArchiveDest = path.join(cliAppDir, "src", "lib", "consoleArchiveStandalone.mjs");
+  if (fs.existsSync(consoleArchiveSrc)) {
+    fs.mkdirSync(path.dirname(consoleArchiveDest), { recursive: true });
+    fs.copyFileSync(consoleArchiveSrc, consoleArchiveDest);
+    console.log("✅ Copied console archive module\n");
+  } else {
+    console.log("⏭️  No console archive module found\n");
   }
 
   // Step 8: Build MITM server (config driven - see app/cli/scripts/buildMitm.js)

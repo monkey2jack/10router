@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import { getSettings, validateApiKey } from "@/lib/localDb";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
-import { verifyDashboardAuthToken } from "@/lib/auth/dashboardSession";
+import { verifyDashboardAuthToken, isDashboardAuthConfigured } from "@/lib/auth/dashboardSession";
 import { hasTrustedPeerHeaders } from "@/lib/auth/trustedPeer";
+import { readCliToken, readDashboardPassword } from "@/lib/auth/authHeaders";
 
-const CLI_TOKEN_HEADER = "x-9r-cli-token";
 const CLI_TOKEN_SALT = "9r-cli-auth";
 
 let cachedCliToken = null;
@@ -14,7 +14,7 @@ async function getCliToken() {
 }
 
 async function hasValidCliToken(request) {
-  const token = request.headers.get(CLI_TOKEN_HEADER);
+  const token = readCliToken(request);
   if (!token) return false;
   return token === await getCliToken();
 }
@@ -22,15 +22,32 @@ async function hasValidCliToken(request) {
 // Public API paths — no auth required (LLM API has its own key auth inside handler).
 const PUBLIC_API_PATHS = [
   "/api/health",
-  "/api/init",
   "/api/locale",
   "/api/auth/login",
   "/api/auth/logout",
   "/api/auth/status",
   "/api/auth/oidc",
   "/api/auth/saml",
-  "/api/version",
+  // Pre-flight dashboard-password check for gated UI flows (same exposure
+  // class as /api/auth/login; leaks nothing but ok).
+  "/api/auth/verify-password",
   "/api/settings/require-login",
+];
+
+// Reachable without a session only from THIS machine (or with one from
+// anywhere). Issue #9 item 11: /api/version and /api/init used to be public, so
+// any remote caller could fingerprint the exact build and update state without
+// authenticating. The consumers are all local — the CLI's stale-server probe and
+// doctor reach http://127.0.0.1:<port>/api/version, desktop/main.js polls it for
+// the update check — while the dashboard's Changelog modal fetches it with the
+// user's session cookie, which the normal auth branch covers.
+//
+// NOTE: /api/version/shutdown and /api/version/update match this prefix too. They
+// are listed in ALWAYS_PROTECTED, which is evaluated first, so they keep
+// requiring a token.
+const LOCAL_OR_AUTH_API_PATHS = [
+  "/api/version",
+  "/api/init",
 ];
 
 // Public top-level prefixes (LLM API endpoints with their own API key auth).
@@ -46,8 +63,24 @@ const ALWAYS_PROTECTED = [
   "/api/settings/database",
   "/api/version/shutdown",
   "/api/version/update",
+  // Triggers the desktop shell's update flow via a data-dir marker — a
+  // state-changing handoff that only the operator should be able to fire.
+  "/api/version/shell-update",
   "/api/oauth/cursor/auto-import",
   "/api/oauth/kiro/auto-import",
+  "/api/oauth/zed/auto-import",
+  "/api/oauth/xiaomi-mimo/desktop-status",
+  "/api/oauth/xiaomi-mimo/desktop-kill",
+  // Reads MiMo Desktop's local auth.json and returns the full sk- key —
+  // credential-bearing like cursor/kiro auto-import, so it must never slip
+  // through the requireLogin=false catch-all.
+  "/api/oauth/xiaomi-mimo/auto-import",
+  // OAuth credentials transfer: export dumps live tokens (encrypted by a
+  // user passphrase AFTER the guard), import writes them. Even with
+  // requireLogin=false these must demand credentials (export re-checks the
+  // dashboard password inside). Exception: same-machine import AND export,
+  // see the transfer branch in proxy() — the route keeps its own re-auth.
+  "/api/oauth/transfer/",
 ];
 
 // Require auth, but allow through if requireLogin is disabled
@@ -84,6 +117,14 @@ const LOCAL_ONLY_PATHS = [
   "/api/tunnel/disable",
   "/api/oauth/cursor/auto-import",
   "/api/oauth/kiro/auto-import",
+  "/api/oauth/zed/auto-import",
+  // Host-secret reader (MiMo Desktop auth.json) — remote/LAN calls must never
+  // reach it, matching the cursor/kiro auto-import siblings. desktop-status /
+  // desktop-kill join them: process control on the host machine is exactly the
+  // "spawn-capable" class this list exists for.
+  "/api/oauth/xiaomi-mimo/auto-import",
+  "/api/oauth/xiaomi-mimo/desktop-status",
+  "/api/oauth/xiaomi-mimo/desktop-kill",
   "/api/auth/reset-password",
   "/api/headroom/start",
   "/api/headroom/stop",
@@ -111,7 +152,7 @@ function isLoopbackHostname(h) {
 
 function isLoopbackPeer(request) {
   if (hasTrustedPeerHeaders(request)) {
-    return isLoopbackHostname(request.headers.get("x-9r-real-ip"));
+    return isLoopbackHostname(request.headers.get("x-10r-real-ip"));
   }
   // Bare `next dev` forks its server, so the wrapper never loads and no peer address
   // reaches us. Host is spoofable, so this stays confined to development.
@@ -124,7 +165,7 @@ function isLoopbackPeer(request) {
 export function isLocalRequest(request) {
   // Stamped by custom-server.js when forwarding headers exist: request came through
   // a reverse proxy, so the loopback socket is the proxy hop, not the end-user.
-  if (request.headers.get("x-9r-via-proxy")) return false;
+  if (request.headers.get("x-10r-via-proxy")) return false;
   if (!isLoopbackPeer(request)) return false;
   const origin = request.headers.get("origin");
   if (origin) {
@@ -186,6 +227,13 @@ async function isAuthenticated(request) {
   if (await hasValidToken(request)) return true;
   const settings = await loadSettings();
   if (settings && settings.requireLogin === false) return true;
+  // Bootstrap state: no password hash, no INITIAL_PASSWORD, no SSO — there is no
+  // secret a remote client could ever present, so remote clients are refused
+  // (401 / login redirect) rather than handed a default. The operator on the
+  // machine itself is let in so a password can be set; without this the guard
+  // would deadlock the first-run experience (login needs a password, setting a
+  // password needs auth). See dashboardSession.isDashboardAuthConfigured.
+  if (!isDashboardAuthConfigured(settings) && isLocalRequest(request)) return true;
   return false;
 }
 
@@ -205,6 +253,43 @@ export const __test__ = {
 export async function proxy(request) {
   const { pathname } = request.nextUrl;
 
+  // "Dashboard: local-only" (Settings → Experimental → Security, off by default).
+  // Refuses non-loopback traffic to the management surface — dashboard HTML,
+  // /api/* incl. providers / keys / usage. The LLM API is deliberately exempt:
+  // it authenticates with per-key credentials and serving it over the LAN is the
+  // product's main scenario, so this switch is about the admin UI and the
+  // upstream credentials behind it, not about the gateway itself. Checked before
+  // anything else so a remote caller cannot probe which routes exist.
+  if (!isPublicLlmApi(pathname)) {
+    const settings = await loadSettings();
+    if (settings?.dashboardLocalOnly === true && !isLocalRequest(request)) {
+      return NextResponse.json(
+        { error: "The dashboard is set to local-only access (Experimental → Security). Turn it off from the machine running 10Router to manage it remotely." },
+        { status: 403 },
+      );
+    }
+  }
+
+  // Xiaomi Desktop credential detection + process control, from the machine
+  // itself. auto-import is credential-BEARING (returns the Desktop sk- key) and
+  // sits in BOTH the local-only and always-protected lists, so it must never
+  // slip through the requireLogin=false catch-all — but those same gates lock
+  // the LOCAL operator (no JWT on a免密 deployment) out of detecting their own
+  // Desktop, which is what the modal's whole flow needs. This branch must sit
+  // ABOVE the local-only gate (which answers 403 to remote and would otherwise
+  // run first); same-machine requests pass, remote/LAN/CSRF fall through to
+  // the gates' 403/401. desktop-status/desktop-kill ride along (status is
+  // harmless; kill only ever targets this machine's own Desktop).
+  if (
+    (pathname === "/api/oauth/xiaomi-mimo/auto-import" ||
+      pathname === "/api/oauth/xiaomi-mimo/desktop-status" ||
+      (pathname === "/api/oauth/xiaomi-mimo/desktop-kill" && request.method === "POST")) &&
+    isLocalRequest(request) &&
+    (await isAuthenticated(request))
+  ) {
+    return NextResponse.next();
+  }
+
   // Local-only gate for spawn-capable / host-secret routes.
   if (LOCAL_ONLY_PATHS.some((p) => pathname.startsWith(p))) {
     if (!(await canAccessLocalOnlyRoute(request))) {
@@ -219,25 +304,32 @@ export async function proxy(request) {
   if (
     request.method === "POST" &&
     pathname === "/api/settings/database/import-usage" &&
-    (request.headers.get("x-9r-password") || extractApiKey(request))
+    (readDashboardPassword(request) || extractApiKey(request))
+  ) {
+    return NextResponse.next();
+  }
+
+  // OAuth transfer IMPORT/EXPORT from the machine itself. The route is the real
+  // authorization: import proves the export passphrase (GCM tag), export
+  // re-authenticates the dashboard password (verifyDashboardPassword) and the
+  // dump is additionally sealed under the user's own passphrase. With
+  // requireLogin=false the local operator has no JWT to present, so the
+  // ALWAYS_PROTECTED match below would lock them out of their own transfer
+  // dialog entirely (import e.g. a CreditDaddy / 10router file; export MiMo
+  // Desktop credentials). Loopback peer + loopback Origin (isLocalRequest)
+  // keeps tunnels, LAN and cross-site pages out.
+  if (
+    request.method === "POST" &&
+    (pathname === "/api/oauth/transfer/import" || pathname === "/api/oauth/transfer/export") &&
+    isLocalRequest(request) &&
+    (await isAuthenticated(request))
   ) {
     return NextResponse.next();
   }
 
   // Always protected - require valid JWT or local CLI token (machineId-based).
-  // Exception: agent-managed custom provider write (POST create node / add
-  // connection) may use a dashboard LLM API key, so remote agents can self-serve
-  // custom OpenAI/Anthropic-compatible endpoints without a CLI token. Only the
-  // bare root paths + POST match; list/update/delete on [id] routes stay protected.
-  const isAgentProviderWrite =
-    request.method === "POST" &&
-    (pathname === "/api/provider-nodes" || pathname === "/api/providers");
   if (ALWAYS_PROTECTED.some((p) => pathname.startsWith(p))) {
-    if (
-      (await hasValidCliToken(request)) ||
-      (await hasValidToken(request)) ||
-      (isAgentProviderWrite && (await hasValidApiKey(request)))
-    )
+    if ((await hasValidCliToken(request)) || (await hasValidToken(request)))
       return NextResponse.next();
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -245,6 +337,53 @@ export async function proxy(request) {
   if (isPublicLlmApi(pathname)) {
     if (await canAccessPublicLlmApi(request)) return NextResponse.next();
     return NextResponse.json({ error: "API key required for remote API access" }, { status: 401 });
+  }
+
+  // Version/init info: local callers (CLI, tray, same-machine dashboard) as
+  // before, plus any authenticated session — but no longer an open book to the
+  // network (issue #9, item 11).
+  if (LOCAL_OR_AUTH_API_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
+    if (isLocalRequest(request) || (await hasValidCliToken(request)) || (await isAuthenticated(request))) {
+      return NextResponse.next();
+    }
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // Read-only provider quota overview for external dashboards (e.g. CreditDaddy):
+  // a dashboard virtual key (sk-…) is enough, the same trust level as the
+  // usage-import self-serve path. GET only; the route returns no credentials.
+  if (request.method === "GET" && pathname === "/api/usage/quotas" && (await hasValidApiKey(request))) {
+    return NextResponse.next();
+  }
+
+  // Quota PUSH counterpart of the line above: external companion apps (e.g.
+  // CreditDaddy) post parsed quota NUMBERS for display-only cards. POST/DELETE
+  // on /api/external-quota/<source> passes with a virtual key or the CLI
+  // token; the route verifies again itself — under requireLogin=false the
+  // catch-all below would let any LAN writer through unauthenticated, and the
+  // payload whitelist (src/lib/externalQuota.js) is what keeps this path
+  // display-only. GET on the prefix stays behind the normal auth (dashboard).
+  if (
+    (request.method === "POST" || request.method === "DELETE") &&
+    pathname.startsWith("/api/external-quota/") &&
+    ((await hasValidApiKey(request)) || (await hasValidCliToken(request)))
+  ) {
+    return NextResponse.next();
+  }
+
+  // Agent-managed custom provider write (POST create node / add connection) may
+  // use a dashboard virtual key, so remote agents (e.g. CreditDaddy's account
+  // sync) can self-serve connections without a CLI token. Only the bare root
+  // paths + POST match; list/update/delete on [id] routes stay protected.
+  // (issue #38: this used to live inside the ALWAYS_PROTECTED branch, which
+  // never matches these paths, so the exception was dead code and every
+  // remote virtual-key write fell through to the deny-by-default 401.)
+  if (
+    request.method === "POST" &&
+    (pathname === "/api/provider-nodes" || pathname === "/api/providers") &&
+    (await hasValidApiKey(request))
+  ) {
+    return NextResponse.next();
   }
 
   // Deny-by-default for /api/* — public allow-list bypasses, everything else requires auth.
@@ -259,9 +398,11 @@ export async function proxy(request) {
   if (pathname.startsWith("/dashboard")) {
     let requireLogin = true;
     let tunnelDashboardAccess = true;
+    let dashboardSettings = null;
 
     try {
       const settings = await loadSettings();
+      dashboardSettings = settings;
       if (settings) {
         requireLogin = settings.requireLogin !== false;
         tunnelDashboardAccess = settings.tunnelDashboardAccess === true;
@@ -282,6 +423,16 @@ export async function proxy(request) {
 
     // If login not required, allow through
     if (!requireLogin) return NextResponse.next();
+
+    // Bootstrap state (see isAuthenticated): with nothing configured at all, a
+    // remote client has no secret to present — it gets the login page, which
+    // explains that the first password has to be set on the machine itself. The
+    // loopback operator is let straight in so they *can* set one. This HTML
+    // branch reads the cookie directly rather than going through
+    // isAuthenticated, so it needs its own copy of the rule.
+    if (!isDashboardAuthConfigured(dashboardSettings) && isLocalRequest(request)) {
+      return NextResponse.next();
+    }
 
     // Verify JWT token
     const token = request.cookies.get("auth_token")?.value;

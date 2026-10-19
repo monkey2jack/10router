@@ -27,10 +27,12 @@
 
 ```
 desktop/
-├── main.js          # 全部壳逻辑(托盘/窗口/启停/健康轮询/单实例)
+├── main.js          # 全部壳逻辑(托盘/窗口/启停/健康轮询/单实例/更新握手)
+├── updateRequest.js # 仪表盘→壳 更新握手 marker 的解析与一次性消费
 ├── package.json     # electron + electron-builder(devDeps)+ build 配置
 ├── icon.ico/.png    # 托盘/安装包图标(品牌橙,与 CLI 托盘一致)
 ├── make_icon.py     # 用 Pillow 重新生成图标(改品牌色后跑一遍)
+├── make_installer_art.py  # 用 Pillow 生成安装器/卸载器品牌侧板 BMP(跑一遍)
 ├── build.ps1        # Windows 一键打包
 ├── build.sh         # macOS 一键打包(必须在 mac 上执行)
 └── dist/            # 产物(gitignore)
@@ -46,7 +48,7 @@ cd desktop
 .\build.ps1 -SkipAppBuild   # 源码没变时复用已有 cli/app,省一次 Next build
 ```
 
-产物:`dist\10Router-Setup-<版本>.exe`(NSIS 安装包,支持 `/S` 静默安装)+
+产物:`dist\10Router-Setup-<版本>.exe`(NSIS 安装包;`/S` 静默安装**需直接执行安装器**才生效,见 docs/zh-CN/local-build-and-verify.md 2.5 节)+
 `dist\10Router-Portable-<版本>.exe`(便携版,双击即用)。
 
 ### macOS(需 mac 机器)
@@ -84,4 +86,19 @@ cd desktop
 
 ## 版本同步
 
-三处版本号一起改:`cli/package.json`、`desktop/package.json`、`ChangeLog.md`。
+三处版本号一起改：`cli/package.json`、`desktop/package.json`、`ChangeLog.md`。
+
+## 本地测试构建
+
+把未发布的改动装进本机测，不要用已发布版本号重建（会得到「同号不同内容」的产物）：
+
+```powershell
+npm run test-version 1.1.0-test.1        # 盖测试版本号（三处 package.json + fnos manifest）
+node cli/scripts/build-cli.js
+cd desktop; npx electron-builder --win --dir
+# 停掉托盘 → 替换 resources/app 与 resources/app.asar（保留 elevate.exe）→ 启动
+npm run test-version -- --revert          # 测完回退
+```
+
+完整流程、验证方法与踩坑（含 `ELECTRON_RUN_AS_NODE` 会让 exe 以纯 Node 秒退这个坑）：
+见 `docs/zh-CN/local-build-and-verify.md`。

@@ -76,7 +76,7 @@ JSON（默认 `response_format=url`）：
 |---|---|---|
 | `openai`、`minimax`、`openrouter`、`recraft` | `quality`、`style`、`response_format` | 标准 OpenAI 结构 |
 | `gemini`（nano-banana） | — | 仅支持 `prompt`；忽略 `size`/`n` |
-| `codex`（gpt-5.4-image） | `image`、`images[]`、`image_detail`、`output_format`、`background` | SSE 流式；**需要 ChatGPT Plus/Pro** |
+| `codex`（gpt-5.5-image） | `image`、`images[]`、`image_detail`、`output_format`、`background` | SSE 流式；**需要 ChatGPT Plus/Pro** |
 | `huggingface` | — | 仅支持 `prompt`；返回单张图片 |
 | `nanobanana` | `image`、`images[]`（编辑模式） | `size` → 宽高比；异步轮询 |
 | `fal-ai` | `image`（图生图） | `n` → `num_images`；`size` → 比例；异步 |

@@ -1,6 +1,7 @@
 import { getApiKeys } from "@/lib/localDb";
 import { UPDATER_CONFIG } from "@/shared/constants/config";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
+import { CLI_TOKEN_HEADER } from "@/lib/auth/authHeaders";
 
 const CLI_TOKEN_SALT = "9r-cli-auth";
 
@@ -46,7 +47,7 @@ async function getInternalHeaders() {
 
   const headers = { "Content-Type": "application/json" };
   if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-  headers["x-9r-cli-token"] = await getConsistentMachineId(CLI_TOKEN_SALT);
+  headers[CLI_TOKEN_HEADER] = await getConsistentMachineId(CLI_TOKEN_SALT);
   return headers;
 }
 
@@ -73,6 +74,36 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
     const hasEmbedding = Array.isArray(parsed?.data) && parsed.data.length > 0 && Array.isArray(parsed.data[0]?.embedding);
     if (!hasEmbedding) {
       return { ok: false, latencyMs, status: res.status, error: "Provider returned no embedding data" };
+    }
+    return { ok: true, latencyMs, error: null, status: res.status };
+  }
+
+  if (kind === "systemone") {
+    const res = await fetch(`${baseUrl}/api/v1/systemone`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        state: "Customer: I was charged twice for my order this morning.",
+        questions: {
+          probe: { type: "noul", instructions: "Is the customer reporting a billing problem?" },
+        },
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    const latencyMs = Date.now() - start;
+    const rawText = await res.text().catch(() => "");
+    let parsed = null;
+    try { parsed = rawText ? JSON.parse(rawText) : null; } catch {}
+
+    if (!res.ok) {
+      const detail = parsed?.error?.message || parsed?.msg || parsed?.message || parsed?.error || rawText;
+      return { ok: false, latencyMs, error: `HTTP ${res.status}${detail ? `: ${String(detail).slice(0, 240)}` : ""}`, status: res.status };
+    }
+
+    const hasAnswers = parsed?.answers && typeof parsed.answers === "object" && Object.keys(parsed.answers).length > 0;
+    if (!hasAnswers) {
+      return { ok: false, latencyMs, status: res.status, error: "Provider returned no answers for this model" };
     }
     return { ok: true, latencyMs, error: null, status: res.status };
   }

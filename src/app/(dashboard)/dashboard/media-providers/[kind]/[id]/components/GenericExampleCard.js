@@ -39,7 +39,7 @@ export function GenericExampleCard({ providerId, kind }) {
   // Get models for this kind (e.g., type="image")
   const kindModels = getModelsByProviderId(providerId).filter((m) => getModelKind(m) === kind);
   // Kinds that need a model identifier in the request (image/video/music)
-  const KIND_NEEDS_MODEL = new Set(["image", "video", "music", "imageToText"]);
+  const KIND_NEEDS_MODEL = new Set(["image", "video", "music", "imageToText", "systemone"]);
   const needsModel = KIND_NEEDS_MODEL.has(kind);
   const allowManualModel = needsModel && kindModels.length === 0;
   const [selectedModel, setSelectedModel] = useState(kindModels[0]?.id ?? "");
@@ -48,6 +48,7 @@ export function GenericExampleCard({ providerId, kind }) {
   const supportsMask = !!selectedModelObj?.capabilities?.includes("mask");
 
   const [input, setInput] = useState(safeExConfig.defaultInput || "");
+  const [question, setQuestion] = useState("Does this request require urgent attention?");
   const [refImage, setRefImage] = useState("");
   const [maskImage, setMaskImage] = useState("");
   const [extraValues, setExtraValues] = useState(() =>
@@ -111,10 +112,19 @@ export function GenericExampleCard({ providerId, kind }) {
     acc[k] = v;
     return acc;
   }, {});
+  const systemoneQuestions = kind === "systemone" ? {
+    questions: {
+      is_urgent: {
+        type: "noul",
+        instructions: question.trim() || "Does this request require urgent attention?",
+      },
+    },
+  } : {};
   const requestBody = {
     model: modelFull,
     [exConfig.bodyKey]: input,
     ...exConfig.extraBody,
+    ...systemoneQuestions,
     ...extraBodyFromFields,
     ...(supportsEdit && effectiveRefImage ? { image: effectiveRefImage } : {}),
     ...(supportsMask && effectiveMaskImage ? { mask_image: effectiveMaskImage } : {}),
@@ -233,7 +243,7 @@ export function GenericExampleCard({ providerId, kind }) {
             <select
               value={selectedModel}
               onChange={(e) => setSelectedModel(e.target.value)}
-              className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
+              className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-surface focus:outline-none focus:border-primary"
             >
               {kindModels.map((m) => (
                 <option key={m.id} value={m.id}>{m.name || m.id}</option>
@@ -246,7 +256,7 @@ export function GenericExampleCard({ providerId, kind }) {
               value={selectedModel}
               onChange={(e) => setSelectedModel(e.target.value)}
               placeholder="Enter model id (provider-specific)"
-              className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary font-mono"
+              className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-surface focus:outline-none focus:border-primary font-mono"
             />
           </Row>
         ) : null}
@@ -285,7 +295,7 @@ export function GenericExampleCard({ providerId, kind }) {
             <select
               value={pinnedConnectionId}
               onChange={(e) => setPinnedConnectionId(e.target.value)}
-              className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
+              className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-surface focus:outline-none focus:border-primary"
             >
               <option value="">Auto (by priority)</option>
               {connections.map((c) => {
@@ -308,7 +318,7 @@ export function GenericExampleCard({ providerId, kind }) {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder={exConfig.inputPlaceholder}
-              className="w-full px-3 py-1.5 pr-7 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
+              className="w-full px-3 py-1.5 pr-7 text-sm border border-border rounded-lg bg-surface focus:outline-none focus:border-primary"
             />
             {input && (
               <button
@@ -322,6 +332,29 @@ export function GenericExampleCard({ providerId, kind }) {
           </div>
         </Row>
 
+        {/* Question for System One */}
+        {kind === "systemone" && (
+          <Row label="Question">
+            <div className="relative">
+              <input
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                placeholder="Enter evaluation question or criteria"
+                className="w-full px-3 py-1.5 pr-7 text-sm border border-border rounded-lg bg-surface focus:outline-none focus:border-primary"
+              />
+              {question && (
+                <button
+                  type="button"
+                  onClick={() => setQuestion("")}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-primary transition-colors"
+                >
+                  <span className="material-symbols-outlined text-[14px]">close</span>
+                </button>
+              )}
+            </div>
+          </Row>
+        )}
+
         {/* Reference image (only for edit-capable image models) */}
         {supportsEdit && (
           <Row label="Ref Image (URL)">
@@ -331,7 +364,7 @@ export function GenericExampleCard({ providerId, kind }) {
                   value={refImage}
                   onChange={(e) => setRefImage(e.target.value)}
                   placeholder={imageEditDefaults.image || "https://example.com/source.png"}
-                  className="w-full px-3 py-1.5 pr-7 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
+                  className="w-full px-3 py-1.5 pr-7 text-sm border border-border rounded-lg bg-surface focus:outline-none focus:border-primary"
                 />
                 {refImage && (
                   <button
@@ -366,7 +399,7 @@ export function GenericExampleCard({ providerId, kind }) {
                   value={maskImage}
                   onChange={(e) => setMaskImage(e.target.value)}
                   placeholder={imageEditDefaults.mask_image || "https://example.com/mask.png"}
-                  className="w-full px-3 py-1.5 pr-7 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
+                  className="w-full px-3 py-1.5 pr-7 text-sm border border-border rounded-lg bg-surface focus:outline-none focus:border-primary"
                 />
                 {maskImage && (
                   <button
@@ -402,7 +435,7 @@ export function GenericExampleCard({ providerId, kind }) {
               <select
                 value={extraValues[f.key] ?? ""}
                 onChange={(e) => setExtraValues((s) => ({ ...s, [f.key]: e.target.value }))}
-                className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
+                className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-surface focus:outline-none focus:border-primary"
               >
                 {(f.options || []).map((opt) => (
                   <option key={opt} value={opt}>{opt === "" ? "(default)" : opt}</option>
@@ -414,7 +447,7 @@ export function GenericExampleCard({ providerId, kind }) {
                 value={extraValues[f.key] ?? ""}
                 placeholder={f.placeholder}
                 onChange={(e) => setExtraValues((s) => ({ ...s, [f.key]: e.target.value }))}
-                className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
+                className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-surface focus:outline-none focus:border-primary"
               />
             ) : (
               <input
@@ -423,7 +456,7 @@ export function GenericExampleCard({ providerId, kind }) {
                 min={f.min}
                 max={f.max}
                 onChange={(e) => setExtraValues((s) => ({ ...s, [f.key]: e.target.value === "" ? "" : Number(e.target.value) }))}
-                className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
+                className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-surface focus:outline-none focus:border-primary"
               />
             )}
           </Row>
@@ -435,7 +468,7 @@ export function GenericExampleCard({ providerId, kind }) {
             <select
               value={imageOutputFormat}
               onChange={(e) => setImageOutputFormat(e.target.value)}
-              className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
+              className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-surface focus:outline-none focus:border-primary"
             >
               <option value="json">JSON (Base64)</option>
               <option value="binary">Binary File</option>

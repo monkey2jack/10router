@@ -47,7 +47,7 @@ const readSettings = async () => {
 };
 
 // Check if settings has 10Router customModels
-const has9RouterConfig = (settings) => {
+const has10RouterConfig = (settings) => {
   if (!settings || !settings.customModels) return false;
   return settings.customModels.some(m => m.id?.startsWith("custom:10Router"));
 };
@@ -70,7 +70,7 @@ export async function GET() {
     return NextResponse.json({
       installed: true,
       settings,
-      has10Router: has9RouterConfig(settings),
+      has10Router: has10RouterConfig(settings),
       settingsPath: getDroidSettingsPath(),
     });
   } catch (error) {

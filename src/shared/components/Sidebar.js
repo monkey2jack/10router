@@ -8,12 +8,14 @@ import { cn } from "@/shared/utils/cn";
 import { APP_CONFIG, UPDATER_CONFIG } from "@/shared/constants/config";
 import { MEDIA_PROVIDER_KINDS } from "@/shared/constants/providers";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
+import { copyTextToClipboard } from "@/shared/utils/clipboard";
 import { translate } from "@/i18n/runtime";
+import useSettingsStore from "@/store/settingsStore";
 import Button from "./Button";
 import { ConfirmModal } from "./Modal";
 
 // const VISIBLE_MEDIA_KINDS = ["embedding", "image", "imageToText", "tts", "stt", "webSearch", "webFetch", "video", "music"];
-const VISIBLE_MEDIA_KINDS = ["embedding", "image", "video", "tts", "stt"];
+const VISIBLE_MEDIA_KINDS = ["embedding", "image", "video", "tts", "stt", "systemone", "rerank"];
 // Combined entry: webSearch + webFetch share one page at /dashboard/media-providers/web
 const COMBINED_WEB_ITEM = { id: "web", label: "Web Fetch & Search", icon: "travel_explore", href: "/dashboard/media-providers/web" };
 
@@ -44,6 +46,7 @@ export default function Sidebar({ onClose }) {
   const [mediaOpen, setMediaOpen] = useState(false);
   const [isDisconnected, setIsDisconnected] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
+  const [staleBuild, setStaleBuild] = useState(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [shutdownCountdown, setShutdownCountdown] = useState(0);
@@ -53,17 +56,34 @@ export default function Sidebar({ onClose }) {
   const INSTALL_CMD = UPDATER_CONFIG.installCmdLatest;
 
   useEffect(() => {
-    fetch("/api/settings")
-      .then(res => res.json())
-      .then(data => { if (data.enableTranslator) setEnableTranslator(true); })
-      .catch(() => {});
+    useSettingsStore.getState().fetchSettings().then((data) => {
+      if (data?.enableTranslator) setEnableTranslator(true);
+    });
   }, []);
 
-  // Lazy check for new npm version on mount
+  // Lazy check for new npm version in background after initial render
   useEffect(() => {
-    fetch("/api/version")
+    const timer = setTimeout(() => {
+      fetch("/api/version")
+        .then(res => res.json())
+        .then(data => { if (data.hasUpdate) setUpdateInfo(data); })
+        .catch(() => {});
+    }, 2500);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Detect a leftover server: /api/version reports the version ON DISK
+  // (written by the CLI), so a mismatch means this process was started from a
+  // previous build — the "white screen after upgrade" case. Reloading or
+  // navigating cannot fix it; the process must be restarted.
+  useEffect(() => {
+    fetch("/api/version", { cache: "no-store" })
       .then(res => res.json())
-      .then(data => { if (data.hasUpdate) setUpdateInfo(data); })
+      .then(data => {
+        if (data.diskVersion && data.currentVersion && data.diskVersion !== data.currentVersion) {
+          setStaleBuild(data);
+        }
+      })
       .catch(() => {});
   }, []);
 
@@ -82,7 +102,7 @@ export default function Sidebar({ onClose }) {
 
   // Triggered by Copy button inside ManualUpdatePanel: copy + countdown + shutdown
   const handleCopyAndShutdown = async () => {
-    try { await navigator.clipboard.writeText(INSTALL_CMD); } catch { /* clipboard blocked */ }
+    await copyTextToClipboard(INSTALL_CMD);
     copy(INSTALL_CMD);
     let remaining = UPDATER_CONFIG.shutdownCountdownSec;
     setShutdownCountdown(remaining);
@@ -130,6 +150,18 @@ export default function Sidebar({ onClose }) {
               <span className="text-xs text-text-muted">v{APP_CONFIG.version}</span>
             </div>
           </Link>
+          {staleBuild && (
+            <div className="flex flex-col gap-1 rounded p-1.5 -m-1 bg-amber-500/10 border border-amber-500/40">
+              <span className="text-xs font-semibold text-amber-700 dark:text-amber-500">
+                {translate("Installed version ${disk} differs from the running build ${current}.")
+                  .replace("${disk}", staleBuild.diskVersion)
+                  .replace("${current}", staleBuild.currentVersion)}
+              </span>
+              <span className="text-[11px] text-text-muted">
+                {translate("Quit and reopen 10router, then refresh this page.")}
+              </span>
+            </div>
+          )}
           {updateInfo && (
             <div className="flex flex-col gap-1.5 rounded p-1 -m-1">
               <span className="text-xs font-semibold text-green-600 dark:text-amber-500">
@@ -215,6 +247,9 @@ export default function Sidebar({ onClose }) {
             >
               <span className="material-symbols-outlined text-[18px]">perm_media</span>
               <span className="text-[13px] font-medium flex-1 text-left">Media Providers</span>
+              {MEDIA_PROVIDER_KINDS.some((k) => VISIBLE_MEDIA_KINDS.includes(k.id) && k.isNew) && (
+                <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-[3px] bg-green-500/15 text-green-400">NEW</span>
+              )}
               <span className="material-symbols-outlined text-[14px] transition-transform" style={{ transform: mediaOpen ? "rotate(180deg)" : "rotate(0deg)" }}>
                 expand_more
               </span>
@@ -235,6 +270,9 @@ export default function Sidebar({ onClose }) {
                   >
                     <span className="material-symbols-outlined text-[16px]">{kind.icon}</span>
                     <span className="text-sm">{kind.label}</span>
+                    {kind.isNew && (
+                      <span className="ml-auto text-[10px] font-semibold px-1.5 py-0.5 rounded-[3px] bg-green-500/15 text-green-400">NEW</span>
+                    )}
                   </Link>
                 ))}
                 <Link
@@ -305,6 +343,28 @@ export default function Sidebar({ onClose }) {
                 </Link>
               ) : null;
             })}
+
+            {/* Experimental — beta toggles that act on provider accounts */}
+            <Link
+              href="/dashboard/experimental"
+              onClick={onClose}
+              className={cn(
+                "flex items-center gap-3 px-3 py-1 rounded-lg transition-all group",
+                isActive("/dashboard/experimental")
+                  ? "bg-primary/10 text-primary"
+                  : "text-text-muted hover:bg-surface-2 hover:text-text-main"
+              )}
+            >
+              <span
+                className={cn(
+                  "material-symbols-outlined text-[18px]",
+                  isActive("/dashboard/experimental") ? "fill-1" : "group-hover:text-primary transition-colors"
+                )}
+              >
+                science
+              </span>
+              <span className="text-[13px] font-medium">Experimental</span>
+            </Link>
 
             {/* Settings */}
             <Link

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createProxyPool, getProviderConnections, getProxyPools } from "@/models";
+import { proxyPoolUrlError } from "@/lib/network/outboundProxy.js";
 
 function toBoolean(value) {
   if (value === "true") return true;
@@ -23,6 +24,11 @@ function normalizeProxyPoolInput(body = {}) {
 
   if (!proxyUrl) {
     return { error: "Proxy URL is required" };
+  }
+
+  const proxyUrlError = proxyPoolUrlError(proxyUrl);
+  if (proxyUrlError) {
+    return { error: proxyUrlError };
   }
 
   return { name, proxyUrl, noProxy, isActive, strictProxy, type };

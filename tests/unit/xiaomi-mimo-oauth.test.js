@@ -8,6 +8,7 @@ import {
   generateKeyPair,
   decryptCallback,
   buildAuthorizeUrl,
+  buildManualAuthorizeUrl,
   getKeyName,
 } from "../../src/lib/oauth/providers/xiaomi-mimo.js";
 import {
@@ -27,8 +28,12 @@ const srcPath = (rel) => path.join(here, "..", "..", rel);
  * key. This lets the whole decrypt path be exercised without any credentials.
  */
 function encryptRawFor(clientPublicKeyB64, plaintext) {
+  // Mirrors the platform's own encrypter, byte for byte: it imports `pk` with a
+  // base64url decoder, and lays the payload out as ephemeral-pubkey FIRST, then the
+  // nonce. A helper that agrees with our decrypter instead of with the platform is
+  // worth nothing — that is exactly how the swapped layout survived a green suite.
   const clientPub = crypto.createPublicKey({
-    key: Buffer.from(clientPublicKeyB64, "base64"),
+    key: Buffer.from(clientPublicKeyB64, "base64url"),
     format: "der",
     type: "spki",
   });
@@ -48,25 +53,67 @@ function encryptRawFor(clientPublicKeyB64, plaintext) {
   // SPKI DER for X25519 = 12-byte prefix + 32-byte raw key
   const ephRaw = ephPub.export({ format: "der", type: "spki" }).subarray(12);
 
-  return Buffer.concat([nonce, ephRaw, ciphertext, tag]).toString("base64");
+  return Buffer.concat([ephRaw, nonce, ciphertext, tag]).toString("base64url");
 }
 
 const encryptFor = (clientPublicKeyB64, payload) =>
   encryptRawFor(clientPublicKeyB64, JSON.stringify(payload));
 
-async function hit(port, query, headers = {}) {
-  return fetch(`http://127.0.0.1:${port}/${query}`, { headers });
+/**
+ * Loopback fetch with a short retry. These tests drive a real socket, and under
+ * a loaded full-suite run the first connect occasionally fails with a bare
+ * `TypeError: fetch failed` before the listener is ready to accept — it passes
+ * in isolation and only ever trips in parallel, which made the regression gate
+ * flap on a test that is not actually testing anything flaky. Two extra
+ * attempts, a few ms apart, make the suite deterministic without hiding a real
+ * failure (a genuinely broken listener still fails all attempts).
+ */
+async function loopbackFetch(url, init = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await fetch(url, init);
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 25 * (attempt + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+async function hit(port, query, headers = {}, init = {}) {
+  // The listener only answers on its per-listener secret path (that path IS the
+  // anti-CSRF capability), so tests must address it through the URL it handed out.
+  const base = proxy?.callbackUrl || `http://127.0.0.1:${port}/`;
+  const url = new URL(base);
+  if (query) url.search = query.startsWith("?") ? query : `?${query}`;
+  return loopbackFetch(url.toString(), { headers, ...init });
+}
+
+/** Hit an arbitrary path — used to prove anything but the secret path is refused. */
+async function hitPath(port, path, headers = {}) {
+  return loopbackFetch(`http://127.0.0.1:${port}${path}`, { headers });
 }
 
 let proxy;
 
+// Sessions deliberately outlive the proxy listener (the platform's authorize page makes
+// the user paste a code by hand, so a key must survive a listener timeout), which means
+// stopping the proxy is NOT a way to reset them. Reset them explicitly instead.
+const TEST_STATES = ["s", "s1", "s2"];
+function resetSessions() {
+  for (const state of TEST_STATES) clearXiaomiMimoSession(state);
+}
+
 beforeEach(async () => {
   stopXiaomiMimoProxy();
+  resetSessions();
   proxy = await startXiaomiMimoProxy();
 });
 
 afterEach(() => {
   stopXiaomiMimoProxy();
+  resetSessions();
 });
 
 describe("xiaomi-mimo OAuth crypto", () => {
@@ -85,6 +132,63 @@ describe("xiaomi-mimo OAuth crypto", () => {
     const u = encryptFor(publicKey, { uid: "u-2", sk: "sk-2" });
 
     expect(decryptCallback(privateKeyDer, u).url).toBe("https://api.xiaomimimo.com/v1");
+  });
+
+  it("reads the official wire layout: ephemeral pubkey first, then the nonce", () => {
+    // Pinned against the official client's decrypter, which slices exactly this way.
+    // Reading the nonce first (the two leading fields swapped) breaks EVERY real code
+    // while still passing a round-trip against our own encrypter — which is how this
+    // shipped: the code is the right length and no key opens it.
+    const { publicKey, privateKeyDer } = generateKeyPair();
+    const { publicKey: ephPub, privateKey: ephPriv } = crypto.generateKeyPairSync("x25519");
+    const clientPub = crypto.createPublicKey({
+      key: Buffer.from(publicKey, "base64url"),
+      format: "der",
+      type: "spki",
+    });
+    const key = crypto
+      .createHash("sha256")
+      .update(crypto.diffieHellman({ privateKey: ephPriv, publicKey: clientPub }))
+      .digest();
+    const nonce = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv("aes-256-gcm", key, nonce);
+    const ct = Buffer.concat([cipher.update('{"uid":"u-3","sk":"sk-3"}', "utf8"), cipher.final()]);
+    const ephRaw = ephPub.export({ format: "der", type: "spki" }).subarray(12);
+    const official = Buffer.concat([ephRaw, nonce, ct, cipher.getAuthTag()]).toString("base64url");
+
+    // sanity: the layout really is pub-then-nonce
+    expect(Buffer.from(official, "base64url").subarray(0, 32)).toEqual(ephRaw);
+    expect(Buffer.from(official, "base64url").subarray(32, 44)).toEqual(nonce);
+
+    expect(decryptCallback(privateKeyDer, official).sk).toBe("sk-3");
+  });
+
+  it("still decrypts a payload re-encoded with the standard base64 alphabet", () => {
+    // A hand-copied code can arrive with `+`/`/` instead of `-`/`_`; decoding it as
+    // base64url naively would drop those characters and destroy a valid payload.
+    const { publicKey, privateKeyDer } = generateKeyPair();
+    const payload = { uid: "u-4", sk: "sk-4" };
+    const urlSafe = encryptFor(publicKey, payload);
+    const raw = Buffer.from(urlSafe, "base64url");
+    const standard = raw.toString("base64");
+
+    expect(decryptCallback(privateKeyDer, urlSafe).sk).toBe("sk-4");
+    expect(decryptCallback(privateKeyDer, standard).sk).toBe("sk-4");
+  });
+
+  it("encodes pk as base64url, so the platform decodes the DER we intended", () => {
+    // `+` and `/` are outside the base64url alphabet; an importer that drops them
+    // rebuilds a DIFFERENT public key and mints a code for a key we cannot open.
+    for (let i = 0; i < 40; i++) {
+      const { publicKey } = generateKeyPair();
+      expect(publicKey).not.toMatch(/[+/=]/);
+      const der = Buffer.from(publicKey, "base64url");
+      expect(der.length).toBe(44);
+      // round-trips back to an importable X25519 public key
+      expect(
+        crypto.createPublicKey({ key: der, format: "der", type: "spki" }).asymmetricKeyType,
+      ).toBe("x25519");
+    }
   });
 
   it("rejects a payload shorter than nonce+pubkey+tag", () => {
@@ -108,6 +212,28 @@ describe("xiaomi-mimo OAuth crypto", () => {
     expect(url.searchParams.get("kn")).toBe("mimocode");
   });
 
+  it("sends app=MiMo, like the official client's builder", () => {
+    // The platform selects which client the authorization code is minted for from this
+    // parameter. Without it the page returns a blob encrypted for a DIFFERENT key, so
+    // the code is well-formed and the right size yet no key we hold can open it.
+    const url = new URL(buildAuthorizeUrl("PUB", "http://localhost:1234/", "key-1"));
+    expect(url.searchParams.get("app")).toBe("MiMo");
+    expect(url.searchParams.get("key_name")).toBe("key-1");
+  });
+
+  it("offers the platform's own code-display page as the manual fallback", () => {
+    const url = new URL(buildManualAuthorizeUrl("PUB", "key-1"));
+    expect(url.pathname).toBe("/authorize");
+    // Identical request, except the payload is rendered for the user to copy instead of
+    // being handed to a listener — the manual half of the official flow.
+    expect(url.searchParams.get("pk")).toBe("PUB");
+    expect(url.searchParams.get("redirect_uri")).toBe(
+      "https://platform.xiaomimimo.com/authorize/code/callback",
+    );
+    expect(url.searchParams.get("kn")).toBe("mimocode");
+    expect(url.searchParams.get("app")).toBe("MiMo");
+  });
+
   it("derives a stable key name", () => {
     expect(getKeyName()).toBe(getKeyName());
     expect(getKeyName()).toMatch(/^10router-xmd-[0-9a-f]{8}$/);
@@ -115,29 +241,41 @@ describe("xiaomi-mimo OAuth crypto", () => {
 });
 
 describe("xiaomi-mimo OAuth callback proxy", () => {
-  it("binds loopback and reports a callback url", () => {
+  it("binds loopback and reports an unguessable callback path", () => {
     expect(proxy.success).toBe(true);
-    expect(proxy.callbackUrl).toBe(`http://127.0.0.1:${proxy.port}/`);
+    // The path is a capability: the platform fetches exactly this URL, and a page that
+    // cannot guess it cannot reach the handler at all.
+    expect(proxy.callbackUrl).toMatch(
+      new RegExp(`^http://127\\.0\\.0\\.1:${proxy.port}/callback/[0-9a-f]{32}$`),
+    );
   });
 
-  it("rejects a cross-origin request (login-CSRF from a web page)", async () => {
-    const res = await hit(proxy.port, "", { Origin: "https://attacker.example" });
-    expect(res.status).toBe(403);
+  it("refuses anything but the secret callback path (login-CSRF from a web page)", async () => {
+    // Replaces the old loopback-Origin guard: that one had to go because the platform's
+    // own https page is the legitimate caller. The secret path protects the same asset
+    // — an attacker page cannot know it, and cannot guess it.
+    const res = await hitPath(proxy.port, "/", { Origin: "https://attacker.example" });
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain("u=");
   });
 
-  it("allows a navigation redirect that carries no Origin", async () => {
-    const res = await hit(proxy.port, "");
-    expect(res.status).toBe(400); // reached the handler: missing `u`
+  it("reports a missing payload to the platform instead of rendering a page", async () => {
+    const res = await hit(proxy.port, "", {}, { redirect: "manual" });
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.get("location"));
+    expect(location.origin).toBe("https://platform.xiaomimimo.com");
+    expect(location.pathname).toBe("/authorize/callback");
+    expect(location.searchParams.get("status")).toBe("error");
+    expect(location.searchParams.get("message")).toBe("missing_data");
   });
 
-  it("allows a loopback Origin", async () => {
-    const res = await hit(proxy.port, "", { Origin: "http://127.0.0.1:3000" });
-    expect(res.status).toBe(400);
-  });
-
-  it("reports an error when no session is pending", async () => {
-    const res = await hit(proxy.port, "?u=AAAA");
-    expect(res.status).toBe(500);
+  it("serves a cross-origin call from the platform login page", async () => {
+    // The platform's page calls this listener with fetch() from its own https origin,
+    // which a loopback-only guard used to reject — silently breaking every sign-in.
+    const origin = "https://platform.xiaomimimo.com";
+    const preflight = await loopbackFetch(proxy.callbackUrl, { method: "OPTIONS", headers: { Origin: origin } });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBe(origin);
   });
 
   it("stores the decrypted key on the matched session", async () => {
@@ -145,9 +283,15 @@ describe("xiaomi-mimo OAuth callback proxy", () => {
     registerXiaomiMimoSession({ state: "s1", privateKeyDer });
 
     const u = encryptFor(publicKey, { uid: "uid-9", sk: "sk-live" });
-    const res = await hit(proxy.port, `?u=${encodeURIComponent(u)}`);
+    const res = await hit(proxy.port, `?u=${encodeURIComponent(u)}`, {}, { redirect: "manual" });
 
-    expect(res.status).toBe(200);
+    // Success is reported by redirecting the platform's page to its own callback URL,
+    // exactly as the official client does — the page then closes out its sign-in UI.
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.get("location"));
+    expect(location.pathname).toBe("/authorize/callback");
+    expect(location.searchParams.get("status")).toBe("success");
+
     const status = getXiaomiMimoSessionStatus("s1");
     expect(status.status).toBe("done");
     expect(status.result.accessToken).toBe("sk-live");
@@ -171,9 +315,10 @@ describe("xiaomi-mimo OAuth callback proxy", () => {
     registerXiaomiMimoSession({ state: "s1", privateKeyDer: a.privateKeyDer });
     registerXiaomiMimoSession({ state: "s2", privateKeyDer: b.privateKeyDer });
 
-    const res = await hit(proxy.port, "?u=AAAA");
+    const res = await hit(proxy.port, "?u=AAAA", {}, { redirect: "manual" });
 
-    expect(res.status).toBe(400);
+    // Reported to the platform's page as a failure; the in-flight logins stay untouched.
+    expect(res.status).toBe(302);
     // One stray request must not abort every in-flight login.
     expect(getXiaomiMimoSessionStatus("s1").status).toBe("pending");
     expect(getXiaomiMimoSessionStatus("s2").status).toBe("pending");
@@ -183,37 +328,47 @@ describe("xiaomi-mimo OAuth callback proxy", () => {
     const { privateKeyDer } = generateKeyPair();
     registerXiaomiMimoSession({ state: "s1", privateKeyDer });
 
-    const res = await hit(proxy.port, "?u=AAAA");
+    const res = await hit(proxy.port, "?u=AAAA", {}, { redirect: "manual" });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(302);
     const status = getXiaomiMimoSessionStatus("s1");
     expect(status.status).toBe("error");
     expect(status.error).toMatch(/decrypt/i);
   });
 
-  it("never reflects the submitted payload into the error page", async () => {
-    // Decrypt failures are swallowed per session and replaced with a constant
-    // message, so the rendered page must never contain the submitted bytes.
+  it("reports an unreadable payload to the platform, without reflecting it", async () => {
+    // Failures are reported to the platform's page by redirect (there is no page of ours
+    // left to render), and the constant message means the submitted bytes can never
+    // travel back — the Location must stay a fixed platform URL.
     const { publicKey, privateKeyDer } = generateKeyPair();
     registerXiaomiMimoSession({ state: "s1", privateKeyDer });
 
     const u = encryptRawFor(publicKey, "<script>alert(1)</script>");
-    const res = await hit(proxy.port, `?u=${encodeURIComponent(u)}`);
+    const res = await hit(proxy.port, `?u=${encodeURIComponent(u)}`, {}, { redirect: "manual" });
+    const location = res.headers.get("location") || "";
     const body = await res.text();
 
-    expect(res.status).toBe(400);
-    expect(body).toContain("Authentication Failed");
-    expect(body).toContain("Could not decrypt with any pending session key");
-    expect(body).not.toContain("<script>alert(1)</script>");
+    expect(res.status).toBe(302);
+    expect(location).toContain("/authorize/callback?status=error&message=decrypt_failed");
+    expect(location).not.toContain("alert");
     expect(body).not.toContain("alert(1)");
+    expect(body).not.toContain(u);
   });
 
-  it("drops sessions when the proxy stops", () => {
+  it("keeps sessions alive when the proxy stops", () => {
+    // The listener is only the AUTOMATIC callback path. The authorize page also shows a
+    // code to paste by hand, and that path stays valid after the 5-minute listener
+    // times out — so stopping the listener must never drop the keys. It used to, which
+    // made a pasted code fail with "does not match this sign-in" exactly when a user
+    // fell back to pasting.
     const { privateKeyDer } = generateKeyPair();
     registerXiaomiMimoSession({ state: "s1", privateKeyDer });
     expect(getXiaomiMimoSessionStatus("s1")).not.toBeNull();
 
     stopXiaomiMimoProxy();
+    expect(getXiaomiMimoSessionStatus("s1")).not.toBeNull();
+
+    clearXiaomiMimoSession("s1");
     expect(getXiaomiMimoSessionStatus("s1")).toBeNull();
   });
 
@@ -243,13 +398,19 @@ describe("xiaomi-mimo OAuth security invariants (source)", () => {
     expect(source).not.toContain("for (const [, session] of pendingSessions) {");
   });
 
-  it("keeps the loopback origin guard on the proxy", () => {
+  it("keeps a per-listener secret callback path", () => {
+    // This replaced the loopback-Origin guard, which could never pass for the platform's
+    // own https login page (it was rejecting the one legitimate cross-origin caller).
     const source = fs.readFileSync(srcPath("src/lib/oauth/utils/server.js"), "utf-8");
-    expect(source).toContain("if (!isLoopbackOrigin(req.headers.origin))");
+    expect(source).toContain('`/callback/${crypto.randomBytes(16).toString("hex")}`');
+    expect(source).toContain("if (url.pathname !== callbackPath)");
   });
 
-  it("renders callback pages through the escaped house renderer", () => {
+  it("reports the hand-off to the platform's own callback page", () => {
     const source = fs.readFileSync(srcPath("src/lib/oauth/utils/server.js"), "utf-8");
-    expect(source).toContain("renderCodexResultPage(false, `Decryption failed: ${err.message}`)");
+    // Mirroring the official client: the page that opened the sign-in is the one that
+    // must be told how it went, otherwise its UI hangs with no success state.
+    expect(source).toContain("/authorize/callback");
+    expect(source).toContain('xiaomiMimoPlatformCallbackUrl("success")');
   });
 });

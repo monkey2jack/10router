@@ -57,7 +57,7 @@ const readSettings = async () => {
 };
 
 // Check if settings has 10Router config
-const has9RouterConfig = (settings) => {
+const has10RouterConfig = (settings) => {
   if (!settings || !settings.models || !settings.models.providers) return false;
   return !!settings.models.providers["10router"];
 };
@@ -105,7 +105,7 @@ export async function GET() {
       installed: true,
       settings,
       agents: enrichedAgents,
-      has10Router: has9RouterConfig(settings),
+      has10Router: has10RouterConfig(settings),
       settingsPath: getOpenClawSettingsPath(),
     });
   } catch (error) {

@@ -190,14 +190,11 @@ function normalizeProxyUrl(proxyUrl) {
   const normalizedInput = normalizeString(proxyUrl);
   if (!normalizedInput) return null;
 
-  try {
-
-    new URL(normalizedInput);
-    return normalizedInput;
-  } catch {
-    // Allow "127.0.0.1:7890" style values
-    return `http://${normalizedInput}`;
-  }
+  // Allow "127.0.0.1:7890" / "localhost:7890" style values. A scheme test, not
+  // `new URL()`: "localhost:7890" parses as the scheme "localhost:".
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(normalizedInput)
+    ? normalizedInput
+    : `http://${normalizedInput}`;
 }
 
 function resolveConnectionProxyUrl(targetUrl, proxyOptions) {
@@ -321,6 +318,9 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
         if (proxyOptions?.strictProxy === true) {
           throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${proxyError.message}`);
         }
+        if (proxyOptions?.onProxyFallback) {
+          try { proxyOptions.onProxyFallback(proxyError); } catch {}
+        }
         console.warn(`[ProxyFetch] Proxy failed, falling back to direct bypass: ${proxyError.message}`);
       }
     }
@@ -332,6 +332,9 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
     } catch (error) {
       console.warn(`[ProxyFetch] MITM bypass failed: ${error.message}`);
     }
+    // The proxy already failed (and was reported) above — go direct rather than
+    // retrying it and firing onProxyFallback a second time.
+    if (proxyUrl) return originalFetch(url, options);
   }
 
   if (proxyUrl) {
@@ -343,9 +346,28 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
       if (proxyOptions?.strictProxy === true) {
         throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${proxyError.message}`);
       }
+      if (proxyOptions?.onProxyFallback) {
+        try { proxyOptions.onProxyFallback(proxyError); } catch {}
+      }
       console.warn(`[ProxyFetch] Proxy failed, falling back to direct: ${proxyError.message}`);
       return originalFetch(url, options);
     }
+  }
+
+  // 严格模式即"绝不走直连 IP"。走到这里说明调用方有代理意图但一个代理
+  // 都没解析出来(代理池停用/为空,或 URL 丢失)——静默直连正是 strictProxy
+  // 要防的真实 IP 泄漏,所以拒绝而不是放行。上面两处 catch 只覆盖"真的尝试
+  // 过代理但失败"的情形。
+  //
+  // 以"是否存在代理意图"为门槛:像 Qoder 执行器把 strictProxy 用作"代理失败
+  // 时不要用直连重放本请求"(重放的 COSY 签名会被 403),而非"必须挂代理";
+  // 完全没配置代理的调用必须照常工作。
+  const proxyIntended = proxyOptions?.proxyPoolId
+    || proxyOptions?.enabled === true
+    || proxyOptions?.connectionProxyEnabled === true
+    || !!normalizeString(proxyOptions?.url ?? proxyOptions?.connectionProxyUrl);
+  if (proxyOptions?.strictProxy === true && proxyIntended) {
+    throw new Error("[ProxyFetch] Proxy required but none resolved (strictProxy=true)");
   }
 
   // got-scraping disabled — use native fetch directly

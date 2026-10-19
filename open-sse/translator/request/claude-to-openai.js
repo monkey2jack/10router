@@ -5,6 +5,10 @@ import { encodeDataUri } from "../concerns/image.js";
 import { ROLE, OPENAI_BLOCK, CLAUDE_BLOCK } from "../schema/index.js";
 import { collapseTextParts } from "../concerns/message.js";
 
+// Anthropic and OpenAI both cap stop sequences at 4; a client that sends more
+// would 400 upstream, so trim instead of forwarding a request the provider rejects.
+const MAX_STOP_SEQUENCES = 4;
+
 function stripAnthropicBillingHeader(text) {
   if (typeof text !== "string") return "";
   return text.replace(/^x-anthropic-billing-header:[^\n]*(?:\r?\n)?/i, "");
@@ -21,6 +25,22 @@ export function claudeToOpenAIRequest(model, body, stream) {
   // Max tokens
   if (body.max_tokens) {
     result.max_tokens = adjustMaxTokens(body);
+  }
+
+  // Stop sequences — Anthropic `stop_sequences` is OpenAI `stop` (both cap at 4).
+  // Dropping it is NOT cosmetic (issue #18): Claude Code's auto-mode classifier
+  // sends stop_sequences:["</block>"] together with max_tokens:64 and relies on
+  // the model halting the instant it emits the verdict tag. Without the stop the
+  // model keeps generating past the tag, the 64-token budget truncates the turn,
+  // and the client's xml_2stage parser rejects it — its severity parser demands
+  // stop_reason ∈ {stop_sequence, end_turn}, so a `max_tokens` truncation parses
+  // as null → "classifier unavailable". Affects every claude→openai request (any
+  // client-supplied stop sequence was silently ignored), not just the classifier.
+  if (body.stop_sequences !== undefined) {
+    const stops = (Array.isArray(body.stop_sequences) ? body.stop_sequences : [body.stop_sequences])
+      .filter((s) => typeof s === "string" && s.length > 0)
+      .slice(0, MAX_STOP_SEQUENCES);
+    if (stops.length > 0) result.stop = stops;
   }
 
   // Temperature
@@ -142,6 +162,14 @@ function systemReminderText(content) {
 
 // Convert single Claude message - returns single message or array of messages
 function convertClaudeMessage(msg) {
+  // Some clients send content as a single block object; normalize to the
+  // one-element array every branch below (the system-reminder fold included)
+  // expects. Must run BEFORE the role branch: systemReminderText only reads
+  // arrays and strings, so a bare-object system turn was dropped outright.
+  // (上游 8a81085a)
+  if (msg.content && typeof msg.content === "object" && !Array.isArray(msg.content)) {
+    msg.content = [msg.content];
+  }
   // Mid-conversation system message -> user (per Anthropic placement rules)
   if (msg.role === ROLE.SYSTEM) {
     const text = systemReminderText(msg.content);
@@ -194,14 +222,30 @@ function convertClaudeMessage(msg) {
           if (typeof block.content === "string") {
             resultContent = block.content;
           } else if (Array.isArray(block.content)) {
-            resultContent = block.content
-              .filter(c => c.type === CLAUDE_BLOCK.TEXT)
-              .map(c => c.text)
-              .join("\n") || JSON.stringify(block.content);
+            const textParts = [];
+            for (const item of block.content) {
+              if (item?.type === CLAUDE_BLOCK.TEXT && typeof item.text === "string") {
+                textParts.push(item.text);
+              } else if (item?.type === CLAUDE_BLOCK.IMAGE && item.source?.type === "base64") {
+                parts.push({
+                  type: OPENAI_BLOCK.IMAGE_URL,
+                  image_url: {
+                    url: encodeDataUri(item.source.media_type, item.source.data),
+                  },
+                });
+              }
+            }
+            resultContent = textParts.join("\n");
+            // If tool_result had only images (no text), avoid JSON.stringify of the entire base64 array
+            if (!resultContent && block.content.some((c) => c?.type === CLAUDE_BLOCK.IMAGE)) {
+              resultContent = "[Image attached to tool result]";
+            } else if (!resultContent) {
+              resultContent = JSON.stringify(block.content);
+            }
           } else if (block.content) {
             resultContent = JSON.stringify(block.content);
           }
-          
+
           toolResults.push({
             role: ROLE.TOOL,
             tool_call_id: block.tool_use_id,

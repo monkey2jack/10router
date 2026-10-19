@@ -39,10 +39,24 @@ cd '/vol1/1000/fnOS Dev/10router-fnos'
 chmod +x cmd/*
 # url 版
 python3 -c "import json;p='app/ui/config';d=json.load(open(p));d['.url']['10router.Application']['type']='url';json.dump(d,open(p,'w'),ensure_ascii=False,indent=2)"
-fnpack build && mv 10router.fpk 10router-$(version)-x86.fpk
-# iframe 版
-...同上 type='iframe'...
+fnpack build && mv 10router.fpk 10Router-FnOS-$(version)-x86.fpk
+# iframe 版（线上叫 Window 变体）
+...同上 type='iframe'... → mv 10router.fpk 10Router-FnOS-Window-$(version)-x86.fpk
 ```
+
+## 测试构建（不发布）
+
+本地/真机验证未发布的改动时，用测试版本号而不是已发布版本号重建（否则得到「同号不同内容」的 fpk）：
+
+```bash
+npm run test-version 1.1.0-test.1   # 三处 package.json + 本目录 manifest 同号
+npm run prebuild:fpk                # manifest version ← package.json（测试号进 fpk 文件名）
+npm run build
+# 再到 NAS 上组装 + fnpack build（见上）
+npm run test-version -- --revert     # 测完回退
+```
+
+两条通道（Windows 桌面版 / fpk）共用的流程、验证方法论与踩坑：`docs/zh-CN/local-build-and-verify.md`。
 
 ## 关键修复记录
 

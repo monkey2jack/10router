@@ -5,20 +5,21 @@
 import { getCapabilitiesForModel } from "../../providers/capabilities.js";
 import { getThinkingLevels } from "../../providers/thinkingLevels.js";
 import { PROVIDERS } from "../../providers/index.js";
+import { FORMATS } from "../formats.js";
 import { LEVEL_TO_BUDGET, budgetToLevel, effortToBudget, effortToThinkingLevel } from "./thinking.js";
 
 // Map a target wire-format to its native thinking format (when capability has none).
 const FORMAT_TO_NATIVE = {
-  openai: "openai",
-  "openai-responses": "openai",
-  "openai-response": "openai",
-  codex: "openai",
-  claude: "claude-budget",
-  gemini: "gemini-budget",
-  "gemini-cli": "gemini-budget",
-  vertex: "gemini-budget",
-  antigravity: "gemini-budget",
-  kiro: "kiro",
+  [FORMATS.OPENAI]: "openai",
+  [FORMATS.OPENAI_RESPONSES]: "openai",
+  [FORMATS.OPENAI_RESPONSE]: "openai",
+  [FORMATS.CODEX]: "openai",
+  [FORMATS.CLAUDE]: "claude-budget",
+  [FORMATS.GEMINI]: "gemini-budget",
+  [FORMATS.GEMINI_CLI]: "gemini-budget",
+  [FORMATS.VERTEX]: "gemini-budget",
+  [FORMATS.ANTIGRAVITY]: "gemini-budget",
+  [FORMATS.KIRO]: "kiro",
 };
 
 // Strip a trailing thinking suffix "model(value)" → "model" (no-op when absent).
@@ -101,9 +102,28 @@ export function extractThinking(body) {
   return null;
 }
 
-// Capture thinking intent from a body. Alias of extractThinking, named for clarity
-// at the call-site where intent is snapshotted before format translation.
-export const captureThinking = extractThinking;
+// Capture thinking intent from a body before format translation strips it.
+// Besides the effort, records whether an OpenAI-shaped client wants the thinking
+// text itself: Claude only returns thinking when thinking.display is "summarized",
+// a field OpenAI has no equivalent for, so the ask cannot survive translation.
+export function captureThinking(body) {
+  const cfg = extractThinking(body);
+  if (!cfg || cfg.mode === "none") return cfg;
+  const display = openAIThinkingDisplay(body);
+  return display ? { ...cfg, display } : cfg;
+}
+
+// An OpenAI-shaped client can only *ask* for reasoning text, not set Claude's
+// thinking.display: the Responses API's reasoning.summary is the explicit ask;
+// Chat Completions has no summary knob — setting reasoning_effort is the ask.
+function openAIThinkingDisplay(body) {
+  if (body.reasoning && typeof body.reasoning === "object") {
+    const summary = body.reasoning.summary;
+    return typeof summary === "string" && summary && summary !== "none" ? "summarized" : undefined;
+  }
+  if (typeof body.reasoning_effort === "string") return "summarized";
+  return undefined;
+}
 
 // Resolve thinking format: provider override > capability > derive(targetFormat).
 function resolveFormat(targetFormat, model, provider) {
@@ -222,7 +242,7 @@ function stripAll(body) {
 }
 
 // Apply unified thinking config to body in the resolved provider-native format.
-function applyFormat(fmt, body, cfg, caps, supportedLevels) {
+function applyFormat(fmt, body, cfg, caps, supportedLevels, targetFormat = null, provider = null, display = null) {
   const none = cfg.mode === "none";
   const canDisable = caps.thinkingCanDisable !== false;
   // Model cannot disable thinking → clamp "none" to minimal effort instead.
@@ -230,9 +250,23 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels) {
 
   switch (fmt) {
     case "openai": {
-      if (none && canDisable) { body.reasoning_effort = "none"; break; }
+      // Responses wire format carries the effort on `reasoning.effort`;
+      // `reasoning_effort` is Chat-Completions-only and Responses upstreams
+      // reject it with 400 unsupported_parameter ("moved to 'reasoning.effort'").
+      // applyThinking runs AFTER the openai→responses translator, so the field
+      // must be written in the target's native shape here — EXCEPT for the
+      // codex provider: its executor owns the final conversion
+      // (normalizeReasoningEffort + reasoning.summary re-attachment) and feeds
+      // on reasoning_effort.
+      const responsesFamily = (targetFormat === FORMATS.OPENAI_RESPONSES ||
+        targetFormat === FORMATS.OPENAI_RESPONSE) && provider !== "codex";
+      const setEffort = (v) => {
+        if (responsesFamily) body.reasoning = { ...(body.reasoning || {}), effort: v };
+        else body.reasoning_effort = v;
+      };
+      if (none && canDisable) { setEffort("none"); break; }
       const level = toLevel(eff);
-      if (level) body.reasoning_effort = normalizeOpenAILevel(level, supportedLevels);
+      if (level) setEffort(normalizeOpenAILevel(level, supportedLevels));
       break;
     }
     case "claude-adaptive": {
@@ -244,16 +278,20 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels) {
       // Sonnet 5. Send both fields — the documented adaptive shape. Permanently
       // adaptive models (thinkingCanDisable:false, e.g. Fable) never get the
       // redundant thinking switch — effort alone drives them.
-      if (canDisable) body.thinking = { type: "adaptive" };
+      if (canDisable) body.thinking = { type: "adaptive", ...(display ? { display } : {}) };
       // "auto" is not a value Anthropic accepts in output_config.effort — map it to high.
+      // xhigh 按模型分档（Opus/Sonnet 4.6 拒绝该值）——模型未声明支持时钳回 high。
       const level = toLevel(eff);
-      body.output_config = { effort: level === "xhigh" || level === "auto" ? "high" : level };
+      body.output_config = { effort: level === "auto" ? "high"
+        : level === "xhigh" && !supportedLevels?.includes("xhigh") ? "high" : level };
       break;
     }
     case "claude-budget": {
       if (none && canDisable) { body.thinking = { type: "disabled" }; break; }
       const budget = toBudget(eff, caps.thinkingRange);
-      body.thinking = budget === -1 ? { type: "enabled" } : { type: "enabled", budget_tokens: budget || 8192 };
+      body.thinking = budget === -1
+        ? { type: "enabled", ...(display ? { display } : {}) }
+        : { type: "enabled", budget_tokens: budget || 8192, ...(display ? { display } : {}) };
       break;
     }
     case "gemini-level": {
@@ -299,6 +337,16 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels) {
     case "minimax": {
       // M3 adaptive; M2.x cannot disable (handled via canDisable clamp).
       body.thinking = { type: none && canDisable ? "disabled" : "adaptive" };
+      // M3.1-Flash-Preview 支持可调思考深度（官方客户端档位 default/low/medium/
+      // high/xhigh/max）: effort 附加在 adaptive 形态里透传——CreditDaddy 网关实测
+      // 200 接受（不认识该字段的旧上游会静默忽略,无害）。default 省略字段走上游
+      // 默认;minimal 是 none 被 canDisable 钳制出来的档,MiniMax 无此档,同样省略。
+      // 透传门控在 !canDisable 上:M3.1（不可关 → 档位模型）才带 effort,M3（开关
+      // 模型）与 M2.x 只发 adaptive/disabled——官方客户端给它们的设置面板无档位。
+      if (!none && !canDisable) {
+        const lvl = toLevel(eff);
+        if (lvl && lvl !== "auto" && lvl !== "minimal") body.thinking.effort = lvl;
+      }
       break;
     }
     case "hunyuan": {
@@ -350,7 +398,10 @@ export function applyThinking(targetFormat, model, body, provider = null, intent
 
   const fmt = resolveFormat(targetFormat, cleanModel, provider);
   const supportedLevels = getThinkingLevels(provider, cleanModel);
+  // An OpenAI-shaped client's display ask arrives via the captured intent instead;
+  // a Claude-format client's own body.thinking.display (read before stripAll) wins.
+  const display = typeof body.thinking?.display === "string" ? body.thinking.display : intent?.display;
   stripAll(body);
-  applyFormat(fmt, body, cfg, caps, supportedLevels);
+  applyFormat(fmt, body, cfg, caps, supportedLevels, targetFormat, provider, display);
   return body;
 }

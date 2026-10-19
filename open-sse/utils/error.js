@@ -1,4 +1,5 @@
 import { ERROR_TYPES, DEFAULT_ERROR_MESSAGES } from "../config/errorConfig.js";
+import { withRealnameHint, withInsufficientBalanceHint } from "../services/accountFallback.js";
 
 /**
  * Build OpenAI-compatible error response body
@@ -13,6 +14,7 @@ export function buildErrorBody(statusCode, message) {
       : { type: "invalid_request_error", code: "" });
 
   return {
+    type: "error",
     error: {
       message: message || DEFAULT_ERROR_MESSAGES[statusCode] || "An error occurred",
       type: errorInfo.type,
@@ -27,12 +29,13 @@ export function buildErrorBody(statusCode, message) {
  * @param {string} message - Error message
  * @returns {Response} HTTP Response object
  */
-export function errorResponse(statusCode, message) {
+export function errorResponse(statusCode, message, extraHeaders = null) {
   return new Response(JSON.stringify(buildErrorBody(statusCode, message)), {
     status: statusCode,
     headers: {
       "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*"
+      "Access-Control-Allow-Origin": "*",
+      ...extraHeaders
     }
   });
 }
@@ -55,6 +58,30 @@ export async function writeStreamError(writer, statusCode, message) {
  * @param {object} [executor] - Optional executor with parseError() override for provider-specific parsing
  * @returns {Promise<{statusCode: number, message: string, resetsAtMs?: number}>}
  */
+
+// Google surfaces (Gemini Code Assist / Antigravity cloudcode-pa) answer a flagged
+// account with 403 VALIDATION_REQUIRED and bury the only actionable part — a one-click
+// "Verify your account" URL — inside the error JSON (BaseExecutor.parseError passes the
+// raw body through verbatim). Surface the URL instead of the JSON wall.
+const VALIDATION_REASON_MARKER = "VALIDATION_REQUIRED";
+const VALIDATION_URL_RE = /"validation_url"\s*:\s*"([^"]+)"/;
+
+export function buildAccountValidationMessage(bodyText) {
+  if (!bodyText || !bodyText.includes(VALIDATION_REASON_MARKER)) return null;
+  const match = VALIDATION_URL_RE.exec(bodyText);
+  if (!match) return null;
+  let url = match[1];
+  try {
+    url = JSON.parse(`"${url}"`); // unescape \/ and friends from the JSON encoding
+  } catch { /* keep the raw capture — still a usable URL */ }
+  // Place the actionable URL upfront so even if the error text is sliced/truncated,
+  // the verification link remains intact and reachable.
+  return (
+    `Google requires account verification (VALIDATION_REQUIRED): ${url} `
+    + "(Complete 'Verify your account' in a browser signed in to the affected account, or check 18+ age verification at https://myaccount.google.com/age-verification)"
+  );
+}
+
 export async function parseUpstreamError(response, executor = null) {
   let bodyText = "";
   try {
@@ -63,21 +90,42 @@ export async function parseUpstreamError(response, executor = null) {
     bodyText = "";
   }
 
+  const validationMessage = buildAccountValidationMessage(bodyText);
+
   // Let executor-specific parser extract provider-specific fields (e.g. codex resetsAtMs)
   if (executor && typeof executor.parseError === "function") {
     try {
       const parsed = executor.parseError(response, bodyText);
       if (parsed && typeof parsed === "object") {
-        const msg = parsed.message || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
+        const msg = validationMessage
+          || parsed.message
+          || DEFAULT_ERROR_MESSAGES[response.status]
+          || `Upstream error: ${response.status}`;
         return { statusCode: parsed.status || response.status, message: msg, resetsAtMs: parsed.resetsAtMs };
       }
     } catch { /* fall through to default parsing */ }
   }
 
+  if (validationMessage) {
+    return { statusCode: response.status, message: validationMessage };
+  }
+
   let message = "";
   try {
     const json = JSON.parse(bodyText);
-    message = json.error?.message || json.message || json.error || bodyText;
+    // CodeBuddy / Tencent 11133 or model provider errors often carry human-friendly tips in displayTips / displayMsg
+    if (json?.code === 11133 || json?.displayTips || json?.displayMsg) {
+      const tip = json.displayTips?.zh || json.displayTips?.en || json.displayTips?.["zh-hant"];
+      const msg = json.displayMsg?.zh || json.displayMsg?.en || json.displayMsg?.["zh-hant"] || json.msg || json.message;
+      if (tip) {
+        message = `${msg ? `${msg}：` : ""}${tip}`;
+      } else if (msg) {
+        message = msg;
+      }
+    }
+    if (!message) {
+      message = json.error?.message || json.message || json.msg || json.error || bodyText;
+    }
   } catch {
     message = bodyText;
   }
@@ -95,13 +143,13 @@ export async function parseUpstreamError(response, executor = null) {
  * @param {number} [resetsAtMs] - Optional precise cooldown expiry (ms epoch) for provider-specific quota errors
  * @returns {{ success: false, status: number, error: string, response: Response, resetsAtMs?: number }}
  */
-export function createErrorResult(statusCode, message, resetsAtMs) {
+export function createErrorResult(statusCode, message, resetsAtMs, extraHeaders = null) {
   return {
     success: false,
     status: statusCode,
     error: message,
     resetsAtMs,
-    response: errorResponse(statusCode, message)
+    response: errorResponse(statusCode, message, extraHeaders)
   };
 }
 
@@ -113,16 +161,27 @@ export function createErrorResult(statusCode, message, resetsAtMs) {
  * @param {string} retryAfterHuman - Human-readable retry info e.g. "reset after 30s"
  * @returns {Response}
  */
-export function unavailableResponse(statusCode, message, retryAfter, retryAfterHuman) {
+export function unavailableResponse(statusCode, message, retryAfter, retryAfterHuman, extraHeaders = null) {
   const retryAfterSec = Math.max(Math.ceil((new Date(retryAfter).getTime() - Date.now()) / 1000), 1);
-  const msg = `${message} (${retryAfterHuman})`;
+  // For permanent issues like insufficient balance (402), do not append misleading countdown
+  const isBalanceIssue = statusCode === 402 || /insufficient[_\s-]*balance|余额不足|欠费/i.test(message);
+  const msg = (isBalanceIssue || !retryAfterHuman) ? message : `${message} (${retryAfterHuman})`;
   return new Response(
-    JSON.stringify({ error: { message: msg } }),
+    JSON.stringify({
+      type: "error",
+      error: {
+        type: statusCode >= 500 ? "api_error" : "invalid_request_error",
+        message: msg,
+      },
+    }),
     {
       status: statusCode,
       headers: {
+        ...extraHeaders,
         "Content-Type": "application/json",
-        "Retry-After": String(retryAfterSec)
+        // Intentionally mis-cased to prevent duplicate headers: the gateway's
+        // own cooldown must win over any forwarded upstream retry-after.
+        ...(!isBalanceIssue ? { "retry-after": String(retryAfterSec) } : {})
       }
     }
   );
@@ -143,5 +202,14 @@ export function formatProviderError(error, provider, model, statusCode) {
   const causeCode = error.cause?.code;
   const causeMsg = error.cause?.message;
   const causeStr = causeCode || causeMsg ? ` (cause: ${[causeCode, causeMsg].filter(Boolean).join(": ")})` : "";
-  return `[${code}]: ${message}${causeStr}`;
+  const base = `[${code}]: ${message}${causeStr}`;
+  // An upstream real-name (实名) gate is a CONFIGURATION state, not a quota or a
+  // fault: the raw English JSON names no action the user can take, and 403's
+  // OpenAI-compatible type ("insufficient_quota") actively misleads them into
+  // topping up. Appending the go-and-do-this explanation here covers every core
+  // (chat / embeddings / image / video / systemone) at once — they all build
+  // their client-facing string through this function. Non-matching messages
+  // pass through byte-for-byte.
+  const withHint = withRealnameHint(base, provider);
+  return withInsufficientBalanceHint(withHint, provider);
 }

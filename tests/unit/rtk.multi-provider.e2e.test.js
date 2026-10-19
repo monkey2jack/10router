@@ -96,7 +96,7 @@ function chatBodyWithDiff(model, diff) {
 // Matrix of routes to cover — one entry per translator target format.
 const ROUTES = [
   { name: "claude (cc/* → openai→claude)",        model: "cc/claude-opus-4-7" },
-  { name: "codex (cx/* → openai→openai-responses)", model: "cx/gpt-5.4" },
+  { name: "codex (cx/* → openai→openai-responses)", model: "cx/gpt-5.5" },
   { name: "antigravity (ag/* → openai→antigravity)", model: "ag/gemini-3-flash" },
   { name: "cursor (cu/* → openai→cursor)",         model: "cu/claude-4.5-sonnet" },
   { name: "kiro (kr/* → openai→kiro)",             model: "kr/claude-sonnet-4.5" },

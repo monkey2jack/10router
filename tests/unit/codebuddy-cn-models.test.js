@@ -22,15 +22,19 @@ describe("CodeBuddy CN static model catalog", () => {
     expect(cn.models.map((model) => model.id)).toEqual([
       "hy4-preview",
       "hy3",
+      "space-bunny",
       "glm-5v-turbo",
       "glm-5.3",
       "glm-5.3-flash",
+      "glm-5.3-flashx",
       "glm-5.2",
       "glm-5.1",
       "minimax-m3",
       "kimi-k3",
       "kimi-k2.7",
+      "kimi-k2.8-preview",
       "kimi-k2.6",
+      "step-5-preview",
       "deepseek-v4.1-flash",
       "deepseek-v4-pro",
     ]);
@@ -38,27 +42,47 @@ describe("CodeBuddy CN static model catalog", () => {
 
   it("carries the published credit multiplier on every model", () => {
     // Rate card published by the CN credit page. 0 = rides the free quota.
+    // hy4-preview is the NIGHT-ONLY exception (23:00–08:00 local free, user-
+    // verified 2026-09-13): daytime bills at 0.29x (user-provided), the badge
+    // flips free/0.29x by `nightFree` instead of showing a misleading 0x.
     const rates = Object.fromEntries(cn.models.map((m) => [m.id, m.rateMultiplier]));
     expect(rates).toEqual({
-      "hy4-preview": 0,
+      "hy4-preview": 0.29,
       hy3: 0,
+      // 10/2–10/7 限时折扣价 0.03 已到期，2026-10-08 积分页回填正式价 0.08。
+      "space-bunny": 0.08,
       "glm-5v-turbo": 0.71,
       "glm-5.3": 0.79,
       "glm-5.3-flash": 0.06,
+      // 2026-10-09 积分页回填 0.14x。它比同族的 glm-5.3-flash(0.06)贵一倍以上,
+      // 所以「-x = 付费档」在这条线上成立;国际线虽有同名条目,但那边每个请求都
+      // 被 11133 拒,故只留在 CN。
+      "glm-5.3-flashx": 0.14,
       "glm-5.2": 0.79,
       "glm-5.1": 0.79,
       "minimax-m3": 0.25,
       "kimi-k3": 1.62,
       "kimi-k2.7": 0.57,
+      "kimi-k2.8-preview": 0.77,
       "kimi-k2.6": 0.52,
-      "deepseek-v4.1-flash": 0.03,
+      // StepFun Step-5-Preview,2026-10-09 积分页。免费账号探测全 11102(17 种写法),
+      // 按账号档位收录,与 intl 的 Claude 线同一判断。
+      "step-5-preview": 0.43,
+      // 2026-10-02 官方积分页已回调 0.03 → 0.11（首周尝鲜价结束）。
+      "deepseek-v4.1-flash": 0.11,
       "deepseek-v4-pro": 0.51,
     });
+    // The night-free window itself, pinned (intl hy4 is free ALL DAY — separate).
+    const hy4 = cn.models.find((m) => m.id === "hy4-preview");
+    expect(hy4.nightFree).toEqual({ from: 23, to: 8 });
   });
 
   it("shares the credit rate with intl on models both gateways serve", () => {
     const intlRates = Object.fromEntries(intl.models.map((m) => [m.id, m.rateMultiplier]));
     for (const m of cn.models) {
+      // hy4-preview is deliberately EXCLUDED: free-all-day on intl, night-only
+      // free on CN — the multipliers diverged (user-verified 2026-09-13).
+      if (m.id === "hy4-preview") continue;
       if (m.id in intlRates) expect(m.rateMultiplier).toBe(intlRates[m.id]);
     }
   });

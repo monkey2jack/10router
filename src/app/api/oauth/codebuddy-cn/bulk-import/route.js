@@ -5,13 +5,11 @@ import {
   updateProviderConnection,
 } from "@/models";
 import { verifyDashboardPassword } from "@/lib/auth/dashboardSession";
-
-const CLI_TOKEN_HEADER = "x-9r-cli-token";
-const PASSWORD_HEADER = "x-9r-password";
+import { readCliToken, readDashboardPassword } from "@/lib/auth/authHeaders";
 
 // CLI token requests are already trusted (local machine); skip password re-auth.
 function isCliRequest(request) {
-  return Boolean(request.headers.get(CLI_TOKEN_HEADER));
+  return Boolean(readCliToken(request));
 }
 
 /**
@@ -44,7 +42,7 @@ function isCliRequest(request) {
  */
 export async function POST(request) {
   // Sensitive write (imports credentials) — require the dashboard password (CLI token bypasses).
-  if (!isCliRequest(request) && !(await verifyDashboardPassword(request.headers.get(PASSWORD_HEADER)))) {
+  if (!isCliRequest(request) && !(await verifyDashboardPassword(readDashboardPassword(request)))) {
     return NextResponse.json({ error: "Invalid password" }, { status: 401 });
   }
   let body;

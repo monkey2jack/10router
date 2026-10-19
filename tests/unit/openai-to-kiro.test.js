@@ -535,7 +535,9 @@ describe("openaiToKiroRequest", () => {
       });
     });
 
-    it("clamps reasoning_effort max to Kiro max_thinking_length 32000", () => {
+    it("clamps reasoning_effort max budget to Kiro max_thinking_length 32000 and passes max through", () => {
+      // 上游 7894f3d3：Kiro 支持 max（此前 max→high 钳制让 max 在 Kiro 上静默失效），
+      // 4.6 也接受 max；仅 xhigh 对 4.6 才钳回 high（见下条测试）。
       const body = {
         reasoning_effort: "max",
         messages: [{ role: "user", content: "Think as much as possible" }]
@@ -544,7 +546,7 @@ describe("openaiToKiroRequest", () => {
       const result = openaiToKiroRequest("claude-sonnet-4.6", body, true, {});
 
       expect(systemPromptOf(result)).toContain("<max_thinking_length>32000</max_thinking_length>");
-      expect(result.additionalModelRequestFields?.output_config?.effort).toBe("high");
+      expect(result.additionalModelRequestFields?.output_config?.effort).toBe("max");
     });
 
     it("clamps OpenAI Responses reasoning.effort xhigh to max_thinking_length 32000", () => {

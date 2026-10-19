@@ -83,6 +83,11 @@ export const AG_TOOL_SUFFIX = "_ide";
 // makes the backend flag the request and answer 429 Quota Exhausted.
 export const ANTIGRAVITY_PROMPT_REWRITES = [
   { from: "You are a Claude agent, built on Anthropic's Claude Agent SDK.", to: "" },
+  // Hermes identity sentences vary by build ("Hermes Agent, an intelligent AI
+  // assistant [created] by Nous Research", "Hermes, an AI assistant", …).
+  // Normalize the whole opener to a neutral assistant line BEFORE the
+  // substring rules below so no "intelligent AI assistant" tail survives.
+  { from: /You are Hermes(?: Agent)?(?:,\s*(?:an intelligent AI assistant|an AI assistant|an AI agent))?(?:,?\s*(?:built|created)\s+by\s+Nous Research)?\./gi, to: "You are an AI assistant." },
   { from: /opencode/gi, to: (m) => (m === "OpenCode" ? "Antigravity" : m === "OPENCODE" ? "ANTIGRAVITY" : "antigravity") },
   // Hermes / Nous Research identity reaches Antigravity verbatim (no client-side sanitization on this
   // path — hermes-agent only renames for Anthropic/Claude), so Google's competitor/client sniffing
@@ -207,7 +212,7 @@ export const OAUTH_ENDPOINTS = {
 };
 
 let _appVersion;
-function getAppPackageVersion() {
+export function getAppPackageVersion() {
   if (_appVersion) return _appVersion;
   try {
     const require = createRequire(import.meta.url);

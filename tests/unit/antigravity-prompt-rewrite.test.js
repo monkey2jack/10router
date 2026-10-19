@@ -38,7 +38,10 @@ describe("ANTIGRAVITY_PROMPT_REWRITES", () => {
     const out = cloakSystemInstruction(sys);
     expect(out).not.toMatch(/Hermes/i);
     expect(out).not.toMatch(/Nous Research/i);
-    expect(out).toMatch(/Antigravity, built by Google DeepMind/);
+    // The identity opener normalizes to a neutral assistant line (upstream
+    // a61fc6a0): Google's backend flags competitor branding on ANY wording,
+    // so the whole sentence goes, not a brand-for-brand rename.
+    expect(out).toBe("You are an AI assistant. Be direct.");
   });
 
   it("cloaks Hermes help-guidance branding + doc host", () => {

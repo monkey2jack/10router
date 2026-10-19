@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import REGISTRY from "../../open-sse/providers/registry/index.js";
 import { getCapabilitiesForModel } from "../../open-sse/providers/capabilities.js";
 
 describe("getCapabilitiesForModel", () => {
@@ -65,5 +66,23 @@ describe("getCapabilitiesForModel", () => {
       contextWindow: 272000,
       maxOutput: 128000,
     });
+  });
+
+  it("every transport/UI alias resolves identically to its provider id (no floor/pattern fallback drift)", () => {
+    // 全量不变量：registry 里 alias ≠ id 的每个模型，用 alias 查能力必须与用
+    // id 查完全一致。否则同一模型换个拼写就掉 DEFAULT 200k 或泛化 pattern
+    // （如 kiro→kr 曾把 gpt-5.6 窗口从 272k 读成 1.05M）。
+    const aliased = REGISTRY.filter((p) => p.alias && p.alias !== p.id && p.models?.length);
+    let pairs = 0;
+    for (const p of aliased) {
+      for (const m of p.models) {
+        pairs++;
+        expect(
+          getCapabilitiesForModel(p.alias, m.id),
+          `${p.alias}/${m.id} drifted from ${p.id}`,
+        ).toEqual(getCapabilitiesForModel(p.id, m.id));
+      }
+    }
+    expect(pairs).toBeGreaterThan(0);
   });
 });

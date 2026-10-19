@@ -1,8 +1,11 @@
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { getSettings, updateSettings } from "@/lib/localDb";
 import { applyOutboundProxyEnv } from "@/lib/network/outboundProxy";
 import { resetComboRotation } from "open-sse/services/combo.js";
 import bcrypt from "bcryptjs";
+import { isAutoUpdateCheckEnabled, syncUpdateCheckMarker } from "@/lib/updateCheck";
+import { hasOwnDashboardCredential, setDashboardAuthCookie } from "@/lib/auth/dashboardSession";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -42,8 +45,35 @@ export async function PATCH(request) {
     // Strip protected secrets before any internal handling sets them
     for (const key of PROTECTED_SETTING_KEYS) delete body[key];
 
+    // Hiding the login-off banner is a decision about THIS off-period. Turning the
+    // check back on forgets it, so a later switch-off warns again.
+    if (body.requireLogin === true) body.hideLoginOffBanner = false;
+
+    // An empty / whitespace-only password is never valid (issue #33). Checked on
+    // the key's presence, not its truthiness: `if (body.newPassword)` used to let
+    // "" slip through silently while the rest of the request still applied.
+    const settingPassword = Object.prototype.hasOwnProperty.call(body, "newPassword");
+    if (settingPassword && (typeof body.newPassword !== "string" || !body.newPassword.trim())) {
+      return NextResponse.json({ error: "Password cannot be empty", code: "PASSWORD_EMPTY" }, { status: 400 });
+    }
+
+    // Turning the log-in check on needs a credential the operator actually knows:
+    // a stored password (existing or set in this same request) or SSO. The
+    // bootstrap INITIAL_PASSWORD does not count — on fnOS it is generated at
+    // install time into a file the user never sees, and enabling the check on it
+    // alone locked people out with every password rejected (issue #33).
+    if (body.requireLogin === true && !settingPassword) {
+      const current = await getSettings();
+      if (!hasOwnDashboardCredential({ ...current, ...body })) {
+        return NextResponse.json(
+          { error: "Set a dashboard password before turning on the log-in check.", code: "PASSWORD_REQUIRED" },
+          { status: 400 },
+        );
+      }
+    }
+
     // If updating password, hash it
-    if (body.newPassword) {
+    if (settingPassword) {
       const settings = await getSettings();
       const currentHash = settings.password;
 
@@ -57,11 +87,14 @@ export async function PATCH(request) {
           return NextResponse.json({ error: "Invalid current password" }, { status: 401 });
         }
       } else {
-        // First time setting password, no current password needed
-        // Allow empty currentPassword or default "123456"
-        if (body.currentPassword && body.currentPassword !== "123456") {
-           return NextResponse.json({ error: "Invalid current password" }, { status: 401 });
-        }
+        // First time setting a password: there is no stored hash to compare
+        // against. Reaching this branch already required passing the guard,
+        // which admits only authenticated clients — or, when nothing is
+        // configured at all, the loopback operator (see
+        // dashboardGuard.isAuthenticated). No literal fallback belongs here: the
+        // old code also accepted the hardcoded "123456", which is exactly what
+        // let a remote caller on a fresh 0.0.0.0 install take the dashboard over
+        // (issue #9).
       }
 
       const salt = await bcrypt.genSalt(10);
@@ -77,6 +110,12 @@ export async function PATCH(request) {
     }
 
     const settings = await updateSettings(body);
+
+    // The CLI launcher checks for updates before the server exists; it reads a
+    // marker file, not the database.
+    if (Object.prototype.hasOwnProperty.call(body, "autoUpdateCheck")) {
+      syncUpdateCheckMarker(isAutoUpdateCheckEnabled(settings));
+    }
 
     // Apply outbound proxy settings immediately (no restart required)
     if (
@@ -108,20 +147,45 @@ export async function PATCH(request) {
         .catch((error) => console.warn("[AutoPing] settings update failed:", error.message));
     }
 
-    // Experimental CodeBuddy CN auto check-in: when the toggle flips on at
-    // runtime, (re)start the scheduler. It re-reads the flag on every fire, so
+    // Experimental CodeBuddy CN auto check-in / compensation: when any toggle flips on at
+    // runtime, (re)start the scheduler. It re-reads the flags on every fire, so
     // turning it off later needs no extra wiring. Module is idempotent.
     if (
-      Object.prototype.hasOwnProperty.call(body, "codeBuddyCheckin") &&
-      settings.codeBuddyCheckin === true
+      (Object.prototype.hasOwnProperty.call(body, "codeBuddyCheckin") && settings.codeBuddyCheckin === true) ||
+      (Object.prototype.hasOwnProperty.call(body, "codeBuddyCompensation") && settings.codeBuddyCompensation === true) ||
+      (Object.prototype.hasOwnProperty.call(body, "codeBuddyIntlSession") && settings.codeBuddyIntlSession === true)
     ) {
       import("@/sse/services/codebuddyCheckin.js")
         .then(({ startCodebuddyCheckin }) => startCodebuddyCheckin())
         .catch((error) => console.warn("[CodeBuddyCheckin] start failed:", error.message));
     }
 
+    // Auto daily credit claim for Qoder & Qoder CN
+    if (Object.prototype.hasOwnProperty.call(body, "qoderCheckin")) {
+      if (settings.qoderCheckin === true) {
+        import("@/sse/services/qoderCheckin.js")
+          .then(({ startQoderCheckin }) => startQoderCheckin())
+          .catch((error) => console.warn("[QoderCheckin] start failed:", error.message));
+      } else {
+        import("@/sse/services/qoderCheckin.js")
+          .then(({ stopQoderCheckin }) => stopQoderCheckin())
+          .catch((error) => console.warn("[QoderCheckin] stop failed:", error.message));
+      }
+    }
+
     const { password, oidcClientSecret, ...safeSettings } = settings;
     safeSettings.oidcConfigured = !!(safeSettings.oidcIssuerUrl && safeSettings.oidcClientId && oidcClientSecret);
+    // Establishing protection used to kick the operator straight to the login
+    // page: they were admitted by loopback trust or open access (no auth
+    // cookie), and the moment a password exists / requireLogin turns on the
+    // guard demands one. The caller already passed every check this route
+    // enforces (authenticated session, current-password verify when a hash
+    // existed), so hand them a session instead of locking them out of the
+    // change they just made (设置→安全 开启「需要登录」被踢出).
+    if (settingPassword || body.requireLogin === true) {
+      const cookieStore = await cookies();
+      await setDashboardAuthCookie(cookieStore, request);
+    }
     return NextResponse.json(safeSettings, { headers: SETTINGS_RESPONSE_HEADERS });
   } catch (error) {
     console.log("Error updating settings:", error);

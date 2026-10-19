@@ -1,4 +1,12 @@
-import { ERROR_RULES, BACKOFF_CONFIG, TRANSIENT_COOLDOWN_MS } from "../config/errorConfig.js";
+import { ERROR_RULES, BACKOFF_CONFIG, TRANSIENT_COOLDOWN_MS, CHANNEL_BLOCK_MS, CHANNEL_BLOCK_ESCALATE_WINDOW_MS, MAX_RATE_LIMIT_COOLDOWN_MS, MAX_QUOTA_COOLDOWN_MS, REALNAME_GATE_RE, REALNAME_HINT, REALNAME_HINT_GENERIC } from "../config/errorConfig.js";
+
+// 4xx statuses that DO describe the credential / the account's standing, so they
+// keep their cooldown rules. Everything else in 400–499 describes the request
+// itself (context overflow, malformed body, unsupported parameter) and must not
+// evict a healthy connection — see the short-circuit in checkFallbackError.
+// 404 is included: an unavailable model on this account is account-scoped here,
+// matching the ERROR_RULES entry that already handled it before this list existed.
+const ACCOUNT_SCOPED_4XX = new Set([401, 402, 403, 404, 429]);
 
 /**
  * Calculate exponential backoff cooldown for rate limits (429)
@@ -13,40 +21,153 @@ export function getQuotaCooldown(backoffLevel = 0) {
 }
 
 /**
+ * Parse an explicit "wait N seconds" hint out of an upstream error message.
+ *
+ * Some upstreams state the exact window in the body itself — xiaomi-mimo TPM:
+ * `{"message":"用户 每人 触发 TPM 限流（上限 5000000），请约 23 秒后重试"}`.
+ * Ignoring it and applying the generic exponential backoff (base 2s) makes us
+ * re-hit the same limit: NAS log 2026-09-17 shows upstream asking for 23s
+ * while the gateway retried at 2s/4s/8s/16s — four wasted 429s in a row.
+ *
+ * @param {string} text - upstream error text / message field
+ * @returns {number|null} seconds, or null when no explicit hint is present
+ */
+export function extractRetrySeconds(text) {
+  const s = typeof text === "string" ? text : "";
+  if (!s) return null;
+  // Chinese: "请约 23 秒后重试" / "23 秒后重试" / "23 秒钟后重试"
+  let m = s.match(/(\d+)\s*秒(?:钟)?后(?:重试|再试|再尝试)?/);
+  if (m) return parseInt(m[1], 10);
+  // English: "retry after 23 seconds" / "retry in 23s" / "try again in 23 seconds"
+  m = s.match(/(?:retry|try again|come back|wait)\s+(?:after|in)\s+(\d+)\s*(?:s|sec|secs|seconds?)\b/i);
+  if (m) return parseInt(m[1], 10);
+  return null;
+}
+
+// Google-style quota payloads (Antigravity / Gemini Code Assist 429
+// RESOURCE_EXHAUSTED): "quotaResetDelay":"4h32m30.523936355s" (plus the
+// proto "retryDelay":"16350.52s" and the human "Resets in 4h32m30s"). This is
+// the account's REAL window reset — hours by design — not a per-minute cap,
+// so it must not be flattened into the exponential-backoff guess.
+const GOOGLE_DURATION_RE = /^(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m)?(?:(\d+(?:\.\d+)?)s)?$/i;
+
+/** Parse a Google duration string ("4h32m30.523936355s") into seconds. */
+export function googleDurationToSeconds(str) {
+  const m = GOOGLE_DURATION_RE.exec(String(str || "").trim());
+  if (!m || (!m[1] && !m[2] && !m[3])) return null;
+  return Math.round(parseFloat(m[1] || 0) * 3600 + parseFloat(m[2] || 0) * 60 + parseFloat(m[3] || 0));
+}
+
+/**
+ * Extract the quota-window reset duration from an upstream error payload.
+ * @returns {number|null} milliseconds until the quota resets, or null
+ */
+export function extractQuotaResetMs(text) {
+  const s = typeof text === "string" ? text : "";
+  if (!s) return null;
+  const delay = /"quotaResetDelay"\s*:\s*"([^"]+)"/.exec(s)
+    || /"retryDelay"\s*:\s*"([^"]+)"/.exec(s)
+    || /\bResets in\s+([0-9hms.]+)/i.exec(s);
+  if (delay) {
+    const sec = googleDurationToSeconds(delay[1].replace(/[.\s]+$/, ""));
+    if (sec !== null && sec > 0) return sec * 1000;
+  }
+  // Absolute timestamp without a delay (rare shapes) — derive from now.
+  const ts = /"quotaResetTimeStamp"\s*:\s*"([^"]+)"/.exec(s);
+  if (ts) {
+    const t = Date.parse(ts[1]);
+    if (Number.isFinite(t)) {
+      const ms = t - Date.now();
+      if (ms > 0) return ms;
+    }
+  }
+  return null;
+}
+
+/**
+ * Cooldown for a `backoff: true` rule — exponential, but never shorter than an
+ * explicit wait the upstream just told us about.
+ * @param {string} errorText - message to scan for an explicit hint
+ * @param {number} backoffLevel - current backoff level
+ * @returns {number} cooldown ms (capped by MAX_RATE_LIMIT_COOLDOWN_MS)
+ */
+function backoffCooldown(errorText, backoffLevel) {
+  // An explicit Google quota window (429 RESOURCE_EXHAUSTED with
+  // quotaResetDelay/quotaResetTimeStamp) is the upstream's authoritative reset
+  // clock — hours by design. Honor it beyond the generic 30min hint cap
+  // (bounded by MAX_QUOTA_COOLDOWN_MS), else the backoff keeps burning requests
+  // against an account that cannot recover for hours — and the client-facing
+  // "reset after" shows a meaningless 1m instead of the real window.
+  const quotaMs = extractQuotaResetMs(errorText);
+  if (quotaMs !== null) return Math.min(quotaMs, MAX_QUOTA_COOLDOWN_MS);
+  const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
+  const backoffMs = getQuotaCooldown(newLevel);
+  const hintSec = extractRetrySeconds(errorText);
+  if (hintSec === null) return backoffMs;
+  // max(): upstream hint wins when it is longer (it is authoritative), backoff
+  // wins when it already escalated past it — either way we never retry too soon.
+  return Math.min(Math.max(backoffMs, hintSec * 1000), MAX_RATE_LIMIT_COOLDOWN_MS);
+}
+
+/**
  * Check if error should trigger account fallback (switch to next account)
  * Config-driven: matches ERROR_RULES top-to-bottom (text rules first, then status)
  * @param {number} status - HTTP status code
  * @param {string} errorText - Error message text
  * @param {number} backoffLevel - Current backoff level for exponential backoff
- * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number }}
+ * @param {string|null} provider - 已解析的 provider id；仅用于命中带
+ *   `rule.provider` 限定的规则（缺省时这些规则一律跳过，不全局生效）
+ * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number, channelScope?: boolean }}
+ *   `channelScope: true` means the error describes the CHANNEL, not this account —
+ *   the caller must NOT walk to sibling accounts (that burst is itself what the
+ *   upstream policy reacts to); it should cool the whole provider down instead.
  */
-export function checkFallbackError(status, errorText, backoffLevel = 0) {
+export function checkFallbackError(status, errorText, backoffLevel = 0, provider = null) {
   const lowerError = errorText
     ? (typeof errorText === "string" ? errorText : JSON.stringify(errorText)).toLowerCase()
     : "";
 
   for (const rule of ERROR_RULES) {
+    if (rule.provider && rule.provider !== provider) continue;
     // Text-based rule: match substring in error message
     if (rule.text && lowerError && lowerError.includes(rule.text)) {
       if (rule.backoff) {
         const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
-        return { shouldFallback: true, cooldownMs: getQuotaCooldown(newLevel), newBackoffLevel: newLevel };
+        return { shouldFallback: true, cooldownMs: backoffCooldown(lowerError, backoffLevel), newBackoffLevel: newLevel, channelScope: !!rule.channelScope };
       }
-      return { shouldFallback: true, cooldownMs: rule.cooldownMs };
+      return { shouldFallback: true, cooldownMs: rule.cooldownMs, channelScope: !!rule.channelScope };
     }
 
     // Status-based rule: match HTTP status code
     if (rule.status && rule.status === status) {
       if (rule.backoff) {
         const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
-        return { shouldFallback: true, cooldownMs: getQuotaCooldown(newLevel), newBackoffLevel: newLevel };
+        // Respect an explicit "请约 N 秒后重试" in the body — plain exponential
+        // backoff starting at 2s re-hits an upstream that asked for 23s.
+        return { shouldFallback: true, cooldownMs: backoffCooldown(lowerError, backoffLevel), newBackoffLevel: newLevel, channelScope: !!rule.channelScope };
       }
-      return { shouldFallback: true, cooldownMs: rule.cooldownMs };
+      return { shouldFallback: true, cooldownMs: rule.cooldownMs, channelScope: !!rule.channelScope };
     }
   }
 
+  // Request-scoped client errors that matched no rule above: a 400 caused by the
+  // request itself (context overflow, malformed body, unsupported parameter) says
+  // nothing about the credential, so cooling the account down only removes a
+  // healthy connection from rotation. With a single connection it is worse: every
+  // later request in the window fails with a copy of this very error
+  // ("all 1 accounts locked for <model> | lastError=[400]: ..."), which hides the
+  // real cause from the caller and makes unrelated sessions look like they hit the
+  // same limit. Hand the upstream error back for this request instead.
+  //
+  // Account-scoped statuses keep their rules above (401/402/403/404/429); the text
+  // rules above still win for rate-limit / quota / capacity wording, so this only
+  // catches bodies that described the request and nothing else.
+  if (status >= 400 && status < 500 && !ACCOUNT_SCOPED_4XX.has(status)) {
+    return { shouldFallback: false, cooldownMs: 0, channelScope: false };
+  }
+
   // Default: transient cooldown for any unmatched error
-  return { shouldFallback: true, cooldownMs: TRANSIENT_COOLDOWN_MS };
+  return { shouldFallback: true, cooldownMs: TRANSIENT_COOLDOWN_MS, channelScope: false };
 }
 
 /**
@@ -158,6 +279,217 @@ export function buildClearModelLocksUpdate(connection) {
     if (key.startsWith(MODEL_LOCK_PREFIX)) cleared[key] = null;
   }
   return cleared;
+}
+
+// ─── Needs re-auth (dead refresh token) ───────────────────────────────────────
+//
+// An unrecoverable refresh failure (invalid_grant / refresh_token_reused) is not
+// a rate limit: the token family is revoked upstream and only a re-authorization
+// fixes it. Two independent things are written, on purpose:
+//
+//   testStatus = "needs-reauth"   the STICKY mark the dashboard shows. Survives
+//                                 successful requests (a live access token does
+//                                 not revive a dead refresh token) and is cleared
+//                                 only by a successful refresh, a re-auth, or a
+//                                 credential test — i.e. anything that proves the
+//                                 credentials work again.
+//   needsReauthUntil              the COOLDOWN stamp. Selection skips the account
+//                                 only while this is in the future AND the mark is
+//                                 live, so a dead account is probed once per window
+//                                 instead of every 2 minutes forever, while a
+//                                 re-auth (which flips testStatus) takes effect
+//                                 immediately instead of waiting out the timer.
+//
+// Deliberately NOT a modelLock_*: those mean "upstream is rate-limiting this
+// account", get cleared on success, and would block freshly re-authorized
+// credentials until the timer ran out.
+
+/** testStatus value meaning "refresh token is dead, human must re-authorize" */
+export const NEEDS_REAUTH_STATUS = "needs-reauth";
+
+/** How long a needs-reauth account stays out of rotation before one retry probe. */
+export const NEEDS_REAUTH_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Whether a connection is currently cooling down for re-authorization —
+ * the selection-side filter. A live mark with a lapsed timer is NOT cooling:
+ * that is the once-per-window retry probe.
+ */
+export function isNeedsReauthCooling(connection, nowMs = Date.now()) {
+  if (!connection || connection.testStatus !== NEEDS_REAUTH_STATUS) return false;
+  const until = Date.parse(connection.needsReauthUntil || "");
+  return Number.isFinite(until) && until > nowMs;
+}
+
+/**
+ * Build the update object that marks a connection as needing re-authorization.
+ * Callers add lastError / errorCode / lastErrorAt to explain WHY.
+ */
+export function buildNeedsReauthUpdate(cooldownMs = NEEDS_REAUTH_COOLDOWN_MS) {
+  return {
+    testStatus: NEEDS_REAUTH_STATUS,
+    needsReauthUntil: new Date(Date.now() + cooldownMs).toISOString(),
+  };
+}
+
+/**
+ * Channel-scope block: a provider-wide pause kept in `settings.channelBlocks`
+ * rather than on any single connection, because the failure is a property of
+ * the channel (egress fingerprint / request shape), not of one account.
+ *
+ * Shape: { until: ISO string, lastAt: ISO string, strikes: number }
+ */
+
+/**
+ * Decide the next channel-block state for a provider that just answered with a
+ * channel-scope error. Repeat offences inside CHANNEL_BLOCK_ESCALATE_WINDOW_MS
+ * escalate to the long duration; otherwise the short one applies.
+ * @param {object|null} prev - previous stored state (or null)
+ * @param {number} nowMs - current epoch ms (injectable for tests)
+ * @returns {{ until: string, lastAt: string, strikes: number, durationMs: number, escalated: boolean }}
+ */
+export function buildChannelBlock(prev, nowMs = Date.now()) {
+  const prevLast = prev?.lastAt ? new Date(prev.lastAt).getTime() : 0;
+  const withinWindow = prevLast > 0 && nowMs - prevLast <= CHANNEL_BLOCK_ESCALATE_WINDOW_MS;
+  const escalated = withinWindow;
+  const durationMs = escalated ? CHANNEL_BLOCK_MS.long : CHANNEL_BLOCK_MS.short;
+  return {
+    until: new Date(nowMs + durationMs).toISOString(),
+    lastAt: new Date(nowMs).toISOString(),
+    strikes: (prev?.strikes || 0) + 1,
+    durationMs,
+    escalated,
+  };
+}
+
+/**
+ * Remaining ms of an active channel block (0 when none / expired).
+ */
+export function channelBlockRemainingMs(block, nowMs = Date.now()) {
+  if (!block?.until) return 0;
+  const until = new Date(block.until).getTime();
+  if (!Number.isFinite(until)) return 0;
+  return Math.max(0, until - nowMs);
+}
+
+/**
+ * Friendly hint appended to channel-block responses. Clients (e.g. ZCode) wrap
+ * our400 into a bare "Bad Request", and the raw upstream JSON alone does not
+ * tell the user what to DO — so both the first-hit response and the
+ * window-blocked response carry this explanation. Bilingual because the
+ * upstream displayMsg already ships zh translations and our users read both.
+ */
+export const CHANNEL_SCOPE_HINT =
+  "提示：当前请求触发上游渠道级安全风控（非账号问题）。" +
+  "出路：1. 开启新对话重试（推荐）；2. 输入 /compact 压缩会话后重试；3. 稍等窗口结束后自动恢复。" +
+  "（注意：切到其它渠道前请确认该渠道也有同名模型，否则会报 11102 模型不存在。）";
+
+/** Append CHANNEL_SCOPE_HINT to a channel-block error message. */
+export function withChannelScopeHint(message) {
+  return `${message}\n\n${CHANNEL_SCOPE_HINT}`;
+}
+
+// ─── friendly 429 (rate-limit) translation ──────────────────────────────────
+// Upstreams answer 429 with a raw JSON blob (xiaomi-mimo:
+// {"error":{"code":"429","message":"Too Many Requests","param":"Request rate
+// limited"}}) and10Router passes it through verbatim, so Claude-protocol
+// clients render a wall of escaped JSON instead of a sentence.
+//
+// NOTE: the cooldown itself is NOT new — ERROR_RULES already carries
+// { status: 429, backoff: true } (exponential backoff; NAS logs show 32s →
+// 64s and the per-model lock). This helper only translates the TEXT and leaves
+// the timing to the retry info the callers already append.
+// `_` matters: xiaomi-mimo's TPM shape ships `type:"rate_limit_error"` /
+// `code:"rate_limited"` (underscores, never a bare space) and carries no
+// `"429"` — only the `[429]:` prefix formatProviderError adds. See both shapes
+// in tests/unit/rate-limit-hint.test.js.
+const RATE_LIMIT_RE = /too many requests|rate[_\s-]*limit|频率限制|quota.*exceeded|"429"|\[\s*429\s*\]/i;
+
+// Where a 429 means "free/trial tier throttling" instead of an account fault.
+// Worth spelling out: users blame the account (or the gateway) when the
+// request budget is simply exhausted for this minute. Two shapes are seen on
+// xiaomi-mimo: "Too Many Requests / Request rate limited" (per-request) and
+// "用户 每人 触发 TPM 限流（上限 5000000）" (tokens-per-minute).
+const RATE_LIMIT_PROVIDER_NOTE = {
+  "xiaomi-mimo": "小米 MiMo 为体验/免费通道，每分钟请求数与 Token 数（TPM）均有硬限制，超出即拒绝。",
+};
+
+export const INSUFFICIENT_BALANCE_RE = /insufficient[_\s-]*balance|余额不足|欠费/i;
+
+export function isInsufficientBalanceText(message) {
+  return INSUFFICIENT_BALANCE_RE.test(String(message || ""));
+}
+
+export function withInsufficientBalanceHint(message, provider) {
+  if (!isInsufficientBalanceText(message)) return message;
+  return (
+    `${message}\n\n` +
+    `提示：账号额度或余额不足（insufficient balance），非网络或服务故障。请充值、重新领取活动额度或切换至其他可用渠道/账号。`
+  );
+}
+
+/** True when the message describes an upstream rate limit (429). */
+export function isRateLimitText(message) {
+  return RATE_LIMIT_RE.test(String(message || ""));
+}
+
+/**
+ * Append a friendly rate-limit explanation to a message that IS a rate limit.
+ * Non-rate-limit messages pass through untouched, so callers can apply it
+ * unconditionally. The wording stays shape-agnostic — the upstream body we
+ * append to already carries its own specifics (per-request vs TPM, wait time).
+ * @param {string} message - upstream/client-facing message
+ * @param {string} [provider] - adds a channel-specific note when known
+ */
+export function withRateLimitHint(message, provider) {
+  if (!isRateLimitText(message)) return message;
+  // Quota-window exhaustion (Google RESOURCE_EXHAUSTED / "Individual quota
+  // reached") is a different beast from per-minute throttling: the account's
+  // whole window is spent and the payload carries the exact reset clock. Say
+  // so instead of the generic "稍候重试" — the user is otherwise told to retry
+  // in vain for hours.
+  const quotaMs = extractQuotaResetMs(message);
+  if (quotaMs !== null || /Individual quota reached|QUOTA_EXHAUSTED|RESOURCE_EXHAUSTED/i.test(message)) {
+    let resetAt = "";
+    if (quotaMs !== null) {
+      try {
+        resetAt = new Date(Date.now() + quotaMs).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+      } catch { resetAt = ""; }
+    }
+    return (
+      `${message}\n\n` +
+      `提示：该账号的本阶段额度已用尽（非故障、非账号异常），系统已按上游重置时间自动冷却` +
+      `${resetAt ? `，约 ${resetAt} 自动恢复` : ""}；期间请切换其他模型或渠道。`
+    );
+  }
+  const note = RATE_LIMIT_PROVIDER_NOTE[provider] ? ` ${RATE_LIMIT_PROVIDER_NOTE[provider]}` : "";
+  return (
+    `${message}\n\n` +
+    `提示：上游触发了限流（HTTP 429），非账号异常，已按上游提示自动冷却并稍后自动恢复；` +
+    `期间可切换其他模型或渠道，或稍候重试。${note}`
+  );
+}
+
+// ─── StepFun CN 实名（real-name）闸门 ──────────────────────────────────────
+// 正则与文案的真相源在 config/errorConfig.js（ERROR_RULES 的 403 重分类与客户端
+// 提示共用同一份），这里只做「给消息补出路说明」这一件事。
+
+/** True when the message is an upstream real-name (实名) gate rejection. */
+export function isRealnameGateText(message) {
+  return REALNAME_GATE_RE.test(String(message || ""));
+}
+
+/**
+ * Append an actionable real-name explanation to a message that IS a real-name
+ * gate rejection. Non-matching messages pass through untouched, so callers can
+ * apply it unconditionally — same contract as withRateLimitHint.
+ * @param {string} message - upstream/client-facing message
+ * @param {string} [provider] - adds a channel-specific note when known
+ */
+export function withRealnameHint(message, provider) {
+  if (!isRealnameGateText(message)) return message;
+  const note = REALNAME_HINT[provider] || REALNAME_HINT_GENERIC;
+  return `${message}\n\n提示：${note}`;
 }
 
 /**

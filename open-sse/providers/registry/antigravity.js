@@ -2,7 +2,7 @@ import { ANTIGRAVITY_IDE_BASE_URL, ANTIGRAVITY_IDE_USER_AGENT, ANTIGRAVITY_OAUTH
 
 export default {
   id: "antigravity",
-  priority: 20,
+  priority: 30,
   alias: "ag",
   uiAlias: "ag",
   display: {
@@ -78,7 +78,8 @@ export default {
     { id: "gemini-3-flash-agent", name: "Gemini 3.5 Flash (High)" },
     { id: "gemini-3.5-flash-low", name: "Gemini 3.5 Flash (Medium)" },
     { id: "gemini-3.5-flash-extra-low", name: "Gemini 3.5 Flash (Low)" },
-    { id: "gemini-pro-agent", name: "Gemini 3.1 Pro (High)" },
+    { id: "gemini-3.1-pro-high", name: "Gemini 3.1 Pro (High)", upstreamModelId: "gemini-pro-agent" },
+    { id: "gemini-pro-agent", name: "Gemini 3.1 Pro (High)", upstreamModelId: "gemini-pro-agent" },
     { id: "gemini-3.1-pro-low", name: "Gemini 3.1 Pro (Low)" },
     { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6 (Thinking)" },
     { id: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 (Thinking)" },
@@ -86,6 +87,9 @@ export default {
     { id: "gemini-3-flash", name: "Gemini 3 Flash", thinking: false },
     // Image generation models
     { id: "gemini-3.1-flash-image", name: "Gemini 3.1 Flash (Image)", kind: "image", imageGen: true, capabilities: ["textToImage"] },
+    { id: "gemini-3-pro-image", name: "Gemini 3 Pro (Image)", kind: "image", imageGen: true, capabilities: ["textToImage"] },
+    { id: "gemini-2.5-flash-image", name: "Gemini 2.5 Flash (Image)", kind: "image", imageGen: true, capabilities: ["textToImage"] },
+    { id: "imagen-3.0-generate-002", name: "Imagen 3", kind: "image", imageGen: true, capabilities: ["textToImage"] },
   ],
   oauth: {
     authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",

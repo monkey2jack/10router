@@ -1,4 +1,5 @@
 import { getModelsByProviderId } from "open-sse/config/providerModels.js";
+import { shortDuration } from "@/shared/utils/quotaRows";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 export const QUOTA_CACHE_KEY = "quotaCacheData";
@@ -22,11 +23,69 @@ export const QUOTA_SORT_OPTIONS = [
 ];
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
+// provider 过滤器的初始值：URL ?provider= 深链优先（可书签化分享），无参时
+// 回落 localStorage 里持久化的上次选择，再兜底 "all"。
+export function getInitialProviderFilter(urlProvider, storedProvider) {
+  return urlProvider || storedProvider || "all";
+}
+
+// 切换过滤器时回写的 URL：选中具体 provider 写 ?provider=xxx；回到 "all" 时
+// 移除该参数保持地址栏干净；其余 query 参数原样保留。
+export function buildProviderFilterUrl(pathname, searchString, provider) {
+  const params = new URLSearchParams(searchString || "");
+  if (provider && provider !== "all") {
+    params.set("provider", provider);
+  } else {
+    params.delete("provider");
+  }
+  const query = params.toString();
+  return query ? `${pathname}?${query}` : pathname;
+}
+
 export function getConnectionLabel(connection) {
-  return connection.name?.trim()
-    || connection.email?.trim()
-    || connection.displayName?.trim()
-    || null;
+  const name = connection.name?.trim();
+  const email = connection.email?.trim();
+  const displayName = connection.displayName?.trim();
+
+  // If user explicitly configured a custom name that is distinct from the login email,
+  // honor that custom name across all providers (including Qoder).
+  if (name && name !== email) {
+    return name;
+  }
+
+  // Qoder Intl stores the login email as the connection name (CN stores the
+  // username). If no custom name was specified (i.e. name equals email or is empty),
+  // prefer the human-readable profile display name when available.
+  if (connection.provider === "qoder" || connection.provider === "qoder-cn") {
+    return displayName || name || email || null;
+  }
+
+  return name || email || displayName || null;
+}
+
+// A connection is empty (depleted) only when EVERY quota row has an absolute
+// zero balance — 0/0 (no allowance, e.g. Qoder) or used >= total. Any single
+// row with remaining credit (e.g. a fresh Bonus Pack) keeps the account
+// "available". Genuinely unlimited rows opt out via unlimited:true and don't
+// count either way; accounts with only unlimited rows stay available.
+// A card with NO quota rows is "no quota to show", not "depleted" — that case
+// belongs to the hide-no-quota toggle, so it returns false here.
+//
+// Lives in utils (not the component closure it grew from) so the bulk
+// disable/enable actions and the "hide zero-balance cards" view filter judge a
+// card with exactly the same predicate — two meanings for "depleted" would
+// make the toolbar lie about what it disables.
+export function isConnectionDepleted(connection, quotaData) {
+  const quotas = quotaData?.[connection.id]?.quotas;
+  if (!quotas?.length) return false;
+  const judged = quotas.filter((q) => q.unlimited !== true);
+  if (judged.length === 0) return false;
+  return judged.every((q) => {
+    // A recurring cycle with a future reset is waiting for its window to refill, not permanently dead
+    if (q.recurring === true && q.resetAt && Date.parse(q.resetAt) > Date.now()) return false;
+    const total = q.total || 0;
+    return total <= 0 || (q.used || 0) >= total;
+  });
 }
 
 export function getConnectionQuotaRemaining(connection, quotaData) {
@@ -153,9 +212,43 @@ export function getPageSizeLabel(pageSize, isCustomPageSize) {
   return isCustomPageSize ? `Custom: ${pageSize} / page` : `${pageSize} / page`;
 }
 
-export function getConnectionsPaginationSummary(pagination) {
+// English default; the dashboard passes a translated formatter (the strings are
+// built from numbers, so the page's text-node translator cannot match them).
+export function formatShowingRange({ start, end, total }) {
+  return total > 0 ? `Showing ${start}-${end} of ${total}` : "Showing 0 of 0";
+}
+
+export function getConnectionsPaginationSummary(pagination, format = formatShowingRange) {
   const { start, end } = getConnectionsPageRange(pagination);
-  return `Showing ${start}-${end} of ${pagination.total}`;
+  return format({ start, end, total: pagination.total });
+}
+
+/**
+ * Page summary for when a CLIENT-SIDE view filter is on ("Hide no-quota" cards,
+ * "Only with balance" rows).
+ *
+ * The backend summary (`getConnectionsPaginationSummary`) counts the server's
+ * page: 46 connections, 10 per page. The view filters run afterwards, on this
+ * page's cards only, so they can leave fewer cards on screen than the server
+ * counted — and the untouched summary then read "Showing 1-10 of 46" above a
+ * grid of 12 cards, which looks like the controls are broken rather than like
+ * a filter is on. This variant counts what is actually rendered.
+ *
+ * `total` stays honest about scope: it is the number of cards surviving the
+ * filter on THIS page, not a global count the client cannot compute (the filter
+ * is applied to the current page only, and paging still follows the backend).
+ *
+ * @param {number} visibleCount - cards rendered after the view filters
+ * @param {number} pageSize - accounts per backend page
+ * @returns {string} e.g. "Showing 1-12 of 12"
+ */
+export function getVisiblePageSummary(visibleCount, pageSize, format = formatShowingRange) {
+  const count = Math.max(0, Number(visibleCount) || 0);
+  if (count === 0) return format({ start: 0, end: 0, total: 0 });
+  const size = Math.max(1, Number(pageSize) || count);
+  const start = 1;
+  const end = Math.min(count, size);
+  return format({ start, end, total: count });
 }
 
 export function getSafePagination(pagination, fallbackPageSize) {
@@ -220,39 +313,20 @@ export function setQuotaCache(connectionId, quotaEntry) {
 }
 
 /**
- * Format ISO date string to countdown format (inspired by vscode-antigravity-cockpit)
+ * Format ISO date string to countdown format (inspired by vscode-antigravity-cockpit).
+ * Two units, precision following magnitude ("2d 5h", "4h 40m", "15m 30s") — the
+ * same rule as every other quota surface (shortDuration in shared/quotaRows).
  * @param {string|Date} date - ISO date string or Date object
- * @returns {string} Formatted countdown (e.g., "2d 5h 30m", "4h 40m", "15m") or "-"
+ * @returns {string} Formatted countdown or "-"
  */
 export function formatResetTime(date) {
   if (!date) return "-";
 
   try {
     const resetDate = typeof date === "string" ? new Date(date) : date;
-    const now = new Date();
-    const diffMs = resetDate - now;
-
-    if (diffMs <= 0) return "-";
-
-    const totalMinutes = Math.ceil(diffMs / (1000 * 60));
-    
-    // < 60 minutes: show only minutes
-    if (totalMinutes < 60) {
-      return `${totalMinutes}m`;
-    }
-    
-    const totalHours = Math.floor(totalMinutes / 60);
-    const remainingMinutes = totalMinutes % 60;
-    
-    // < 24 hours: show hours and minutes
-    if (totalHours < 24) {
-      return `${totalHours}h ${remainingMinutes}m`;
-    }
-    
-    // >= 24 hours: show days, hours, and minutes
-    const days = Math.floor(totalHours / 24);
-    const remainingHours = totalHours % 24;
-    return `${days}d ${remainingHours}h ${remainingMinutes}m`;
+    if (Number.isNaN(resetDate?.getTime?.()) || resetDate.getFullYear() > 2099) return "-";
+    if (resetDate - new Date() <= 0) return "-";
+    return shortDuration(resetDate) || "-";
   } catch (error) {
     return "-";
   }
@@ -300,12 +374,12 @@ export function calculatePercentage(used, total) {
  * @returns {number} Remaining percentage (0-100)
  */
 export function getRemainingPercentage(quota) {
-  if (quota?.remaining !== undefined) {
-    return Math.max(0, Math.round(quota.remaining));
-  }
-
   if (quota?.remainingPercentage !== undefined) {
     return Math.round(quota.remainingPercentage);
+  }
+
+  if (quota?.remaining !== undefined && (quota?.total === 100 || quota?.total === undefined)) {
+    return Math.max(0, Math.round(quota.remaining));
   }
 
   return calculatePercentage(quota?.used, quota?.total);
@@ -414,12 +488,16 @@ export function parseQuotaData(provider, data) {
     switch (provider.toLowerCase()) {
       case "github":
         if (data.quotas) {
+          // Monthly per-category allowances: each keeps its own window row and is
+          // never summed into the additive resource-pack total.
           Object.entries(data.quotas).forEach(([name, quota]) => {
+            if (!quota.unlimited && !(quota.total > 0)) return;
             normalizedQuotas.push({
-              name,
+              name: `${name} · Monthly`,
               used: quota.used || 0,
               total: quota.total || 0,
               resetAt: quota.resetAt || null,
+              recurring: true,
             });
           });
         }
@@ -427,67 +505,91 @@ export function parseQuotaData(provider, data) {
 
       case "antigravity":
         if (data.quotas) {
-          // Group the per-model quota pool into family rows: the pool is
-          // shared per family upstream, so N model rows with identical
-          // numbers are noise. The row shows the most-exhausted member —
-          // that is the binding limit for the family.
           const entries = Object.entries(data.quotas);
-          const geminiModels = entries.filter(([k]) => k.startsWith("gemini-") && !k.includes("image"));
-          const claudeModels = entries.filter(([k]) => k.startsWith("claude-"));
-          const imageModels = entries.filter(([k]) => k.includes("image"));
-          const otherModels = entries.filter(([k]) => !k.startsWith("gemini-") && !k.startsWith("claude-") && !k.includes("image"));
+          // Check if quotas are already dual-window summary format (e.g. gemini_5h, gemini_weekly, claude_gpt_weekly)
+          const isSummaryFormat = entries.some(([k]) => /_(5h|weekly)$/i.test(k));
 
-          if (geminiModels.length > 0) {
-            const rep = geminiModels.reduce((min, cur) =>
-              (cur[1].remainingPercentage ?? 100) < (min[1].remainingPercentage ?? 100) ? cur : min
-            )[1];
-            normalizedQuotas.push({
-              name: "Gemini (Flash / Pro)",
-              modelKey: "gemini",
-              used: rep.used || 0,
-              total: rep.total || 0,
-              resetAt: rep.resetAt || null,
-              remainingPercentage: rep.remainingPercentage,
+          if (isSummaryFormat) {
+            entries.forEach(([modelKey, quota]) => {
+              normalizedQuotas.push({
+                name: quota.displayName || modelKey,
+                modelKey,
+                used: quota.used || 0,
+                total: quota.total || 100,
+                resetAt: quota.resetAt || null,
+                remainingPercentage: quota.remainingPercentage,
+                recurring: quota.recurring !== false,
+                percentScale: quota.percentScale !== false,
+              });
+            });
+          } else {
+            // Group the per-model quota pool into family rows: the pool is
+            // shared per family upstream, so N model rows with identical
+            // numbers are noise. The row shows the most-exhausted member —
+            // that is the binding limit for the family.
+            const geminiModels = entries.filter(([k]) => k.startsWith("gemini-") && !k.includes("image"));
+            const claudeModels = entries.filter(([k]) => k.startsWith("claude-") || k.startsWith("gpt-"));
+            const imageModels = entries.filter(([k]) => k.includes("image"));
+            const otherModels = entries.filter(([k]) => !k.startsWith("gemini-") && !k.startsWith("claude-") && !k.startsWith("gpt-") && !k.includes("image"));
+
+            if (geminiModels.length > 0) {
+              const rep = geminiModels.reduce((min, cur) =>
+                (cur[1].remainingPercentage ?? 100) < (min[1].remainingPercentage ?? 100) ? cur : min
+              )[1];
+              normalizedQuotas.push({
+                name: "Gemini (Flash / Pro)",
+                modelKey: "gemini",
+                used: rep.used || 0,
+                total: rep.total || 0,
+                resetAt: rep.resetAt || null,
+                remainingPercentage: rep.remainingPercentage,
+                recurring: true,
+                percentScale: true,
+              });
+            }
+
+            if (claudeModels.length > 0) {
+              const rep = claudeModels.reduce((min, cur) =>
+                (cur[1].remainingPercentage ?? 100) < (min[1].remainingPercentage ?? 100) ? cur : min
+              )[1];
+              normalizedQuotas.push({
+                name: "Claude (Sonnet / Opus / GPT)",
+                modelKey: "claude",
+                used: rep.used || 0,
+                total: rep.total || 0,
+                resetAt: rep.resetAt || null,
+                remainingPercentage: rep.remainingPercentage,
+                recurring: true,
+                percentScale: true,
+              });
+            }
+
+            imageModels.forEach(([modelKey, quota]) => {
+              normalizedQuotas.push({
+                name: quota.displayName || modelKey,
+                modelKey,
+                used: quota.used || 0,
+                total: quota.total || 0,
+                resetAt: quota.resetAt || null,
+                remainingPercentage: quota.remainingPercentage,
+                recurring: quota.recurring === true,
+                percentScale: true,
+              });
+            });
+
+            otherModels.forEach(([modelKey, quota]) => {
+              normalizedQuotas.push({
+                name: quota.displayName || modelKey,
+                modelKey,
+                used: quota.used || 0,
+                total: quota.total || 0,
+                resetAt: quota.resetAt || null,
+                remainingPercentage: quota.remainingPercentage,
+                recurring: quota.recurring === true,
+                percentScale: true,
+              });
             });
           }
-
-          if (claudeModels.length > 0) {
-            const rep = claudeModels.reduce((min, cur) =>
-              (cur[1].remainingPercentage ?? 100) < (min[1].remainingPercentage ?? 100) ? cur : min
-            )[1];
-            normalizedQuotas.push({
-              name: "Claude (Sonnet / Opus)",
-              modelKey: "claude",
-              used: rep.used || 0,
-              total: rep.total || 0,
-              resetAt: rep.resetAt || null,
-              remainingPercentage: rep.remainingPercentage,
-            });
-          }
-
-          imageModels.forEach(([modelKey, quota]) => {
-            normalizedQuotas.push({
-              name: quota.displayName || modelKey,
-              modelKey,
-              used: quota.used || 0,
-              total: quota.total || 0,
-              resetAt: quota.resetAt || null,
-              remainingPercentage: quota.remainingPercentage,
-              percentScale: quota.percentScale === true,
-            });
-          });
-
-          otherModels.forEach(([modelKey, quota]) => {
-            normalizedQuotas.push({
-              name: quota.displayName || modelKey,
-              modelKey,
-              used: quota.used || 0,
-              total: quota.total || 0,
-              resetAt: quota.resetAt || null,
-              remainingPercentage: quota.remainingPercentage,
-              percentScale: quota.percentScale === true,
-            });
-          });
         }
         break;
 
@@ -519,26 +621,84 @@ export function parseQuotaData(provider, data) {
         break;
 
       case "qoder":
-        // Qoder ships a `user` quota and (optionally) an `organization`
-        // quota, both with same shape: {total, used, remaining, unit, resetAt}.
-        // Skip an organization bucket when its total is 0 — most personal
-        // Qoder accounts won't have one and rendering "0/0" is misleading.
-        // Don't forward Qoder's `remaining` field: it's an absolute credit
-        // count, but getRemainingPercentage / QuotaTable interpret
-        // `remaining` as a 0-100 percentage and would render 348 credits
-        // as "348%". The percentage is computed from used/total instead.
+      case "qoder-cn":
+        // Qoder ships `user` (plan), `addOn` (resource packages) and optionally
+        // `organization`, each {total, used, remaining, unit, resetAt}. `addOn`
+        // additionally carries `packs[]` — but those packs ARE the addOn
+        // breakdown, already summed into addOn.total (500+400 = 900). Charting
+        // both the aggregate AND its members double-counted the same credits, so
+        // the packs are emitted `detailOnly`: the per-pack table (逐包明细) lists
+        // them with their own expiry dates, the card never charts them.
+        //
+        // The `user` bucket is NOT charted (用户定版 2026-10-01): Plan Credits
+        // 本身就是一个资源包，misc.js 已把 plan 行并入 addOn.packs 按到期日
+        // 混排进池，单独一行会与包明细重复计读（#187 症状：0/300 的套餐行
+        // 挂在卡上，而它的额度已含在总数里）。
+        //
+        // Don't forward Qoder's `remaining`: it is an absolute credit count, but
+        // getRemainingPercentage / QuotaTable read `remaining` as a 0-100
+        // percentage and would render 348 credits as "348%". Percent comes from
+        // used/total instead.
         if (data.quotas) {
           Object.entries(data.quotas).forEach(([quotaType, quota]) => {
-            if (quotaType === "organization" && (!quota || (Number(quota.total) || 0) === 0)) {
+            const total = Number(quota?.total) || 0;
+            if (quotaType === "user") return;
+            // A zero-total bucket carries no allowance; showing it as "剩 0 / 0"
+            // is noise (and on Qoder every account has an empty `organization` row).
+            if ((quotaType === "organization" || quotaType === "addOn") && total === 0) {
               return;
             }
+            const resetAt =
+              quota.resetAt && new Date(quota.resetAt).getFullYear() <= 2099
+                ? quota.resetAt
+                : null;
+            const displayName =
+              quotaType === "addOn"
+                ? "Resource Package"
+                : quotaType === "organization"
+                  ? "Organization"
+                  : quotaType;
             normalizedQuotas.push({
-              name: quotaType === "user" ? "Personal" : quotaType === "organization" ? "Organization" : quotaType,
+              name: displayName,
               used: quota.used || 0,
-              total: quota.total || 0,
+              total,
               unit: quota.unit,
-              resetAt: quota.resetAt || null,
+              // The addOn total mixes packs with different expiry dates; a single
+              // countdown on it would be misleading (the official web UI shows
+              // none). Per-pack dates remain available in the details table.
+              resetAt: quotaType === "addOn" ? null : resetAt,
+              unlimited: quota.unlimited === true,
+              // One aggregate per bucket — this is the “综合” row the card charts.
+              aggregate: true,
+              // addOn with its packs itemised below is only their sum: the
+              // per-pack details list the packs, not this restatement of them.
+              ...(quotaType === "addOn" && Array.isArray(quota.packs) && quota.packs.length > 0
+                ? { summarizesDetail: true }
+                : {}),
             });
+            // Per-campaign breakdown of addOn (soonest-expiring first), mirroring
+            // the web account page's "包含 N 个资源包" list. The last entry may be
+            // an aggregate-only remainder the device-token API cannot itemise —
+            // no campaign, so no expiry, and labelled instead of numbered.
+            if (quotaType === "addOn" && Array.isArray(quota.packs)) {
+              quota.packs.forEach((pack, i) => {
+                normalizedQuotas.push({
+                  // A pack may carry its own name (Qoder's merged "Plan Credits"
+                  // rows keep it, so the detail table still says 套餐内 Credits).
+                  name: pack.name || (pack.unitemized ? "Bonus Pack (unitemized)" : `Bonus Pack ${i + 1}`),
+                  used: pack.used || 0,
+                  total: pack.total || 0,
+                  unit: quota.unit,
+                  resetAt:
+                    pack.expiresAt && new Date(pack.expiresAt).getFullYear() <= 2099
+                      ? pack.expiresAt
+                      : null,
+                  unlimited: false,
+                  recurring: false,
+                  detailOnly: true,
+                });
+              });
+            }
           });
         }
         break;
@@ -586,10 +746,27 @@ export function parseQuotaData(provider, data) {
         break;
 
       case "codebuddy-cn":
-        // CodeBuddy CN mixes recurring refill packs ("Monthly"/"Weekly"/...)
-        // with one-shot bonus packs ("Bonus Pack N"). Forward `recurring`
-        // so the UI can show "Expires in" for bonus packs (whose resetAt is
-        // a hard expiry, not a refresh) instead of "Reset in".
+      case "codebuddy-intl":
+        // CodeBuddy (CN and intl share one usage payload shape — same fetcher in
+        // open-sse/services/usage/codebuddy-cn.js) mixes recurring refill packs
+        // ("Monthly"/"Weekly"/...) with one-shot bonus packs ("Bonus Pack N").
+        // Forward `recurring` so the UI can show "Expires in" for bonus packs
+        // (whose resetAt is a hard expiry, not a refresh) instead of "Reset in".
+        // Without the intl label it fell through to `default:`, which drops
+        // `recurring`, so intl bonus packs read "Reset in" and never expired.
+        // displayRemaining: these rows are CREDIT packs — the UI renders
+        // remaining/total counting DOWN as you spend (fresh = "100/100 100%"),
+        // not used/total counting up ("0/100 100%", which reads as empty).
+        //
+        // giftPack: CodeBuddy's "Monthly" is a monthly GRANT — the same kind of
+        // thing as the Bonus Packs, just on a cycle (the fetcher derives that
+        // label from the cycle length; see `refillCadence` in
+        // open-sse/services/usage/codebuddy-cn.js). It is NOT a plan window.
+        // The card therefore keeps it out of the cycle rows and leaves it to the
+        // per-pack details. Only a subscription's own monthly window
+        // (opencode-go's `usage.monthly`) gets a line of its own. Upstream both
+        // are spelled "Monthly", so the distinction has to be made HERE, while
+        // the provider is still known.
         if (data.quotas) {
           Object.entries(data.quotas).forEach(([name, quota]) => {
             normalizedQuotas.push({
@@ -598,6 +775,8 @@ export function parseQuotaData(provider, data) {
               total: quota.total || 0,
               resetAt: quota.resetAt || null,
               recurring: quota.recurring !== false,
+              displayRemaining: true,
+              ...(name === "Monthly" ? { giftPack: true } : {}),
             });
           });
         }
@@ -636,6 +815,8 @@ export function parseQuotaData(provider, data) {
         break;
 
       case "deepseek":
+      case "stepfun":
+      case "stepfun-cn":
         // Credit balance — remainingPercentage only (no absolute remaining).
         if (data.quotas) {
           Object.entries(data.quotas).forEach(([name, quota]) => {
@@ -645,6 +826,7 @@ export function parseQuotaData(provider, data) {
               total: quota.total || 0,
               resetAt: quota.resetAt || null,
               remainingPercentage: quota.remainingPercentage,
+              displayRemaining: quota.displayRemaining,
             });
           });
         }
@@ -666,6 +848,23 @@ export function parseQuotaData(provider, data) {
         }
         break;
 
+      case "commandcode":
+        if (data.quotas) {
+          Object.entries(data.quotas).forEach(([name, quota]) => {
+            normalizedQuotas.push({
+              name,
+              used: quota.used || 0,
+              total: quota.total || 0,
+              remaining: quota.remaining !== undefined ? quota.remaining : Math.max(0, (quota.total || 0) - (quota.used || 0)),
+              remainingPercentage: quota.remainingPercentage !== undefined ? quota.remainingPercentage : calculatePercentage(quota.used, quota.total),
+              resetAt: quota.resetAt || null,
+              recurring: quota.recurring === true,
+              displayRemaining: true,
+            });
+          });
+        }
+        break;
+
       default:
         // Generic fallback for unknown providers
         if (data.quotas) {
@@ -675,6 +874,25 @@ export function parseQuotaData(provider, data) {
               used: quota.used || 0,
               total: quota.total || 0,
               resetAt: quota.resetAt || null,
+              // Carry the presentation flags through too — QuotaProgressBar /
+              // QuotaTable / isConnectionDepleted all consume `unlimited` /
+              // `recurring` / `percentScale` (a quota-less unlimited window must
+              // not render as 0/0 depleted), and dropping them here is what
+              // made every generic/pushed row lose them.
+              ...(quota.unlimited !== undefined ? { unlimited: quota.unlimited === true } : {}),
+              ...(quota.recurring !== undefined ? { recurring: quota.recurring === true } : {}),
+              ...(quota.displayRemaining !== undefined ? { displayRemaining: quota.displayRemaining === true } : {}),
+              ...(quota.giftPack !== undefined ? { giftPack: quota.giftPack === true } : {}),
+              // 储值行旗标（minimax-code 的 Credits 算力币余额）：丢了它，
+              // isStoredValueRow 只认行名正则，"Credits" 会退化成 X/Y 进度行，
+              // 卡面印出「999.96 / 999.96」——同一数值印两遍。
+              ...(quota.isCreditBalance !== undefined ? { isCreditBalance: quota.isCreditBalance === true } : {}),
+              // 同名认领的推送余额行（river/MiMo）经此归一，折叠明细旗标必须直通，
+              // 否则连接卡与推送卡同数据渲染出两种形态
+              ...(quota.detailOnly !== undefined ? { detailOnly: quota.detailOnly === true } : {}),
+              ...(quota.summarizesDetail !== undefined ? { summarizesDetail: quota.summarizesDetail === true } : {}),
+              ...(Number.isFinite(quota.remainingPercentage) ? { remainingPercentage: quota.remainingPercentage } : {}),
+              ...(Number.isFinite(quota.percentScale) && quota.percentScale > 0 ? { percentScale: quota.percentScale } : {}),
             });
           });
         }
@@ -695,6 +913,17 @@ export function parseQuotaData(provider, data) {
       "weekly sonnet (7d)": 4,
     };
     normalizedQuotas.sort((a, b) => (CLAUDE_QUOTA_ORDER[a.name] ?? 99) - (CLAUDE_QUOTA_ORDER[b.name] ?? 99));
+    return normalizedQuotas;
+  }
+
+  if (provider?.toLowerCase() === "commandcode") {
+    const COMMANDCODE_QUOTA_ORDER = {
+      "session (5h)": 0,
+      "weekly (7d)": 1,
+      "Monthly Credits": 2,
+      "Purchased Credits": 3,
+    };
+    normalizedQuotas.sort((a, b) => (COMMANDCODE_QUOTA_ORDER[a.name] ?? 99) - (COMMANDCODE_QUOTA_ORDER[b.name] ?? 99));
     return normalizedQuotas;
   }
 

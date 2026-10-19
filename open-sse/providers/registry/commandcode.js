@@ -18,6 +18,14 @@ export default {
     },
   },
   category: "apikey",
+  features: {
+    usage: true,
+    usageApikey: true,
+  },
+  usage: {
+    creditsUrl: "https://api.commandcode.ai/alpha/billing/credits",
+    subscriptionsUrl: "https://api.commandcode.ai/alpha/billing/subscriptions",
+  },
   transport: {
     baseUrl: "https://api.commandcode.ai/alpha/generate",
     format: "commandcode",

@@ -17,6 +17,8 @@ describe("providerIcon", () => {
   it("resolves png by default", async () => {
     const mod = await import("@/shared/utils/providerIcon.js");
     expect(mod.getProviderIconSrc("longcat")).toBe("/providers/longcat.png");
+    expect(mod.getProviderIconSrc("qoder-cn")).toBe("/providers/qoder-cn.png");
+    expect(mod.getProviderIconSrc("qoder")).toBe("/providers/qoder.png");
   });
 
   it("resolves svg for providers in ICON_EXTENSIONS", async () => {

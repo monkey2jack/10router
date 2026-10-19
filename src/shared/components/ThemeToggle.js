@@ -3,8 +3,19 @@
 import { useTheme } from "@/shared/hooks/useTheme";
 import { cn } from "@/shared/utils/cn";
 
+// Three-state cycle: system → light → dark (the store's toggleTheme). "system"
+// tracks the OS day/night so Windows personalization / macOS appearance / the
+// fnOS browser drive the theme with no manual switching; the icon shows the
+// CURRENT mode so the auto state is discoverable.
+const MODE_META = {
+  system: { icon: "routine", label: "Theme: system", next: "light" },
+  light: { icon: "light_mode", label: "Theme: light", next: "dark" },
+  dark: { icon: "dark_mode", label: "Theme: dark", next: "system" },
+};
+
 export default function ThemeToggle({ className, variant = "default" }) {
-  const { isDark, toggleTheme } = useTheme();
+  const { theme, toggleTheme } = useTheme();
+  const mode = MODE_META[theme] || MODE_META.system;
 
   const variants = {
     default: cn(
@@ -26,8 +37,9 @@ export default function ThemeToggle({ className, variant = "default" }) {
     <button
       onClick={toggleTheme}
       className={cn(variants[variant], className)}
-      aria-label={`Switch to ${isDark ? "light" : "dark"} mode`}
-      title={`Switch to ${isDark ? "light" : "dark"} mode`}
+      aria-label={mode.label}
+      title={mode.label}
+      data-theme-mode={theme}
     >
       <span
         className={cn(
@@ -35,7 +47,7 @@ export default function ThemeToggle({ className, variant = "default" }) {
           variant === "card" && "transition-transform duration-300 group-hover:rotate-12"
         )}
       >
-        {isDark ? "light_mode" : "dark_mode"}
+        {mode.icon}
       </span>
     </button>
   );

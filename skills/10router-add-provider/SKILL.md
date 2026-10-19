@@ -34,6 +34,7 @@ AUTH="Authorization: Bearer ${TENROUTER_KEY}"    # TENROUTER_KEY = dashboard LLM
 
 > Deployers can also derive a CLI token on the host from `machine-id` + `cli-secret`:
 > `sha256(machine-id + "9r-cli-auth" + cli-secret).slice(0,16)`, fixed salt `9r-cli-auth`.
+> Send it as the `x-10r-cli-token` header (not `Authorization: Bearer`); servers before the rename read `x-9r-cli-token`.
 > Custom data paths live under your DATA_DIR (`~/.10router/` or fnOS `/vol4/@appdata/10router/`).
 
 ## Two-step registration

@@ -39,7 +39,7 @@ export default function HeaderMenu({ onLogout }) {
   const [changelogOpen, setChangelogOpen] = useState(false);
   const [shutdownOpen, setShutdownOpen] = useState(false);
   const [isShuttingDown, setIsShuttingDown] = useState(false);
-  const { toggleTheme, isDark } = useTheme();
+  const { theme, toggleTheme } = useTheme();
   const menuRef = useRef(null);
 
   const handleShutdown = async () => {
@@ -86,8 +86,8 @@ export default function HeaderMenu({ onLogout }) {
               onClick={() => { close(); setChangelogOpen(true); }}
             />
             <MenuItem
-              icon={isDark ? "light_mode" : "dark_mode"}
-              label={translate("Theme")}
+              icon={theme === "system" ? "routine" : theme === "light" ? "light_mode" : "dark_mode"}
+              label={translate(theme === "system" ? "Theme: system" : theme === "light" ? "Theme: light" : "Theme: dark")}
               onClick={() => { toggleTheme(); close(); }}
             />
             <MenuItem

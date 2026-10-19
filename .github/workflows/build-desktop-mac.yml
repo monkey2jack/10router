@@ -1,0 +1,105 @@
+name: Build 10Router desktop (macOS)
+
+# macOS 桌面产物 (x64 + arm64 两个 dmg)。与 desktop/build.sh 同一流程:
+# 构建 cli/app (Next standalone) -> desktop npm install -> electron-builder --mac。
+# 没有 Apple 证书。electron-builder 25 找不到签名身份时**直接跳过签名**, identity "-"
+# 也被当成证书名跳过 (2026-09-26 两轮 CI 实测) —— 改过的 Electron 包签名失效, 下载后
+# macOS 报「已损坏」, 右键打开也无效。所以用 afterPack 钩子 desktop/build/adhoc-sign.js
+# 在出 dmg 前对 .app 做 ad-hoc 签名 (仅经命令行挂上, 不影响本机有正式证书时的签名),
+# 并在打包后校验两个 .app 都是 adhoc 签名, 否则失败。
+# 未公证: 用户首次打开需右键 -> 打开。
+# better-sqlite3 (原生) 已由 build-cli.js 从 cli/app 剥离, sidecar 用 Electron 自带 Node
+# 走 node:sqlite / sql.js, 所以同一份 cli/app 装进 x64 与 arm64 两个包都能用。
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install root dependencies (for cli/app bundle)
+        run: npm install --no-audit --no-fund
+
+      - name: Install cli dependencies (esbuild for MITM bundle)
+        run: npm install --no-audit --no-fund
+        working-directory: cli
+
+      - name: Build CLI bundle (cli/app)
+        run: node cli/scripts/build-cli.js
+
+      - name: Install desktop dependencies
+        run: npm install --no-audit --no-fund
+        working-directory: desktop
+
+      - name: Package macOS artifacts (x64 + arm64 dmg, ad-hoc signed)
+        run: npx electron-builder --mac --publish never -c.afterPack=build/adhoc-sign.js
+        working-directory: desktop
+
+      - name: Verify both apps carry an ad-hoc signature
+        shell: bash
+        working-directory: desktop
+        run: |
+          set -euo pipefail
+          for app in dist/mac/10Router.app dist/mac-arm64/10Router.app; do
+            echo "== $app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+            codesign -dv "$app" 2>&1 | tee /tmp/cs.txt
+            grep -q "Signature=adhoc" /tmp/cs.txt || { echo "ERROR: $app is not ad-hoc signed"; exit 1; }
+          done
+
+      - name: Assemble release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-files-mac
+          # 平台化命名 (v1.4.0 起 dmg artifactName = 10Router-Mac-Setup-<版本>-<arch>.dmg);
+          # glob 收紧到真实前缀,防止意外混入其他 dist 文件
+          cp desktop/dist/10Router-Mac-Setup-*.dmg release-files-mac/
+          N=$(ls release-files-mac/*.dmg | wc -l)
+          [ "$N" -ge 2 ] || { echo "ERROR: expected x64 + arm64 dmg, found $N"; exit 1; }
+          # Own checksum file per workflow (they run in parallel), standard `shasum -c` format.
+          ( cd release-files-mac && shasum -a 256 *.dmg > SHA256SUMS-mac.txt )
+          cat release-files-mac/SHA256SUMS-mac.txt
+          ls -la release-files-mac/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-mac
+          path: release-files-mac/*
+          if-no-files-found: error
+
+      # 确保 release 存在且带标题 (已存在时不动, notes 手工维护)。
+      - name: Ensure release exists with title
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          gh release view "${{ github.ref_name }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "${{ github.ref_name }}" --repo "$GITHUB_REPOSITORY" \
+              --title "10Router ${{ github.ref_name }}" \
+              --notes "Release notes pending — see [CHANGELOG.md](https://github.com/techysy/10router/blob/main/CHANGELOG.md)."
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Upload macOS artifacts to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          # 只附文件, 不写 name/body — 发布说明手工维护, 防重复 run 覆盖。
+          files: release-files-mac/*
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

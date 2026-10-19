@@ -2,11 +2,12 @@ import { withCodexReviewModels } from "../models/helpers.js";
 
 // Codex CLI version the backend sees in the Version / User-Agent identity headers.
 // Single source: bump it here when the installed Codex CLI moves on.
-const CODEX_CLI_VERSION = "0.154.0";
+// 上游 0.155 起：低于此版本的请求会被 OpenAI 限流拒绝（v0.5.95, ca6e8407）。
+const CODEX_CLI_VERSION = "0.159.0";
 
 export default {
   id: "codex",
-  priority: 30,
+  priority: 20,
   alias: "cx",
   uiAlias: "cx",
   display: {
@@ -51,20 +52,35 @@ export default {
   },
   models: [
     { id: "gpt-6-astra", name: "GPT 6.0 Astra" },
+    // [1m] 长上下文变体（上游 v0.5.95, 9f41ee75）：同一上游模型，872k 窗口
+    // （capabilities 的 CODEX_EXTENDED_CAPS），upstreamModelId 指向基础 id——
+    // 请求被剥掉标记后按基础模型发出，变体 id 只用于账号 enabledModels 勾选
+    // 与能力发布。
+    { id: "gpt-6-astra[1m]", name: "GPT 6.0 Astra (extended context)", upstreamModelId: "gpt-6-astra" },
+    // 6.0 lite pair: upstream v0.5.91 ships both over the subscription flow.
+    { id: "gpt-6-sol", name: "GPT 6.0 Sol" },
+    { id: "gpt-6-sol[1m]", name: "GPT 6.0 Sol (extended context)", upstreamModelId: "gpt-6-sol" },
+    { id: "gpt-6-luna", name: "GPT 6.0 Luna" },
+    { id: "gpt-6-luna[1m]", name: "GPT 6.0 Luna (extended context)", upstreamModelId: "gpt-6-luna" },
+    // User-observed in the Codex app (2026-09-30); upstream has not picked it
+    // up yet. thinkingLevels' *gpt-6* pattern already covers the id.
+    { id: "gpt-6.1-sol", name: "GPT 6.1 Sol" },
     { id: "gpt-5.6-sol", name: "GPT 5.6 Sol" },
+    { id: "gpt-5.6-sol[1m]", name: "GPT 5.6 Sol (extended context)", upstreamModelId: "gpt-5.6-sol" },
     { id: "gpt-5.6-sol-review", name: "GPT 5.6 Sol Review", upstreamModelId: "gpt-5.6-sol", quotaFamily: "review" },
     { id: "gpt-5.6-terra", name: "GPT 5.6 Terra" },
+    { id: "gpt-5.6-terra[1m]", name: "GPT 5.6 Terra (extended context)", upstreamModelId: "gpt-5.6-terra" },
     { id: "gpt-5.6-terra-review", name: "GPT 5.6 Terra Review", upstreamModelId: "gpt-5.6-terra", quotaFamily: "review" },
     { id: "gpt-5.6-luna", name: "GPT 5.6 Luna" },
+    { id: "gpt-5.6-luna[1m]", name: "GPT 5.6 Luna (extended context)", upstreamModelId: "gpt-5.6-luna" },
     { id: "gpt-5.6-luna-review", name: "GPT 5.6 Luna Review", upstreamModelId: "gpt-5.6-luna", quotaFamily: "review" },
     { id: "gpt-5.5", name: "GPT 5.5" },
     { id: "gpt-5.5-review", name: "GPT 5.5 Review", upstreamModelId: "gpt-5.5", quotaFamily: "review" },
-    { id: "gpt-5.4", name: "GPT 5.4" },
-    { id: "gpt-5.4-review", name: "GPT 5.4 Review", upstreamModelId: "gpt-5.4", quotaFamily: "review" },
-    { id: "gpt-5.4-mini", name: "GPT 5.4 Mini" },
-    { id: "gpt-5.4-mini-review", name: "GPT 5.4 Mini Review", upstreamModelId: "gpt-5.4-mini", quotaFamily: "review" },
-    { id: "gpt-5.3-codex-spark", name: "GPT 5.3 Codex Spark" },
-    { id: "gpt-5.3-codex-spark-review", name: "GPT 5.3 Codex Spark Review", upstreamModelId: "gpt-5.3-codex-spark", quotaFamily: "review" },
+    // gpt-5.4 / gpt-5.4-mini / gpt-5.3-codex-spark 已移除：不在 backend-api/codex/models 里，
+    // 后端一律 400 "model is not supported"（上游 v0.5.95, 8f9ff44f）。
+    // gpt-daybreak-blue-latest / gpt-reserve 已由 backend-api/codex/models 确认在线。
+    { id: "gpt-daybreak-blue-latest", name: "GPT Daybreak Blue" },
+    { id: "gpt-reserve", name: "GPT Reserve" },
     { id: "gpt-image-2.5", name: "GPT Image 2.5", capabilities: ["text2img","edit","multiImage"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
     { id: "gpt-image-2.5-flare", name: "GPT Image 2.5 Flare", capabilities: ["text2img","edit","multiImage"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
     { id: "gpt-image-2.5-sunburst", name: "GPT Image 2.5 Sunburst", capabilities: ["text2img","edit","multiImage"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
@@ -74,7 +90,7 @@ export default {
     { id: "gpt-5.6-terra-image", name: "GPT 5.6 Terra Image", capabilities: ["text2img","edit"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
     { id: "gpt-5.6-luna-image", name: "GPT 5.6 Luna Image", capabilities: ["text2img","edit"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
     { id: "gpt-5.5-image", name: "GPT 5.5 Image", capabilities: ["text2img","edit"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
-    { id: "gpt-5.4-image", name: "GPT 5.4 Image", capabilities: ["text2img","edit"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
+    // gpt-5.4-image 随 gpt-5.4 一并移除（后端同样已下线）。
     { id: "gpt-5.3-image", name: "GPT 5.3 Image", capabilities: ["text2img","edit"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
   ],
   serviceKinds: ["llm","image"],
@@ -91,7 +107,10 @@ export default {
       codex_cli_simplified_flow: "true",
       originator: "codex_cli_rs",
     },
-    refreshLeadMs: 432000000,
+    // 访问令牌寿命约 1 小时；5 天的 lead 会让每次调用都轮换 refresh token，
+    // 而旧 refresh token 一旦被复用，OpenAI 会吊销整个 session（账号被登出）。
+    // 因此只在临近真实过期前刷新（10 分钟）——上游 v0.5.95, 0bc7f86e。
+    refreshLeadMs: 600000,
     refresh: {
       encoding: "form",
       scope: "openid profile email offline_access",

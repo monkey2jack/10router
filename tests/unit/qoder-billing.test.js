@@ -8,6 +8,17 @@
 
 import { describe, it, expect } from "vitest";
 import { __test__ as qoderExecutorInternals } from "../../open-sse/executors/qoder.js";
+import { checkFallbackError } from "../../open-sse/services/accountFallback.js";
+
+// Real upstream body from the NAS (2026-09-26): the 10605 queue throttle is
+// wrapped in a generic 403 envelope, so its own quotes arrive escaped.
+const NESTED_10605 = JSON.stringify({
+  code: "403",
+  message: JSON.stringify({
+    code: "10605",
+    message: JSON.stringify({ isQueued: true, modelKey: "qfmodel", queueCount: 0, queueType: "p3", retryAfterSeconds: 30 }),
+  }),
+});
 
 describe("isBillingBlock", () => {
   const { isBillingBlock } = qoderExecutorInternals;
@@ -20,6 +31,10 @@ describe("isBillingBlock", () => {
   it("detects code 10605 (queue throttle)", () => {
     const msg = '{"code":"10605","message":"Queue limit"}';
     expect(isBillingBlock(msg)).toBe(true);
+  });
+
+  it("detects 10605 nested inside a 403 envelope (escaped quotes — NAS 2026-09-26)", () => {
+    expect(isBillingBlock(NESTED_10605)).toBe(true);
   });
 
   it("detects pricingUrl field", () => {
@@ -69,7 +84,7 @@ describe("wrapQoderSSE billing detection", () => {
     expect(json.error.message).toContain("112");
   });
 
-  it("returns 403 response when first frame is billing block (code 10605)", async () => {
+  it("returns 429 for the 10605 queue throttle (not a 403 account lock)", async () => {
     const billingEnv = JSON.stringify({
       statusCodeValue: 429,
       body: '{"code":"10605","message":"Queue limit"}',
@@ -78,8 +93,21 @@ describe("wrapQoderSSE billing detection", () => {
 
     const wrapped = await wrapQoderSSE(makeResponse([upstream]), "qoder/ultimate");
 
-    expect(wrapped.status).toBe(403);
+    expect(wrapped.status).toBe(429);
     expect(wrapped.ok).toBe(false);
+  });
+
+  it("nested 10605 becomes a 429 whose cooldown honors retryAfterSeconds", async () => {
+    const upstream = `data: ${JSON.stringify({ statusCodeValue: 403, body: NESTED_10605 })}\n\n`;
+
+    const wrapped = await wrapQoderSSE(makeResponse([upstream]), "qoder/qfmodel");
+
+    expect(wrapped.status).toBe(429);
+    const { error } = await wrapped.json();
+    expect(error.message).toContain("retry after 30 seconds");
+    const verdict = checkFallbackError(429, error.message, 0);
+    expect(verdict.shouldFallback).toBe(true);
+    expect(verdict.cooldownMs).toBe(30_000);
   });
 
   it("returns 403 response when first frame has pricingUrl", async () => {

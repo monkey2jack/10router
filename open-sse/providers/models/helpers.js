@@ -28,3 +28,14 @@ export function isMuseSparkModel(modelId) {
   const base = clean.includes("/") ? clean.split("/").pop() : clean;
   return /^muse[-_]?spark(?:$|[-_:.\s])/i.test(base);
 }
+
+// 裸 id（"deepseek-v4-pro(max)"）与供应商前缀 id 都要命中；末尾 "(level)"
+// 是 thinking 档位覆盖标记，先剥掉再按 ^deepseek- 锚定匹配，避免误伤
+// "my-deepseek-x" 这类仅包含关键字的其他模型族。供 Claude /messages 翻译层
+// 判断「opencode-go 托管的 DeepSeek」门控。
+export function isDeepSeekModel(modelId) {
+  if (!modelId || typeof modelId !== "string") return false;
+  const clean = modelId.replace(/\([^()]+\)\s*$/, "").trim();
+  const base = clean.includes("/") ? clean.split("/").pop() : clean;
+  return /^deepseek-/i.test(base);
+}

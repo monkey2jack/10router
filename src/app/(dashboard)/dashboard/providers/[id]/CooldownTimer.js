@@ -1,7 +1,15 @@
 import { useState, useEffect } from "react";
 import PropTypes from "prop-types";
 
-export default function CooldownTimer({ until }) {
+/**
+ * Live countdown to a model-lock expiry.
+ *
+ * `inline` renders it as a small prefix (used inside the lastError sentence so
+ * the countdown reads as part of the message instead of a separate chip).
+ * The ⏱ glyph is sized in em so it scales with the surrounding text instead of
+ * inheriting a big icon box.
+ */
+export default function CooldownTimer({ until, inline = false }) {
   const [remaining, setRemaining] = useState("");
 
   useEffect(() => {
@@ -30,13 +38,22 @@ export default function CooldownTimer({ until }) {
 
   if (!remaining) return null;
 
+  if (inline) {
+    return (
+      <span className="shrink-0 text-xs text-orange-500 font-mono">
+        <span className="text-[0.85em] leading-none">⏱</span> {remaining}
+      </span>
+    );
+  }
+
   return (
     <span className="text-xs text-orange-500 font-mono">
-      ⏱ {remaining}
+      <span className="text-[0.85em] leading-none">⏱</span> {remaining}
     </span>
   );
 }
 
 CooldownTimer.propTypes = {
   until: PropTypes.string.isRequired,
+  inline: PropTypes.bool,
 };

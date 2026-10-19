@@ -20,19 +20,35 @@ export const UNSUPPORTED_SCHEMA_CONSTRAINTS = [
   "default", "examples",
   // JSON Schema meta keywords
   "$schema", "$defs", "definitions", "const", "$ref", "$comment",
+  // 2019-09/2020-12 identifier and anchor keywords
+  "$id", "$anchor", "$dynamicRef", "$dynamicAnchor", "$vocabulary",
+  // Array count keywords that ride along with `contains`
+  "minContains", "maxContains",
   // Annotation keywords (rejected by Gemini/Antigravity - e.g. MCP tool schemas set these)
   "deprecated", "readOnly", "writeOnly",
+  // OpenAI strict tool mode puts `strict` inside `parameters` (RubyLLM and other
+  // OpenAI-convention clients); Codex multi-agent tools mark fields `encrypted`.
+  // Gemini answers both with 400 "Unknown name ...: Cannot find field".
+  "strict", "encrypted",
+  // VS Code / JSON Language Service extensions injected by Copilot-style tools
+  "markdownDescription", "markdownEnumDescriptions", "enumItemLabels",
   // Object validation keywords (not supported)
   "additionalProperties", "propertyNames", "patternProperties", "enumDescriptions",
   // Complex schema keywords (handled by flattenAnyOfOneOf/mergeAllOf)
   "anyOf", "oneOf", "allOf", "not",
   // Dependency keywords (not supported)
   "dependencies", "dependentSchemas", "dependentRequired",
-  // Other unsupported keywords
-  "title", "optional", "deprecated", "if", "then", "else", "contentMediaType", "contentEncoding",
+  // Other unsupported keywords ("deprecated" already listed under annotation keywords)
+  "title", "optional", "if", "then", "else", "contentMediaType", "contentEncoding",
   // UI/Styling properties (from Cursor tools - NOT JSON Schema standard)
   "cornerRadius", "fillColor", "fontFamily", "fontSize", "fontWeight",
-  "gap", "padding", "strokeColor", "strokeThickness", "textColor"
+  "gap", "padding", "strokeColor", "strokeThickness", "textColor",
+  // 部分 MCP 工具 schema 携带的非标准注解/报错关键字。Gemini 的 schema proto
+  // 没有对应字段,任一嵌套节点出现即以 "Unknown name X: Cannot find field"
+  // 整体 400,必须整树剥离(markdownDescription 已在上方 VS Code 扩展段收录)。
+  "errorMessage", "errorMessages", "x-errorMessage", "x-errorMessages",
+  "x-intellij-html-description", "x-taplo-info", "x-taplo",
+  "doNotSuggest", "suggestSortText", "minProperties", "maxProperties"
 ];
 
 // Default safety settings
@@ -135,99 +151,145 @@ export function generateProjectId() {
   return `${adj}-${noun}-${crypto.randomUUID().slice(0, 5)}`;
 }
 
-// Helper: Remove unsupported keywords recursively from object/array
-// Also strips all vendor extension fields (x- prefixed) not supported by Gemini
-function removeUnsupportedKeywords(obj, keywords) {
-  if (!obj || typeof obj !== "object") return;
+// Keys whose value is a name → subschema map. Their own keys are property names,
+// not schema keywords — a property literally called "title" or "format" must
+// survive keyword stripping, so the walkers descend into the values only.
+const SCHEMA_MAP_KEYS = new Set(["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"]);
+// Keys holding instance data or name lists, never subschemas.
+const SCHEMA_DATA_KEYS = new Set(["enum", "const", "default", "examples", "required"]);
 
-  if (Array.isArray(obj)) {
-    for (const item of obj) {
-      removeUnsupportedKeywords(item, keywords);
-    }
+// Local $ref inlining budget: stops pathological schemas (deep diamond refs)
+// from exploding in size. Refs beyond the budget are stripped like before.
+const MAX_REF_INLINES = 256;
+
+const isSchemaNode = v => !!v && typeof v === "object" && !Array.isArray(v);
+
+// Visit every direct subschema of a schema node (or every item of a schema array).
+function forEachSubschema(node, visit) {
+  if (Array.isArray(node)) {
+    for (const item of node) visit(item);
     return;
   }
-
-  for (const key of Object.keys(obj)) {
-    if (keywords.includes(key) || key.startsWith("x-")) {
-      delete obj[key];
-      continue;
-    }
-
-    const value = obj[key];
-    if (value && typeof value === "object") {
-      removeUnsupportedKeywords(value, keywords);
+  for (const [key, value] of Object.entries(node)) {
+    if (!value || typeof value !== "object" || SCHEMA_DATA_KEYS.has(key)) continue;
+    if (SCHEMA_MAP_KEYS.has(key) && !Array.isArray(value)) {
+      for (const sub of Object.values(value)) visit(sub);
+    } else {
+      visit(value);
     }
   }
+}
+
+// Build a recursive pass: `apply` runs on each schema node, then the walk descends.
+function schemaPass(apply) {
+  const pass = node => {
+    if (!node || typeof node !== "object") return;
+    if (!Array.isArray(node)) apply(node);
+    forEachSubschema(node, pass);
+  };
+  return pass;
+}
+
+function resolveLocalPointer(root, ref) {
+  let current = root;
+  for (const raw of ref.slice(2).split("/")) {
+    const segment = raw.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (!current || typeof current !== "object" || !(segment in current)) return null;
+    current = current[segment];
+  }
+  return current;
+}
+
+// Inline local "#/..." refs (pydantic / FastMCP tool schemas put every model in
+// $defs). Stripping $ref without inlining left `{}`, which then became the
+// {reason} placeholder and the model lost the real argument shape.
+// Siblings of $ref (description, default…) override the resolved target.
+function inlineLocalRefs(root) {
+  let budget = MAX_REF_INLINES;
+  const active = new Set();
+
+  const inline = node => {
+    if (Array.isArray(node)) return node.map(inline);
+    if (!isSchemaNode(node)) return node;
+
+    const ref = typeof node.$ref === "string" ? node.$ref : "";
+    if (ref.startsWith("#/")) {
+      const { $ref: _ref, ...rest } = node;
+      const target = active.has(ref) || budget <= 0 ? null : resolveLocalPointer(root, ref);
+      if (!isSchemaNode(target)) return inline(rest);
+      budget--;
+      active.add(ref);
+      const merged = { ...inline(target), ...inline(rest) };
+      active.delete(ref);
+      return merged;
+    }
+
+    const out = {};
+    for (const [key, value] of Object.entries(node)) {
+      out[key] = SCHEMA_DATA_KEYS.has(key) ? value : inline(value);
+    }
+    return out;
+  };
+
+  return inline(root);
+}
+
+// Remove unsupported keywords at every schema level. Also strips vendor
+// extensions: `x-` fields and `~`-prefixed Standard Schema metadata
+// (Zod 4 / Valibot / ArkType leak keys like `~optional`), which Gemini rejects
+// the same way as any unknown keyword.
+function removeUnsupportedKeywords(schema, keywords) {
+  schemaPass(node => {
+    for (const key of Object.keys(node)) {
+      if (keywords.includes(key) || key.startsWith("x-") || key.startsWith("~")) delete node[key];
+    }
+  })(schema);
 }
 
 // Convert const to enum
-function convertConstToEnum(obj) {
-  if (!obj || typeof obj !== "object") return;
-
-  if (obj.const !== undefined && !obj.enum) {
-    obj.enum = [obj.const];
-    delete obj.const;
+const convertConstToEnum = schemaPass(node => {
+  if (node.const !== undefined && !node.enum) {
+    node.enum = [node.const];
+    delete node.const;
   }
+});
 
-  for (const value of Object.values(obj)) {
-    if (value && typeof value === "object") {
-      convertConstToEnum(value);
-    }
+// Gemini only accepts enum on STRING schemas. Numeric enums can't be expressed,
+// so drop them and keep the numeric type; everything else becomes a string enum
+// (Gemini returns 400 when an enum has no explicit type:"string").
+const convertEnumValuesToStrings = schemaPass(node => {
+  if (!Array.isArray(node.enum)) return;
+  const type = Array.isArray(node.type) ? node.type.find(t => t !== "null") : node.type;
+  if (type === "integer" || type === "number") {
+    delete node.enum;
+    return;
   }
-}
-
-// Convert enum values to strings (Gemini requires string enum values + explicit type:"string")
-function convertEnumValuesToStrings(obj) {
-  if (!obj || typeof obj !== "object") return;
-
-  if (obj.enum && Array.isArray(obj.enum)) {
-    obj.enum = obj.enum.map(v => String(v));
-    // Gemini API requires type:"string" when enum is present — without it returns 400
-    if (!obj.type) {
-      obj.type = "string";
-    }
-  }
-
-  for (const value of Object.values(obj)) {
-    if (value && typeof value === "object") {
-      convertEnumValuesToStrings(value);
-    }
-  }
-}
+  node.enum = node.enum.map(v => String(v));
+  if (!node.type) node.type = "string";
+});
 
 // Merge allOf schemas
-function mergeAllOf(obj) {
-  if (!obj || typeof obj !== "object") return;
+const mergeAllOf = schemaPass(node => {
+  if (!Array.isArray(node.allOf)) return;
+  const merged = {};
 
-  if (obj.allOf && Array.isArray(obj.allOf)) {
-    const merged = {};
-
-    for (const item of obj.allOf) {
-      if (item.properties) {
-        if (!merged.properties) merged.properties = {};
-        Object.assign(merged.properties, item.properties);
-      }
-      if (item.required && Array.isArray(item.required)) {
-        if (!merged.required) merged.required = [];
-        for (const req of item.required) {
-          if (!merged.required.includes(req)) {
-            merged.required.push(req);
-          }
-        }
+  for (const item of node.allOf) {
+    if (item?.properties) {
+      if (!merged.properties) merged.properties = {};
+      Object.assign(merged.properties, item.properties);
+    }
+    if (Array.isArray(item?.required)) {
+      if (!merged.required) merged.required = [];
+      for (const req of item.required) {
+        if (!merged.required.includes(req)) merged.required.push(req);
       }
     }
-
-    delete obj.allOf;
-    if (merged.properties) obj.properties = { ...obj.properties, ...merged.properties };
-    if (merged.required) obj.required = [...(obj.required || []), ...merged.required];
   }
 
-  for (const value of Object.values(obj)) {
-    if (value && typeof value === "object") {
-      mergeAllOf(value);
-    }
-  }
-}
+  delete node.allOf;
+  if (merged.properties) node.properties = { ...node.properties, ...merged.properties };
+  if (merged.required) node.required = [...(node.required || []), ...merged.required];
+});
 
 // Select best schema from anyOf/oneOf
 function selectBest(items) {
@@ -256,97 +318,84 @@ function selectBest(items) {
   return bestIdx;
 }
 
-// Flatten anyOf/oneOf
-function flattenAnyOfOneOf(obj) {
-  if (!obj || typeof obj !== "object") return;
-
-  if (obj.anyOf && Array.isArray(obj.anyOf) && obj.anyOf.length > 0) {
-    const nonNullSchemas = obj.anyOf.filter(s => s && s.type !== "null");
-    if (nonNullSchemas.length > 0) {
-      const bestIdx = selectBest(nonNullSchemas);
-      const selected = nonNullSchemas[bestIdx];
-      delete obj.anyOf;
-      Object.assign(obj, selected);
-    }
+// Flatten anyOf/oneOf to the richest non-null branch. Loops because the chosen
+// branch may itself be a union. The field's own description wins over the
+// branch's (the branch is usually a shared $defs model).
+const MAX_UNION_DEPTH = 8;
+const flattenAnyOfOneOf = schemaPass(node => {
+  for (let depth = 0; depth < MAX_UNION_DEPTH; depth++) {
+    const key = ["anyOf", "oneOf"].find(k => Array.isArray(node[k]) && node[k].some(s => s && s.type !== "null"));
+    if (!key) return;
+    const nonNullSchemas = node[key].filter(s => s && s.type !== "null");
+    const selected = nonNullSchemas[selectBest(nonNullSchemas)];
+    const ownDescription = node.description;
+    delete node[key];
+    Object.assign(node, selected);
+    if (ownDescription !== undefined) node.description = ownDescription;
   }
-
-  if (obj.oneOf && Array.isArray(obj.oneOf) && obj.oneOf.length > 0) {
-    const nonNullSchemas = obj.oneOf.filter(s => s && s.type !== "null");
-    if (nonNullSchemas.length > 0) {
-      const bestIdx = selectBest(nonNullSchemas);
-      const selected = nonNullSchemas[bestIdx];
-      delete obj.oneOf;
-      Object.assign(obj, selected);
-    }
-  }
-
-  for (const value of Object.values(obj)) {
-    if (value && typeof value === "object") {
-      flattenAnyOfOneOf(value);
-    }
-  }
-}
+});
 
 // Flatten type arrays
-function flattenTypeArrays(obj) {
-  if (!obj || typeof obj !== "object") return;
-
-  if (obj.type && Array.isArray(obj.type)) {
-    const nonNullTypes = obj.type.filter(t => t !== "null");
-    obj.type = nonNullTypes.length > 0 ? nonNullTypes[0] : "string";
+const flattenTypeArrays = schemaPass(node => {
+  if (Array.isArray(node.type)) {
+    const nonNullTypes = node.type.filter(t => t !== "null");
+    node.type = nonNullTypes.length > 0 ? nonNullTypes[0] : "string";
   }
-
-  for (const value of Object.values(obj)) {
-    if (value && typeof value === "object") {
-      flattenTypeArrays(value);
-    }
-  }
-}
+});
 
 // Infer missing type=object when properties exist (Gemini requires explicit type)
-function ensureObjectType(obj) {
-  if (!obj || typeof obj !== "object") return;
-  if (obj.properties && !obj.type) obj.type = "object";
-  for (const v of Object.values(obj)) if (v && typeof v === "object") ensureObjectType(v);
-}
+const ensureObjectType = schemaPass(node => {
+  if (node.properties && !node.type) node.type = "object";
+});
 
 // Convert prefixItems (tuple validation) to items — Gemini cannot express tuples,
 // and a type:"array" schema without items is rejected with "missing field"
-function convertPrefixItems(obj) {
-  if (!obj || typeof obj !== "object") return;
-
-  if (Array.isArray(obj.prefixItems) && obj.prefixItems.length > 0) {
-    const variants = obj.prefixItems.filter(s => s && s.type !== "null");
-    if (!obj.items && variants.length === 1) {
-      obj.items = variants[0];
-    } else if (!obj.items && variants.length > 1) {
-      obj.items = { anyOf: variants };
-    }
-    delete obj.prefixItems;
+const convertPrefixItems = schemaPass(node => {
+  if (!Array.isArray(node.prefixItems) || node.prefixItems.length === 0) return;
+  const variants = node.prefixItems.filter(s => s && s.type !== "null");
+  if (!node.items && variants.length === 1) {
+    node.items = variants[0];
+  } else if (!node.items && variants.length > 1) {
+    node.items = { anyOf: variants };
   }
-
-  for (const value of Object.values(obj)) {
-    if (value && typeof value === "object") {
-      convertPrefixItems(value);
-    }
-  }
-}
+  delete node.prefixItems;
+});
 
 // Gemini requires items on every type:"array" schema — fill a permissive placeholder
-function ensureArrayItems(obj) {
-  if (!obj || typeof obj !== "object") return;
-  if (obj.type === "array" && !obj.items) {
-    obj.items = { type: "string" };
-  }
-  for (const v of Object.values(obj)) if (v && typeof v === "object") ensureArrayItems(v);
-}
+const ensureArrayItems = schemaPass(node => {
+  if (node.type === "array" && !node.items) node.items = { type: "string" };
+});
 
-// Clean JSON Schema for Antigravity API compatibility - removes unsupported keywords recursively
+// Drop required entries that name no declared property
+const cleanupRequired = schemaPass(node => {
+  if (!Array.isArray(node.required) || !node.properties) return;
+  const validRequired = node.required.filter(field =>
+    typeof field === "string" && Object.prototype.hasOwnProperty.call(node.properties, field)
+  );
+  if (validRequired.length === 0) delete node.required;
+  else node.required = validRequired;
+});
+
+// Antigravity rejects object schemas without properties — add a placeholder field.
+// An empty schema {} (left behind by an unresolvable $ref) is treated the same way.
+const placeholderReason = () => ({
+  type: "object",
+  properties: { reason: { type: "string", description: "Brief explanation of why you are calling this tool" } },
+  required: ["reason"],
+});
+const addPlaceholders = schemaPass(node => {
+  if (Object.keys(node).length === 0 || (node.type === "object" && (!node.properties || Object.keys(node.properties).length === 0))) {
+    Object.assign(node, placeholderReason());
+  }
+});
+
+// Clean JSON Schema for Antigravity API compatibility - removes unsupported keywords recursively.
+// Returns a new schema; the input is not modified.
 export function cleanJSONSchemaForAntigravity(schema) {
   if (!schema || typeof schema !== "object") return schema;
 
-  // Mutate directly (schema is only used once per request)
-  let cleaned = schema;
+  // Phase 0: Resolve local $ref against $defs/definitions before they are stripped
+  const cleaned = inlineLocalRefs(schema);
 
   // Phase 1: Convert and prepare
   convertConstToEnum(cleaned);
@@ -366,69 +415,71 @@ export function cleanJSONSchemaForAntigravity(schema) {
   removeUnsupportedKeywords(cleaned, UNSUPPORTED_SCHEMA_CONSTRAINTS);
 
   // Phase 4: Cleanup required fields recursively
-  function cleanupRequired(obj) {
-    if (!obj || typeof obj !== "object") return;
-
-    if (obj.required && Array.isArray(obj.required) && obj.properties) {
-      const validRequired = obj.required.filter(field =>
-        Object.prototype.hasOwnProperty.call(obj.properties, field)
-      );
-      if (validRequired.length === 0) {
-        delete obj.required;
-      } else {
-        obj.required = validRequired;
-      }
-    }
-
-    // Recurse into nested objects
-    for (const value of Object.values(obj)) {
-      if (value && typeof value === "object") {
-        cleanupRequired(value);
-      }
-    }
-  }
-
   cleanupRequired(cleaned);
 
   // Phase 5: Add placeholder for empty object schemas (Antigravity requirement)
-  function addPlaceholders(obj) {
-    if (!obj || typeof obj !== "object") return;
-
-    // Empty schema {} (no type, no properties) after $ref removal — treat as object with placeholder
-    if (Object.keys(obj).length === 0) {
-      obj.type = "object";
-      obj.properties = {
-        reason: {
-          type: "string",
-          description: "Brief explanation of why you are calling this tool"
-        }
-      };
-      obj.required = ["reason"];
-      return;
-    }
-
-    if (obj.type === "object") {
-      if (!obj.properties || Object.keys(obj.properties).length === 0) {
-        obj.properties = {
-          reason: {
-            type: "string",
-            description: "Brief explanation of why you are calling this tool"
-          }
-        };
-        obj.required = ["reason"];
-      }
-    }
-
-    // Recurse into nested objects
-    for (const value of Object.values(obj)) {
-      if (value && typeof value === "object") {
-        addPlaceholders(value);
-      }
-    }
-  }
-
   addPlaceholders(cleaned);
 
   return cleaned;
 }
 
+// Gemini requires functionDeclaration.parameters to be an OBJECT schema. Some
+// clients send a root without `type` ({properties} only), a scalar/array root,
+// or nothing at all — coerce the root, then run the full cleaner.
+// A root without `type` keeps its keywords (unions/allOf may still resolve to an
+// object); a scalar or array root has nothing to keep but its description.
+export function toGeminiParameters(parameters) {
+  const root = isSchemaNode(parameters) ? parameters : {};
+  let objectRoot = root;
+  if (root.type === undefined) {
+    objectRoot = { ...root, type: "object" };
+  } else if (root.type !== "object") {
+    objectRoot = { type: "object", properties: {} };
+    if (typeof root.description === "string") objectRoot.description = root.description;
+  }
+  return cleanJSONSchemaForAntigravity(objectRoot);
+}
+
+
+// Placeholders for turns Gemini requires but the client didn't send
+const GEMINI_LEADING_USER_TEXT = "...";
+const GEMINI_CONTINUE_TEXT = "Continue.";
+
+// Normalize Gemini contents: drop empty parts/turns and merge adjacent same-role turns.
+// `guardTurns` (Antigravity) also makes the conversation start with a user turn and
+// never end on a model turn — a trailing model turn gets a "Continue." user turn, and
+// trailing unanswered functionCalls get matching functionResponses, since Gemini
+// rejects a functionCall that is not followed by its response.
+export function normalizeGeminiContents(contents, { guardTurns = false } = {}) {
+  const out = [];
+  for (const c of contents || []) {
+    if (!c?.role || !Array.isArray(c.parts)) continue;
+    const parts = c.parts.filter(p => p && typeof p === "object" && Object.keys(p).length > 0);
+    if (parts.length === 0) continue;
+    const last = out.at(-1);
+    if (last?.role === c.role) last.parts.push(...parts);
+    else out.push({ ...c, parts });
+  }
+  if (!guardTurns || out.length === 0) return out;
+
+  if (out[0].role !== "user") {
+    out.unshift({ role: "user", parts: [{ text: GEMINI_LEADING_USER_TEXT }] });
+  }
+  const tail = out.at(-1);
+  if (tail.role === "model") {
+    const calls = tail.parts.filter(p => p.functionCall);
+    out.push({
+      role: "user",
+      parts: calls.length > 0
+        ? calls.map(({ functionCall }) => ({
+            functionResponse: {
+              ...(functionCall.id && { id: functionCall.id }),
+              name: functionCall.name || "tool",
+              response: { result: GEMINI_CONTINUE_TEXT },
+            },
+          }))
+        : [{ text: GEMINI_CONTINUE_TEXT }],
+    });
+  }
+  return out;
+}

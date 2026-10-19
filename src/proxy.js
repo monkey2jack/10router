@@ -1,3 +1,4 @@
+// Next.js proxy (middleware) entry — dashboard auth gate.
 import { proxy as dashboardProxy } from "./dashboardGuard";
 
 export default async function proxy(request) {

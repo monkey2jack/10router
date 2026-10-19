@@ -58,9 +58,12 @@ describe("Codex CLI version is single-sourced", () => {
     }
   });
 
-  it("keeps the models-route client_version separate (query param, not identity)", () => {
-    // /codex/models?client_version= gates the catalog by minimal_client_version — a different
-    // notion from the identity version, deliberately not unified with it.
-    expect(read("src/app/api/providers/[id]/models/route.js")).toMatch(/CODEX_CLIENT_VERSION = "\d+\.\d+\.\d+"/);
+  it("derives the models-route client_version from the registry too (上游 9f41ee75)", () => {
+    // /codex/models?client_version= 按 minimal_client_version 门控目录：发现侧版本一旦
+    // 落后于推理侧版本，新模型会以 200 但静默缺项的形式消失——所以发现也必须伪装成
+    // 与推理完全一致的 Codex CLI 版本（registry.cliVersion 是唯一来源）。
+    const route = read("src/app/api/providers/[id]/models/route.js");
+    expect(route).toContain("codexProvider.transport.cliVersion");
+    expect(route).not.toMatch(/CODEX_CLIENT_VERSION = "\d+\.\d+\.\d+"/);
   });
 });

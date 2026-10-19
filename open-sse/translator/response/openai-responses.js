@@ -10,6 +10,39 @@ import { fallbackToolCallId } from "../concerns/toolCall.js";
 import { reasoningDelta, extractReasoningText } from "../concerns/reasoning.js";
 import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM, OPENAI_FINISH, MODEL_FALLBACK } from "../schema/index.js";
 
+// 上游 Chat Completions usage → Responses API usage 形状。
+// 没有它 /v1/responses 永远不上报 usage：Responses 客户端（Codex CLI）的
+// "context used" 会一直停在 0、永不自动 compact，长会话直到撞上游上下文上限
+// 才被拒（9router issue #3432）。
+//
+// 注意写到 state.responsesUsage 而不是 state.usage：state.usage 归流层所有，
+// 形状是 normalizeUsage() 的（prompt_tokens/prompt_tokens_details），交给
+// finalizeStream() 做统计与计费；被这里覆盖会静默丢 cached/reasoning token。
+function toResponsesUsage(usage) {
+  if (!usage || typeof usage !== "object") return null;
+
+  const inputTokens = [usage.input_tokens, usage.prompt_tokens].find(Number.isFinite) ?? 0;
+  const outputTokens = [usage.output_tokens, usage.completion_tokens].find(Number.isFinite) ?? 0;
+  const responseUsage = {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens: Number.isFinite(usage.total_tokens) ? usage.total_tokens : inputTokens + outputTokens
+  };
+  const cachedTokens = [usage.input_tokens_details?.cached_tokens, usage.prompt_tokens_details?.cached_tokens].find(Number.isFinite);
+  const reasoningTokens = [usage.output_tokens_details?.reasoning_tokens, usage.completion_tokens_details?.reasoning_tokens].find(Number.isFinite);
+  if (Number.isFinite(cachedTokens)) responseUsage.input_tokens_details = { cached_tokens: cachedTokens };
+  if (Number.isFinite(reasoningTokens)) responseUsage.output_tokens_details = { reasoning_tokens: reasoningTokens };
+
+  return responseUsage;
+}
+
+// #4307：response.completed 必须携带全部已完成 output items —— Responses 客户端
+// （Codex 等）从终态事件读 output，而不是回放整条事件流。
+function recordCompletedOutputItem(state, index, item) {
+  state.completedOutputItems ??= new Map();
+  state.completedOutputItems.set(index, item);
+}
+
 /**
  * Translate OpenAI chunk to Responses API events
  * @returns {Array} Array of events with { event, data } structure
@@ -18,8 +51,27 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
   if (!chunk) {
     return flushEvents(state);
   }
-  
-  if (!chunk.choices?.length) return [];
+
+  // 在 choices 守卫之前先捕获 usage：最后一个 OpenAI chunk 可能同时携带 usage
+  // 和空的 choices 数组（OpenAI 正是这么发尾部 chunk 的），不能丢。
+  if (chunk.usage) {
+    state.responsesUsage = toResponsesUsage(chunk.usage);
+  }
+
+  if (!chunk.choices?.length) {
+    // 尾部 usage chunk(choices 为空的常见形状):延迟中的 response.completed
+    // 此刻已经拿到真实 usage,立即定稿补发,而不是拖到流末 flush —— 这也让
+    // stream.js 的兜底 watchdog 在补发完成后被正确取消。
+    if (state.completionPending && state.responsesUsage) {
+      const events = [];
+      sendCompleted(state, (eventType, data) => {
+        data.sequence_number = ++state.seq;
+        events.push({ event: eventType, data });
+      });
+      return events;
+    }
+    return [];
+  }
   
   const events = [];
   const nextSeq = () => ++state.seq;
@@ -95,12 +147,16 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
     }
 
     if (content) {
+      // The answer starts, so thinking is over. Upstreams that send reasoning via
+      // reasoning_content never emit "</think>", so close it here rather than at finish.
+      closeReasoning(state, emit);
       emitTextContent(state, emit, idx, content);
     }
   }
 
   // Handle tool_calls (empty array is truthy; require a real call)
   if (delta.tool_calls && delta.tool_calls.length) {
+    closeReasoning(state, emit);
     closeMessage(state, emit, idx);
     for (const tc of delta.tool_calls) {
       emitToolCall(state, emit, tc);
@@ -112,7 +168,20 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
     for (const i in state.msgItemAdded) closeMessage(state, emit, i);
     closeReasoning(state, emit);
     for (const i in state.funcCallIds) closeToolCall(state, emit, i);
-    sendCompleted(state, emit);
+    // 上游可能在 finish chunk 之后的尾部 chunk（choices 为空）才报 usage。在
+    // usage 未知时提前发 response.completed 会把载荷冻结在旧值，所以要延迟到
+    // flushEvents()（上游流结束后必跑一次，届时所有 chunk 都已见过）。
+    // 该延迟只在直连 openai:openai-responses 路由上成立；作为 pivot 第二跳
+    // （Claude/Gemini/Kiro 上游）时 translateResponse() 在终态 null chunk 前
+    // 就返回了——flushEvents 不会被调用，延迟会吞掉终态事件，保持原行为。
+    const flushReachesUs = state.targetFormat === FORMATS.OPENAI;
+    if (state.responsesUsage || !flushReachesUs) {
+      sendCompleted(state, emit);
+    } else {
+      // 挂上"完成待定"标记:后续尾部 usage chunk 会立即补发;若上游 stall
+      // (无尾部 chunk、无 [DONE]、连接不断),stream.js 的 watchdog 据此兜底。
+      state.completionPending = true;
+    }
   }
 
   return events;
@@ -173,15 +242,17 @@ function closeReasoning(state, emit) {
       part: { type: RESPONSES_ITEM.SUMMARY_TEXT, text: state.reasoningBuf }
     });
 
+    const reasoningItem = {
+      id: state.reasoningId,
+      type: RESPONSES_ITEM.REASONING,
+      summary: [{ type: RESPONSES_ITEM.SUMMARY_TEXT, text: state.reasoningBuf }]
+    };
     emit("response.output_item.done", {
       type: "response.output_item.done",
       output_index: state.reasoningIndex,
-      item: {
-        id: state.reasoningId,
-        type: RESPONSES_ITEM.REASONING,
-        summary: [{ type: RESPONSES_ITEM.SUMMARY_TEXT, text: state.reasoningBuf }]
-      }
+      item: reasoningItem
     });
+    recordCompletedOutputItem(state, state.reasoningIndex, reasoningItem);
   }
 }
 
@@ -245,16 +316,18 @@ function closeMessage(state, emit, idx) {
       part: { type: RESPONSES_ITEM.OUTPUT_TEXT, annotations: [], logprobs: [], text: fullText }
     });
 
+    const msgItem = {
+      id: msgId,
+      type: RESPONSES_ITEM.MESSAGE,
+      content: [{ type: RESPONSES_ITEM.OUTPUT_TEXT, annotations: [], logprobs: [], text: fullText }],
+      role: ROLE.ASSISTANT
+    };
     emit("response.output_item.done", {
       type: "response.output_item.done",
       output_index: parseInt(idx),
-      item: {
-        id: msgId,
-        type: RESPONSES_ITEM.MESSAGE,
-        content: [{ type: RESPONSES_ITEM.OUTPUT_TEXT, annotations: [], logprobs: [], text: fullText }],
-        role: ROLE.ASSISTANT
-      }
+      item: msgItem
     });
+    recordCompletedOutputItem(state, parseInt(idx), msgItem);
   }
 }
 
@@ -348,17 +421,19 @@ function closeToolCall(state, emit, idx) {
       });
     }
 
+    const funcItem = {
+      id: `${custom ? "ctc" : "fc"}_${callId}`,
+      type: custom ? RESPONSES_ITEM.CUSTOM_TOOL_CALL : RESPONSES_ITEM.FUNCTION_CALL,
+      ...(custom ? { input: extractCustomToolInput(args) } : { arguments: args }),
+      call_id: callId,
+      name: state.funcNames[idx] || ""
+    };
     emit("response.output_item.done", {
       type: "response.output_item.done",
       output_index: parseInt(idx),
-      item: {
-        id: `${custom ? "ctc" : "fc"}_${callId}`,
-        type: custom ? RESPONSES_ITEM.CUSTOM_TOOL_CALL : RESPONSES_ITEM.FUNCTION_CALL,
-        ...(custom ? { input: extractCustomToolInput(args) } : { arguments: args }),
-        call_id: callId,
-        name: state.funcNames[idx] || ""
-      }
+      item: funcItem
     });
+    recordCompletedOutputItem(state, parseInt(idx), funcItem);
 
     state.funcItemDone[idx] = true;
     state.funcArgsDone[idx] = true;
@@ -368,6 +443,15 @@ function closeToolCall(state, emit, idx) {
 function sendCompleted(state, emit) {
   if (!state.completedSent) {
     state.completedSent = true;
+    state.completionPending = false;
+    const output = [];
+    if (state.completedOutputItems?.size) {
+      const maxIdx = Math.max(...state.completedOutputItems.keys());
+      for (let i = 0; i <= maxIdx; i++) {
+        const item = state.completedOutputItems.get(i);
+        if (item) output.push(item);
+      }
+    }
     emit("response.completed", {
       type: "response.completed",
       response: {
@@ -376,7 +460,9 @@ function sendCompleted(state, emit) {
         created_at: state.created,
         status: "completed",
         background: false,
-        error: null
+        error: null,
+        output,
+        ...(state.responsesUsage ? { usage: state.responsesUsage } : {})
       }
     });
   }
