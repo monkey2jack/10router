@@ -44,13 +44,12 @@ describe("404 is not reported as a missing model (#47)", () => {
 describe("CreditDaddy gateway paths are brand-scoped (#47)", () => {
   const CARD = "src/shared/components/NoAuthProxyCard.js";
 
-  it("both remaining gateway lines default to a branded endpoint", () => {
+  it("all three gateway lines default to a branded endpoint", () => {
     const src = read(CARD);
-    // minimax-free 已下架（MiniMax Code 免费线由 minimax-code 订阅卡承接），网关线只剩 zcode / trae
-    for (const brand of ["zcode", "trae"]) {
+    // minimax-free 已回归（issue #75），网关线回到 zcode / minimax / trae 三线
+    for (const brand of ["zcode", "minimax", "trae"]) {
       expect(src).toContain(`/gateway/${brand}/v1/messages`);
     }
-    expect(src).not.toContain("/gateway/minimax/v1/messages");
   });
 
   it("no line falls back to the pre-rename bare endpoint", () => {

@@ -39,7 +39,10 @@ export default {
     refreshLeadMs: 10 * 60 * 1000,
   },
   models: [
-    { id: "MiniMax-M3.1-Flash-Preview", name: "MiniMax M3.1 Flash Preview" },
+    // 正式 id（2026-10）优先；-Preview 保留一个 minor 周期，避免存量连接 /
+    // disabledModels / modelCaps 里写过旧 id 的用户突然 404（issue #70）。
+    { id: "MiniMax-M3.1-Flash", name: "MiniMax M3.1 Flash" },
+    { id: "MiniMax-M3.1-Flash-Preview", name: "MiniMax M3.1 Flash (Preview)" },
     { id: "MiniMax-M3", name: "MiniMax M3" },
     { id: "MiniMax-M2.7", name: "MiniMax M2.7" },
     { id: "MiniMax-M2.7-highspeed", name: "MiniMax M2.7 Highspeed" },

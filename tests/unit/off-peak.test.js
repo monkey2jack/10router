@@ -125,6 +125,20 @@ describe("mergeQoderLivePricing", () => {
     expect(out[0].rateMultiplier).toBe(1);
     expect(out[0].promotion).toBeNull();
   });
+  it("限免行保留注册表原价，不被实时 0x 覆盖（否则看不到截止时间与恢复价格）", () => {
+    const withPromo = [
+      { id: "dfmodel", name: "DeepSeek-V4.1-Flash 1017", rateMultiplier: 0.1, promoFreeUntil: "2026-10-25T00:00:00+08:00" },
+    ];
+    const live = [{ id: "qoder-cn/dfmodel", rateMultiplier: 0, promotion: null }];
+    const out = mergeQoderLivePricing(withPromo, live);
+    expect(out[0].rateMultiplier).toBe(0.1);              // 原价保留 → badge 走 promo 分支显示 free
+    expect(out[0].promoFreeUntil).toBe("2026-10-25T00:00:00+08:00"); // 截止时间不丢
+  });
+  it("无限免标记的行仍用实时倍率（账户真实价格，含 off-peak）", () => {
+    const plain = [{ id: "qfmodel", name: "Qwen3.8-Flash", rateMultiplier: 0.34 }];
+    const live = [{ id: "qoder/qfmodel", rateMultiplier: 0 }];
+    expect(mergeQoderLivePricing(plain, live)[0].rateMultiplier).toBe(0);
+  });
   it("empty live catalog (fetch failed) → static list verbatim", () => {
     expect(mergeQoderLivePricing(staticModels, [])).toBe(staticModels);
   });

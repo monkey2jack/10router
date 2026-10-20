@@ -12,7 +12,7 @@ User-facing highlights per release. See [CHANGELOG.md](https://github.com/techys
 
 ### 🐛 Fixes
 
-- **CodeBuddy CN payload cap raised from 3.2MB to 16MB**: the old local guard kept rejecting genuine long sessions (payload size is correlated with, not causal to, the 11128 gate). Anything under 16MB now goes upstream.
+- **CodeBuddy CN payload cap raised from 3.2MB to 32MB**: the old local guard kept rejecting genuine long sessions (payload size is correlated with, not causal to, the 11128 gate). Anything under 32MB now goes upstream.
 - **Antigravity dual-window quota & full verification link**:
   - Full support for Google's official 5h/weekly dual-window quota summary for Gemini & Claude/GPT; stripped redundant standalone image entries sharing the same quota pool;
   - Preserved full 600+ character Google account verification URLs without truncation.

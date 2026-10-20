@@ -57,6 +57,9 @@ export default {
     },
   ],
   models: [
+    // 同国际站：M3.1-Flash 已开放按量（models.dev minimax-cn 条目同价 0.15/0.6），
+    // 见 issue #72。
+    { id: "MiniMax-M3.1-Flash", name: "MiniMax M3.1 Flash", targetFormat: "claude" },
     { id: "MiniMax-M3", name: "MiniMax M3", targetFormat: "claude" },
     { id: "MiniMax-M2.7", name: "MiniMax M2.7" },
     { id: "MiniMax-M2.5", name: "MiniMax M2.5" },

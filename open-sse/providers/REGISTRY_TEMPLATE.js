@@ -49,6 +49,7 @@ export default {
     // headers: { "User-Agent": "..." },           // static fingerprint (anti-ban) lives here.
     // auth: { header: "x-api-key", scheme: "raw" },
     // forceStream: true, urlSuffix: "?beta=true",
+    // strictProxy: true,  // 不可直连渠道(被墙端点):代理失败即抛错,不回退直连死等。连接级显式设置优先于此默认。
     // quirks: { dropOutputConfig: true },
     // retry: { 429: { attempts: 6 }, 503: { attempts: 3 } },
     // usage: { url: "https://api.example.com/usage" }, // or { urls: [...] } for multi-call.

@@ -19,6 +19,16 @@ export default {
     textIcon: "TR",
     website: "https://www.trae.ai",
     notice: { signupUrl: "https://www.trae.ai" },
+    // 国内站 / 国际站账号不互通（refresh token 拿错端换必 20101），
+    // 登录弹窗按站点分叉（issue #69）。
+    loginSites: {
+      param: "region",
+      default: "intl",
+      options: [
+        { value: "intl", label: "国际站", hint: "www.trae.ai · 海外账号" },
+        { value: "cn", label: "国内站", hint: "www.trae.cn · 国内手机号 / 抖音账号" },
+      ],
+    },
   },
   transport: {
     // SOLO remote agent base — verified working chat endpoint.

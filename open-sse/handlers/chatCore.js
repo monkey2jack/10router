@@ -359,12 +359,16 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   });
 
   let proxyFallbackWarning = null;
+  // Issue #76: 不可直连渠道(Google cloudcode 等)默认 strictProxy——代理失败时
+  // 立即抛错交给上层多账号/Combo 顺位接力,而不是回退直连被静默丢包死等数百秒。
+  // 连接上显式设置过 strictProxy(true/false 都算)时以用户为准。
+  const connectionStrictProxy = credentials?.providerSpecificData?.strictProxy;
   const proxyOptions = {
     connectionProxyEnabled: credentials?.providerSpecificData?.connectionProxyEnabled === true,
     connectionProxyUrl: credentials?.providerSpecificData?.connectionProxyUrl || "",
     connectionNoProxy: credentials?.providerSpecificData?.connectionNoProxy || "",
     vercelRelayUrl: credentials?.providerSpecificData?.vercelRelayUrl || "",
-    strictProxy: credentials?.providerSpecificData?.strictProxy === true,
+    strictProxy: connectionStrictProxy ?? (PROVIDERS[provider]?.strictProxy === true),
     onProxyFallback: (err) => {
       proxyFallbackWarning = `Proxy failed (${err?.message || err}); fell back to direct connection`;
       log?.warn?.("PROXY", `${provider.toUpperCase()} | ${model} | ⚠️ ${proxyFallbackWarning}`);

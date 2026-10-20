@@ -550,3 +550,35 @@ export async function getQoderUsage(accessToken, proxyOptions = null, providerId
     return { message: `Qoder connected. Unable to fetch usage: ${error.message}` };
   }
 }
+/**
+ * Alibaba Token Plan 配额说明（国际 / 国内双线）。
+ *
+ * 这两类 credit 订阅 key（token-plan.<region>.maas.aliyuncs.com）**没有任何公开
+ * 的额度接口**：2026-10-20 用一个真实国内 key 探测了 /api/v1/quota、
+ * /api/v1/billing/{quota,usage}、/compatible-mode/v1/dashboard/billing/*、
+ * /api/v1/tokenplan/* 等 20 余条路径，全部 404；真实推理调用的响应体与响应头
+ * 也不带任何 quota/limit 字段。
+ *
+ * 额度只存在于百炼控制台网页侧：「免费额度」页按模型 code 逐条列出
+ * 「剩 X / 共 Y + 到期时间」（83 个有额度模型，多数是 1M tokens / 30 天）。
+ * 那个表的读取依赖登录态 cookie，不在 API key 的权限范围内。
+ *
+ * 因此这里**不编造额度**，返回一条可执行的人话说明：告诉用户去哪看、为什么
+ * 这里没有。空额度卡片会被读成「坏了」，而假的 0/0 会让人以为已用完。
+ */
+export function getAlibabaTokenPlanUsage(provider = "alitp-intl") {
+  const isCn = provider === "alitp-cn";
+  const consoleUrl = isCn
+    ? "https://bailian.console.aliyun.com/cn-beijing/subscription/overview"
+    : "https://modelstudio.console.alibabacloud.com/";
+  const region = isCn ? "国内版（cn-beijing）" : "国际版（ap-southeast-1）";
+  return {
+    plan: isCn ? "Alibaba Token Plan (CN)" : "Alibaba Token Plan (Intl)",
+    quotas: {},
+    message:
+      `Alibaba Token Plan ${region} 的额度只能在百炼控制台查看：${consoleUrl} → 「免费额度」，`
+      + `按模型列出剩余/总量与到期时间。该产品没有公开的额度 API（实测 20+ 条路径全部 404，`
+      + `推理响应也不带额度字段），所以这里无法自动读取。`
+      + (isCn ? "" : " 注意：国际版与国内版是两套 key，互不通用，用错区域会回 401 InvalidApiKey。"),
+  };
+}

@@ -157,6 +157,14 @@ async function runHeavyStartup() {
       .then(({ startQoderCheckin }) => startQoderCheckin())
       .catch((e) => console.log("[QoderCheckin] scheduler start failed:", e.message));
   }
+
+  // Auto daily check-in for MiniMax Code subscriptions (issue #75).
+  // minimax-free is CreditDaddy's closed loop — never swept from here.
+  if (settings.minimaxCheckin === true) {
+    import("@/sse/services/minimaxCheckin.js")
+      .then(({ startMinimaxCheckin }) => startMinimaxCheckin())
+      .catch((e) => console.log("[MinimaxCheckin] scheduler start failed:", e.message));
+  }
 }
 
 function hasQuotaAutoPingEnabled(settings) {

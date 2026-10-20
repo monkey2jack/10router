@@ -106,10 +106,10 @@ export class DefaultExecutor extends BaseExecutor {
   }
 
   buildUrl(model, stream, urlIndex = 0, credentials = null) {
-    // CreditDaddy 网关线（zcode-free / trae-free）: 主机/端口/路径可配置
+    // CreditDaddy 网关线（zcode-free / minimax-free / trae-free）: 主机/端口/路径可配置
     // （getProviderCredentials 注入 psd.baseUrl），优先于注册表 transport ——
     // 覆盖本机 127.0.0.1:47860 与局域网/zcode-api 后端
-    if ((this.provider === "zcode-free" || this.provider === "trae-free") && credentials?.providerSpecificData?.baseUrl) {
+    if ((this.provider === "zcode-free" || this.provider === "minimax-free" || this.provider === "trae-free") && credentials?.providerSpecificData?.baseUrl) {
       const normalized = String(credentials.providerSpecificData.baseUrl).replace(/\/$/, "");
       return normalized.endsWith("/messages") ? normalized : `${normalized}/messages`;
     }

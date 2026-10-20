@@ -25,7 +25,7 @@ describe("CreditDaddy gateway lines — baseUrl override", () => {
     // executor，实际走 DefaultExecutor），发布后才发现 baseUrl 覆盖被忽略。
     // 两个实现都是重复逻辑，这里都断言：任一处漏掉新线都会红。
     expect(CREDITDADDY_LINES.map((p) => p.id).sort()).toEqual([
-      "trae-free", "zcode-free",
+      "minimax-free", "trae-free", "zcode-free",
     ]);
     for (const p of CREDITDADDY_LINES) {
       for (const Ctor of [DefaultExecutor]) {

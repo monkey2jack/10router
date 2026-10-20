@@ -127,9 +127,9 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     const providerId = resolveProviderId(provider);
 
     // Inject a virtual connection for no-auth free providers (with optional proxy pool from settings)
-    // CreditDaddy 网关线（zcode-free / trae-free）在本机回环免密，局域网由 IP 白名单保护、
+    // CreditDaddy 网关线（zcode-free / minimax-free / trae-free）在本机回环免密，局域网由 IP 白名单保护、
     // 不校验 key —— 无需建带 key 的连接。仍手动建了连接时优先走真实连接，无连接才落 noAuth 虚拟行
-    const isCreditDaddyLine = providerId === "zcode-free" || providerId === "trae-free";
+    const isCreditDaddyLine = providerId === "zcode-free" || providerId === "minimax-free" || providerId === "trae-free";
     const hasCdRealConnection = isCreditDaddyLine
       ? (await getProviderConnections({ provider: providerId, isActive: true })).length > 0
       : false;
@@ -146,7 +146,9 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           // minimax = /gateway/minimax/v1/messages；
           // trae = /gateway/trae/v1/messages
           let gwPath = (settings.zcodeGatewayPath || '').trim() || '/gateway/zcode/v1/messages';
-          if (providerId === 'trae-free') {
+          if (providerId === 'minimax-free') {
+            gwPath = (settings.minimaxGatewayPath || '').trim() || '/gateway/minimax/v1/messages';
+          } else if (providerId === 'trae-free') {
             gwPath = (settings.traeGatewayPath || '').trim() || '/gateway/trae/v1/messages';
           }
           const u = new URL(`http://127.0.0.1:47860${gwPath.startsWith('/') ? '' : '/'}${gwPath}`);
@@ -359,6 +361,15 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 
     const resolvedProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
 
+    // strictProxy 保持三态:连接上显式设置过(true/false)时透传原值;未设置时
+    // undefined,让 chatCore 应用 provider 注册表里的渠道默认(Issue #76,
+    // 不可直连渠道默认 strict)。这里不能沿用 resolvedProxy 的布尔强转——
+    // 那会把"未设置"和"显式 false"混在一起,渠道默认永远无法生效。
+    const rawConnectionStrict = connection.providerSpecificData?.strictProxy;
+    const connectionStrictProxy = resolvedProxy.strictProxy === true
+      ? true
+      : (rawConnectionStrict === true || rawConnectionStrict === false ? rawConnectionStrict : undefined);
+
     return {
       authType: connection.authType,
       apiKey: connection.apiKey,
@@ -378,7 +389,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         connectionNoProxy: resolvedProxy.connectionNoProxy,
         connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
         vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
-        strictProxy: resolvedProxy.strictProxy === true,
+        strictProxy: connectionStrictProxy,
       },
       connectionId: connection.id,
       // Include current status for optimization check

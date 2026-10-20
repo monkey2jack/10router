@@ -57,6 +57,9 @@ export default {
     },
   ],
   models: [
+    // M3.1-Flash 已开放按量计费（models.dev minimax 条目：$0.15/$0.6，见 issue #72）。
+    // 按命名习惯放在 M3 之前；targetFormat 与其他 LLM 条目一致走 claude 直连。
+    { id: "MiniMax-M3.1-Flash", name: "MiniMax M3.1 Flash", targetFormat: "claude" },
     { id: "MiniMax-M3", name: "MiniMax M3", targetFormat: "claude" },
     { id: "MiniMax-M2.7", name: "MiniMax M2.7" },
     { id: "MiniMax-M2.5", name: "MiniMax M2.5" },

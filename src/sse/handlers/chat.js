@@ -11,7 +11,7 @@ import {
   checkApiKeyModelAccess,
 } from "../services/auth.js";
 import { getSettings, getChannelBlock, setChannelBlock, clearChannelBlock } from "@/lib/localDb";
-import { buildChannelBlock, channelBlockRemainingMs, formatRetryAfter, withChannelScopeHint, withRateLimitHint, withInsufficientBalanceHint } from "open-sse/services/accountFallback.js";
+import { buildChannelBlock, channelBlockRemainingMs, formatRetryAfter, withChannelScopeHint, withRateLimitHint, withInsufficientBalanceHint, isInsufficientBalanceText } from "open-sse/services/accountFallback.js";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { isOversizedForCbcn, describeCbcnOversize } from "open-sse/executors/codebuddy-cn.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
@@ -332,7 +332,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
         const baseMsg = `[${provider}/${model}] ${errorMsg}`;
-        const hintedMsg = status === 402 || /insufficient[_\s-]*balance|余额不足|欠费/i.test(errorMsg)
+        const hintedMsg = status === 402 || isInsufficientBalanceText(errorMsg)
           ? withInsufficientBalanceHint(baseMsg, provider)
           : withRateLimitHint(baseMsg, provider);
         return unavailableResponse(
@@ -349,7 +349,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
       log.warn("CHAT", "No more accounts available", { provider });
       const baseLastError = lastError || "All accounts unavailable";
-      const hintedLastError = lastStatus === 402 || /insufficient[_\s-]*balance|余额不足|欠费/i.test(baseLastError)
+      const hintedLastError = lastStatus === 402 || isInsufficientBalanceText(baseLastError)
         ? withInsufficientBalanceHint(baseLastError, provider)
         : withRateLimitHint(baseLastError, provider);
       return errorResponse(

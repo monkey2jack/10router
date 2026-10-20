@@ -24,11 +24,20 @@ const ICON_ALIASES = {
   "sf": "stepfun",
   "step-plan-cn": "stepfun",
   "step-plan": "stepfun",
+  // 阿里云百炼家族：Token Plan / Coding / Studio × 国际/国内，共用官方 SVG
+  // 国际站用 Model Studio 英文 wordmark，国内站用百炼 wordmark——两套品牌标识不同
+  "alitp-intl": "alitp-intl",
+  "alims-intl": "alitp-intl",
+  "alicode-intl": "alitp-intl",
+  "alitp-cn": "alitp",
+  alims: "alitp",
+  alicode: "alitp",
 };
 
 // Providers whose asset ships as SVG (everything else is .png).
 const ICON_EXTENSIONS = {
   bai: ".svg",
+  // 官方百炼 wordmark 只有 SVG（docs.bailian.console.aliyun.com/logo/）
 };
 
 // Runtime only — first 404 remembers id for the whole session

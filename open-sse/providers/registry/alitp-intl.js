@@ -9,11 +9,11 @@ export default {
   priority: 11,
   alias: "alitp-intl",
   display: {
-    name: "Alibaba Token Plan",
+    name: "Alibaba Token Plan (Intl)",
     icon: "cloud",
     color: "#FF6A00",
     textIcon: "ATP",
-    website: "https://www.alibabacloud.com/campaign/ai-landing-page-token",
+    website: "https://docs.modelstudio.console.alibabacloud.com/zh/model-studio/what-is-model-studio",
     notice: {
       apiKeyUrl: "https://modelstudio.console.alibabacloud.com/?apiKey=1",
     },

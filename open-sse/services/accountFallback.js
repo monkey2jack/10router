@@ -414,7 +414,18 @@ const RATE_LIMIT_PROVIDER_NOTE = {
   "xiaomi-mimo": "小米 MiMo 为体验/免费通道，每分钟请求数与 Token 数（TPM）均有硬限制，超出即拒绝。",
 };
 
-export const INSUFFICIENT_BALANCE_RE = /insufficient[_\s-]*balance|余额不足|欠费/i;
+// Shapes seen in the wild (all mean "this account cannot pay for the request",
+// never a network/service fault, so the caller must not retry-and-wait):
+//   - 通用:      insufficient balance / 余额不足 / 欠费
+//   - TokenRouter 空余额: "User's credit limit is insufficient, remaining credit
+//     limit: $0.000000" + code insufficient_user_quota
+//   - TokenRouter 礼包不可用: "This model cannot use part of your gift balance,
+//     remaining eligible quota: $0.000000, required pre-deduction amount: $0.000002"
+//   - 其它 reseller: "You exceeded your current quota" / "quota exceeded"
+// 前两条实测都不含 "insufficient balance" 字面，旧正则一个都不命中，用户因此只
+// 看到一段带 request id 的英文 JSON，不知道该去充值。
+export const INSUFFICIENT_BALANCE_RE =
+  /insufficient[_\s-]*balance|insufficient[_\s-]*user[_\s-]*quota|credit[_\s-]*limit\s+is\s+insufficient|gift\s+balance|remaining\s+(credit|eligible)\s+(limit|quota)|you\s+exceeded\s+your\s+current\s+quota|余额不足|额度不足|欠费/i;
 
 export function isInsufficientBalanceText(message) {
   return INSUFFICIENT_BALANCE_RE.test(String(message || ""));
@@ -422,11 +433,32 @@ export function isInsufficientBalanceText(message) {
 
 export function withInsufficientBalanceHint(message, provider) {
   if (!isInsufficientBalanceText(message)) return message;
+  // 渠道专属出路：同一句"余额不足"在不同上游要做的事完全不同，笼统的
+  // "请充值" 会让用户找错地方。未列出的 provider 走通用文案。
+  const providerNote = INSUFFICIENT_BALANCE_PROVIDER_NOTE[provider] || "";
   return (
     `${message}\n\n` +
-    `提示：账号额度或余额不足（insufficient balance），非网络或服务故障。请充值、重新领取活动额度或切换至其他可用渠道/账号。`
+    `提示：账号额度或余额不足（insufficient balance），非网络或服务故障，重试不会恢复。`
+    + `请充值、重新领取活动额度或切换至其他可用渠道/账号。`
+    + providerNote
   );
 }
+
+/**
+ * 各上游「余额不足」的专属说明。
+ *
+ * TokenRouter 有两种不同措辞，实测都归到同一根因：
+ *   · `:free` 变体 → "User's credit limit is insufficient"（信用额度，不是礼包）
+ *   · 普通 id     → "This model cannot use part of your gift balance"（礼包余额不可用）
+ * 用户看到的是英文 JSON + request id，不会知道该去控制台充值，也不知道
+ * `:free` 档同样吃额度（不是永久免费）。
+ */
+export const INSUFFICIENT_BALANCE_PROVIDER_NOTE = {
+  tokenrouter:
+    "\n· TokenRouter：模型卡显示的 *免费档（:free）* 仍需账号有可用额度，" +
+    "余额耗尽后会以 403 insufficient_user_quota 拒绝；请到 https://www.tokenrouter.com/console 充值后重试，" +
+    "或先切换到其他渠道。",
+};
 
 /** True when the message describes an upstream rate limit (429). */
 export function isRateLimitText(message) {

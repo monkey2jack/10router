@@ -103,6 +103,12 @@ const DEFAULT_SETTINGS = {
   qoderCheckin: false,
   // Daily-done memo for Qoder: { [connectionId]: "YYYY-MM-DD" }
   qoderDailyDone: {},
+  // Auto daily check-in for MiniMax Code subscriptions (minimax-code /
+  // minimax-code-global; free-pack credits, issue #75). minimax-free is
+  // intentionally NOT covered — that line's check-in lives inside CreditDaddy.
+  minimaxCheckin: false,
+  // Daily-done memo for MiniMax: { [connectionId]: "YYYY-MM-DD" }
+  minimaxDailyDone: {},
   // Provider-wide channel blocks: { [provider]: { until, lastAt, strikes } }.
   // Set when an upstream answers with a channel-scope error (e.g. CodeBuddy
   // 11128 "unapproved channel"): the failure belongs to the channel, so every

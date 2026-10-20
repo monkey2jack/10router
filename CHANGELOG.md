@@ -2,6 +2,21 @@
 
 > 面向用户的精简更新见 [`public/i18n/changelog/`](https://github.com/techysy/10router/tree/main/public/i18n/changelog)（`en.md` / `zh-CN.md` / `zh-TW.md`，仪表盘「Change Log」按界面语言加载对应文件）。本文件为完整开发日志，按版本从上往下排列。
 
+## v1.5.2 (2026-10-20)
+
+### ✨ 新增
+
+- **Trae 国内站（trae.cn）登录支持（Issue #69）**:此前 Trae 只有国际站（trae.ai）一条 OAuth 线，国内手机号 / 抖音账号的用户无法接入。本次打通国内站全链路：逆向确认国内站与国际站共用同一套 cloudide 接口形态（`GetLoginGuidance` / `ExchangeToken` / `GetUserInfo` 在 `api.trae.com.cn`、`api.marscode.cn`、`api.trae.cn` 全部实测可用，登录域 `www.trae.cn`），但**账号与 refresh token 不互通**——拿错端换必回 20101。因此整条链路按「站点」分叉：
+  1. **登录弹窗站点选择**：Trae 浏览器登录新增「国际站 / 国内站」卡片选择，选择随 `meta.region` 传入 `/authorize`，服务端打对应端网关取 LoginHost；
+  2. **回调站点自证**：回调携带的 `loginHost` 优先于前端选择（含 `trae.com.cn` 子串陷阱判定），拿到的 refresh token 一定在正确的那一端换 Access Token，换错端时给「站点不匹配」人话提示而非裸 401；
+  3. **粘贴 token 自动探测**：粘贴裸 Cloud-IDE-JWT（无回调）时，`postExchange` 用 GetUserInfo 反向探测 token 归属端并纠正站点；
+  4. **站点随连接落库**：`providerSpecificData.site`（`intl`/`cn`）驱动三处分叉——token 刷新按站点选网关（老连接按 loginHost / scope 兜底推断）、SOLO 执行器按站点选网关与 Referer（`x-user-region`/语言/作用域 `marscode-cn` 同步跟随）、连接行展示站点徽章；
+  5. 单测覆盖站点判定、两端白名单不重叠、换 token 打对应端、裸 JWT 探测纠正与人话报错（`tests/unit/trae-cn-region.test.js`）。
+
+### 🐛 修复
+
+- **代理失败直连兜底限时与 strictProxy 默认值修正（PR #76）**:代理失败的直连兜底改为限时生效，不可直连渠道默认 strictProxy，避免代理故障时流量静默改道直连暴露真实出口 IP。
+
 ## v1.5.1 (2026-10-18)
 
 ### ✨ 新增
@@ -19,7 +34,8 @@
 
 ### 🐛 修复
 
-- **CodeBuddy CN 体积守卫阈值 3.2MB → 16MB**:原 3.2MB 守卫来自 2026-09-17 的 4.5MB 样本，但同批实测里 60KB 被拒、113KB 通过——体积与 11128 无因果，只是相关（真正判据是请求形态）。这条保守守卫因此长期误伤 3.2–16MB 区间的真实长会话（含 09-17 那个 4.5MB / 1676 条会话样本本身）。现放宽至 16MB，既覆盖 codex / Claude Code 的真实大会话，又对上游 128MB body 上限留足余量；超过 16MB 才判定为「极端量级」并在本地拦截。消息数上限保持 1800（此前已由 1200 放宽）。诊断文案、单测与设计文档同步更新。
+- **CodeBuddy CN 体积守卫阈值 3.2MB → 32MB**:原 3.2MB 守卫来自 2026-09-17 的 4.5MB 样本，但同批实测里 60KB 被拒、113KB 通过——体积与 11128 无因果，只是相关（真正判据是请求形态）。这条保守守卫因此长期误伤 3.2MB 以上的真实长会话（含 09-17 那个 4.5MB / 1676 条会话样本本身）。现放宽至 32MB：这道守卫只用来在「几乎必然被上游拒绝」的极端量级上提前止损，既然拦不出正确性，就应当放到连真实长会话都碰不到的高度（对 next.config 的 128MB body 上限仍留 4 倍余量，且远高于观测到的最长真实会话 4.5MB）；超过 32MB 才判定为「极端量级」并在本地拦截。**消息数上限同步 1800 → 2048**（此前依次 1200 → 1500 → 1800）：每轮「assistant 工具调用 + tool 结果」各记两条，挂 MCP 的长会话仍会撞到 1800，而这一维同样与 11128 无因果，一并不能让它先于体积成为隐形墙；2048 取 2 的整数次幂，把该维推到真实会话触不到的高度。诊断文案、单测与设计文档同步更新。
+- **Antigravity 配额桶与身份验证体验优化**:
   1. **配额桶双窗口结构适配**:适配 Google 官方 `retrieveUserQuotaSummary` 接口的 4 个周期双窗口桶（Gemini 5h / 每周、Claude与GPT 5h / 每周），并在前端配额卡片中以百分比进度条与倒计时规范渲染；同时确认并移除共享同一配额池的生图冗余模型项；
   2. **验证长链接完整保留**:Google 403 `VALIDATION_REQUIRED` 返回的长重定向验证 URL 包含大量参数，将其移至提示最前端，并将数据库 `lastError` 存储截断上限放宽至 1000 字符，彻底解决验证 URL 被掐头去尾导致用户无法点击完成验证的问题。
 - **Claude SDK / CLI 非流式响应转换与规范请求头**:

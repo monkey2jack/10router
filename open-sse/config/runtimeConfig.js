@@ -29,6 +29,11 @@ export const MEMORY_CONFIG = {
   sessionCleanupIntervalMs: 30 * 60 * 1000,
   dnsCacheTtlMs: 5 * 60 * 1000,
   proxyDispatchersMaxSize: 20,
+  // 直连兜底(代理失败后的裸连/MITM bypass 裸 socket)的建连上限(Issue #76):
+  // 走到这条路径说明代理或系统 DNS 已失败过一次,海外受阻端点的裸连会被静默
+  // 丢包,不设上限就是数百秒死等(实测 788s),还堵死上层多账号/Combo 顺位接力。
+  // 默认与 FETCH_CONNECT_TIMEOUT_MS 同量级,env 可调。
+  directFallbackTimeoutMs: envMs("DIRECT_FALLBACK_TIMEOUT_MS", 60 * 1000),
 };
 
 // Parse a positive integer env override, falling back to a default.

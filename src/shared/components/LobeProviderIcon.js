@@ -81,6 +81,7 @@ export const LOBE_PROVIDER_ICONS = {
   deepseek: DeepSeek,
   minimax: Minimax,
   "minimax-cn": Minimax,
+  "minimax-free": Minimax,
   groq: Groq,
   nvidia: Nvidia,
   xai: XAI,

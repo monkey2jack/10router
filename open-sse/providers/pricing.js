@@ -166,6 +166,12 @@ export const MODEL_PRICING = {
   "deepseek-v3.2-reasoner":       { input: 0.14,  output: 0.28,  cached: 0.0028, reasoning: 0.28,   cache_creation: 0.14  },
   "deepseek-v4-flash":            { input: 0.14,  output: 0.28,  cached: 0.0028, reasoning: 0.28,   cache_creation: 0.14  },
   "deepseek-v4-pro":              { input: 0.435, output: 0.87,  cached: 0.003625, reasoning: 0.87,  cache_creation: 0.435 },
+  // 第一方 DeepSeek（2026-10-20 models.dev deepseek 条目核对）：v4-flash 0.15/0.6、
+  // v4-pro 0.66/1.98。canonical 行保持旧值不动——它同时被 bai / baidu / apinex /
+  // alitp-intl / blackbox 等转售商复用，改它会把这些渠道的成本一起改错；第一方的
+  // 真实价放在下方 PROVIDER_PRICING.deepseek 里覆盖。
+  "deepseek-flash":               { input: 0.15,  output: 0.60,  cached: 0.003,  reasoning: 0.60,   cache_creation: 0.15  },
+  "deepseek-v4-flash-vision-exp": { input: 0.15,  output: 0.60,  cached: 0.003,  reasoning: 0.60,   cache_creation: 0.15  },
 
   // === GLM ===
   "glm-4.6":                      { input: 0.50,  output: 2.00,  cached: 0.25,  reasoning: 3.00,   cache_creation: 0.50  },
@@ -174,6 +180,11 @@ export const MODEL_PRICING = {
   "glm-5":                        { input: 1.00,  output: 4.00,  cached: 0.50,  reasoning: 6.00,   cache_creation: 1.00  },
 
   // === MiniMax ===
+  // M3.1-Flash（2026-10 正式版）：models.dev 的 minimax / minimax-cn 条目一致报
+  // $0.15 / $0.6、cache_read $0.015（USD/1M tok），比 M3 的 0.30/1.20 便宜一半。
+  // 大小写与命名空间两种拼写都列，否则用量成本会落到 `minimax-*` 通配价（0.50/2.00）。
+  "MiniMax-M3.1-Flash":           { input: 0.15,  output: 0.60,  cached: 0.015, reasoning: 0.90,   cache_creation: 0.15  },
+  "minimax-m3.1-flash":           { input: 0.15,  output: 0.60,  cached: 0.015, reasoning: 0.90,   cache_creation: 0.15  },
   "MiniMax-M3":                   { input: 0.30,  output: 1.20,  cached: 0.06,  reasoning: 1.80,   cache_creation: 0.30  },
   "MiniMax-M2.1":                 { input: 0.50,  output: 2.00,  cached: 0.25,  reasoning: 3.00,   cache_creation: 0.50  },
   "MiniMax-M2.5":                 { input: 0.50,  output: 2.00,  cached: 0.25,  reasoning: 3.00,   cache_creation: 0.50  },
@@ -240,6 +251,15 @@ export const MODEL_PRICING = {
  * Keyed by provider alias (cc, cx, gc, gh, ...) or provider id (openai, anthropic, ...).
  */
 export const PROVIDER_PRICING = {
+  // DeepSeek 第一方官方价（2026-10-20 models.dev `deepseek` provider 条目）。
+  // 只覆盖第一方连接；同名的转售商行（bai / baidu / apinex / blackbox /
+  // alitp-intl / clinepass）继续走 canonical MODEL_PRICING，不受影响。
+  deepseek: {
+    "deepseek-v4-flash": { input: 0.15, output: 0.6, cached: 0.003, reasoning: 0.6 },
+    "deepseek-v4-pro": { input: 0.66, output: 1.98, cached: 0.022, reasoning: 1.98 },
+    "deepseek-chat": { input: 0.14, output: 0.28, cached: 0.0028, reasoning: 0.28 },
+    "deepseek-reasoner": { input: 0.14, output: 0.28, cached: 0.0028, reasoning: 0.28 },
+  },
   // GitHub Copilot (gh) — explicit override, matches canonical gpt-5.3-codex rate
   gh: {
     "gpt-5.3-codex": { input: 1.75, output: 14.00, cached: 0.175, reasoning: 14.00, cache_creation: 1.75 },
@@ -298,6 +318,12 @@ export const PROVIDER_PRICING = {
     "minimax/minimax-m2.5": { input: 0.3, output: 1.2, cached: 0.03, reasoning: 1.2 },
     "minimax/minimax-m2.7": { input: 0.3, output: 1.2, cached: 0.06, reasoning: 1.2 },
     "minimax/minimax-m2.7-highspeed": { input: 0.6, output: 2.4, cached: 0.06, reasoning: 2.4 },
+    // M3.1-Flash（2026-10-19 控制台价目卡实读）：$0.15 / $0.60 / cache_read $0.015，
+    // 与第一方 minimax 同价。`:free` 变体在目录里是独立 id，但上游按账号额度
+    // 计费（实测余额为 0 时同样 403 insufficient_user_quota），因此按同价记录
+    // 而不是 $0 —— 免费是有条件的，不能按永久免费写死。
+    "minimax/minimax-m3.1-flash": { input: 0.15, output: 0.6, cached: 0.015, reasoning: 0.6 },
+    "minimax/minimax-m3.1-flash:free": { input: 0.15, output: 0.6, cached: 0.015, reasoning: 0.6 },
     "miromind/mirothinker-1-7-deepresearch": { input: 4, output: 25.0, reasoning: 25.0 },
     "miromind/mirothinker-1-7-deepresearch-mini": { input: 1.25, output: 10.0, reasoning: 10.0 },
     "mistralai/devstral-2512": { input: 0.4, output: 2.0, cached: 0.04, reasoning: 2.0 },
@@ -369,6 +395,74 @@ export const PROVIDER_PRICING = {
     "z-ai/glm-5-turbo": { input: 1.2, output: 4.0, cached: 0.24, reasoning: 4.0 },
     "z-ai/glm-5.1": { input: 1.05, output: 3.5, cached: 0.525, reasoning: 3.5 },
     "z-ai/glm-5.2": { input: 1.4, output: 4.4, cached: 0.26, reasoning: 4.4 },
+  },
+
+  // ── 以下为 2026-10-20 `node scripts/sync-modelsdev.mjs --refresh` 的输出：
+  // 只收「source 前缀与本 provider 同族」的第一方价目，跨 reseller 猜的候选
+  // 一律不收（同一模型在不同转售商差价很大，照抄会把成本算错）。USD / 1M tok。
+  cohere: {
+    "command-a-03-2025": { input: 2.5, output: 10, reasoning: 10 },
+    "command-r-plus-08-2024": { input: 2.5, output: 10, reasoning: 10 },
+    "command-r-08-2024": { input: 0.15, output: 0.6, reasoning: 0.6 },
+  },
+  groq: {
+    "llama-3.3-70b-versatile": { input: 0.59, output: 0.79, reasoning: 0.79 },
+    "openai/gpt-oss-120b": { input: 0.15, output: 0.6, cached: 0.075, reasoning: 0.6 },
+  },
+  mistral: {
+    "mistral-large-latest": { input: 0.5, output: 1.5, cached: 0.05, reasoning: 1.5 },
+    "codestral-latest": { input: 0.3, output: 0.9, cached: 0.03, reasoning: 0.9 },
+    "mistral-medium-latest": { input: 1.5, output: 7.5, cached: 0.15, reasoning: 7.5 },
+  },
+  morph: {
+    "morph-v3-large": { input: 0.9, output: 1.9, reasoning: 1.9 },
+    "morph-v3-fast": { input: 0.8, output: 1.2, reasoning: 1.2 },
+  },
+  perplexity: {
+    sonar: { input: 1, output: 1, reasoning: 1 },
+    "sonar-pro": { input: 3, output: 15, reasoning: 15 },
+  },
+  "perplexity-agent": {
+    "perplexity/sonar": { input: 0.25, output: 2.5, cached: 0.0625, reasoning: 2.5 },
+    "nvidia/nemotron-3-super-120b-a12b": { input: 0.25, output: 2.5, reasoning: 2.5 },
+  },
+  siliconflow: {
+    "openai/gpt-oss-120b": { input: 0.05, output: 0.45, reasoning: 0.45 },
+    "inclusionAI/Ling-flash-2.0": { input: 0.14, output: 0.57, reasoning: 0.57 },
+  },
+  // StepFun 三线共用一份官方价（stepfun-ai 条目）；国际站 step-5-preview 略高。
+  stepfun: {
+    "step-5-preview": { input: 0.959, output: 2.741, cached: 0.048, reasoning: 2.741 },
+    "step-3.7-flash": { input: 0.185, output: 1.11, cached: 0.037, reasoning: 1.11 },
+    "step-3.5-flash": { input: 0.1, output: 0.3, cached: 0.02, reasoning: 0.3 },
+    "step-3.5-flash-2603": { input: 0.1, output: 0.3, cached: 0.02, reasoning: 0.3 },
+  },
+  "stepfun-cn": {
+    "step-5-preview": { input: 1.0, output: 2.7, cached: 0.05, reasoning: 2.7 },
+    "step-3.7-flash": { input: 0.185, output: 1.11, cached: 0.037, reasoning: 1.11 },
+    "step-3.5-flash": { input: 0.1, output: 0.3, cached: 0.02, reasoning: 0.3 },
+    "step-3.5-flash-2603": { input: 0.1, output: 0.3, cached: 0.02, reasoning: 0.3 },
+  },
+  venice: {
+    "venice-uncensored-1-2": { input: 0.2, output: 0.9, reasoning: 0.9 },
+    "zai-org-glm-5": { input: 1, output: 3.2, cached: 0.2, reasoning: 3.2 },
+    "llama-3.3-70b": { input: 0.7, output: 2.8, reasoning: 2.8 },
+    "hermes-3-llama-3.1-405b": { input: 1.1, output: 3, reasoning: 3 },
+    "mistral-small-3-2-24b-instruct": { input: 0.09375, output: 0.25, reasoning: 0.25 },
+  },
+  cerebras: {
+    "gpt-oss-120b": { input: 0.35, output: 0.75, reasoning: 0.75 },
+  },
+  openai: {
+    o3: { input: 2, output: 8, cached: 0.5, reasoning: 8 },
+  },
+  longcat: {
+    "LongCat-2.0": { input: 0.75, output: 2.95, cached: 0.015, reasoning: 2.95 },
+    "LongCat-2.5-Preview": { input: 0.75, output: 2.95, cached: 0.015, reasoning: 2.95 },
+  },
+  "longcat-intl": {
+    "LongCat-2.0": { input: 0.75, output: 2.95, cached: 0.015, reasoning: 2.95 },
+    "LongCat-2.5-Preview": { input: 0.75, output: 2.95, cached: 0.015, reasoning: 2.95 },
   },
 };
 

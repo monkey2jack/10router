@@ -317,6 +317,13 @@ export async function POST(request, { params }) {
         const results = await claimAllQoderAccounts(provider);
         return NextResponse.json({ success: true, results });
       }
+      // 签到只对订阅线开放。minimax-free 是免登录网关线,签到在 CreditDaddy
+      // 内闭环——这里不认它,卡面也不渲染签到按钮(issue #75)。
+      if (provider === "minimax-code" || provider === "minimax-code-global") {
+        const { runMinimaxCheckinTick } = await import("@/sse/services/minimaxCheckin.js");
+        const results = await runMinimaxCheckinTick({ skipIfCheckedToday: false, provider });
+        return NextResponse.json({ success: true, results });
+      }
       return NextResponse.json({ error: `Check-in not supported for ${provider}` }, { status: 400 });
     }
 

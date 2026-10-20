@@ -281,13 +281,13 @@ describe("buildModelsList — provider order follows settings.providerCardOrder"
     mocks.getProviderConnections.mockResolvedValue(twoConns());
     mocks.getSettings.mockResolvedValue({ providerCardOrder: ["codebuddy-intl", "codebuddy-cn"] });
     // User dragged cbai above cbcn → /v1/models must match.
-    expect(providerPrefixSeq(await buildModelsList([LLM_KIND]))).toEqual(["cbai", "cbcn", "zcode-free", "trae-free"]);
+    expect(providerPrefixSeq(await buildModelsList([LLM_KIND]))).toEqual(["cbai", "cbcn", "zcode-free", "minimax-free", "trae-free"]);
   });
 
   it("keeps the un-dragged providers in priority/name order after the ordered ones", async () => {
     mocks.getProviderConnections.mockResolvedValue(twoConns());
     mocks.getSettings.mockResolvedValue({ providerCardOrder: ["codebuddy-cn"] });
-    expect(providerPrefixSeq(await buildModelsList([LLM_KIND]))).toEqual(["cbcn", "cbai", "zcode-free", "trae-free"]);
+    expect(providerPrefixSeq(await buildModelsList([LLM_KIND]))).toEqual(["cbcn", "cbai", "zcode-free", "minimax-free", "trae-free"]);
   });
 
   it("interleaves noAuth orphan custom models with connected providers by card order", async () => {
@@ -301,7 +301,7 @@ describe("buildModelsList — provider order follows settings.providerCardOrder"
     // Mirrors the dashboard, where a visible noAuth provider (opencode) shares
     // the top rank with connected providers: dragging it above codebuddy-cn
     // must reorder /v1/models too, not just the cards.
-    expect(providerPrefixSeq(await buildModelsList([LLM_KIND]))).toEqual(["oc", "cbcn", "zcode-free", "trae-free"]);
+    expect(providerPrefixSeq(await buildModelsList([LLM_KIND]))).toEqual(["oc", "cbcn", "zcode-free", "minimax-free", "trae-free"]);
   });
 
   it("interleaves noAuth orphan custom models with connected providers by card order (reverse)", async () => {
@@ -314,7 +314,7 @@ describe("buildModelsList — provider order follows settings.providerCardOrder"
     mocks.getSettings.mockResolvedValue({ providerCardOrder: ["codebuddy-cn", "opencode"] });
     // Drag the other way and the list flips — the orphan is no longer pinned
     // to the tail just because it lacks a connection.
-    expect(providerPrefixSeq(await buildModelsList([LLM_KIND]))).toEqual(["cbcn", "oc", "zcode-free", "trae-free"]);
+    expect(providerPrefixSeq(await buildModelsList([LLM_KIND]))).toEqual(["cbcn", "oc", "zcode-free", "minimax-free", "trae-free"]);
   });
 
   it("falls back to registry priority when no card order was saved", async () => {
@@ -328,7 +328,7 @@ describe("buildModelsList — provider order follows settings.providerCardOrder"
     // comparator uses — registry priority, where opencode (40) outranks
     // codebuddy-cn (90), so the orphan legitimately leads.
     mocks.getSettings.mockResolvedValue({});
-    expect(providerPrefixSeq(await buildModelsList([LLM_KIND]))).toEqual(["oc", "cbcn", "zcode-free", "trae-free"]);
+    expect(providerPrefixSeq(await buildModelsList([LLM_KIND]))).toEqual(["oc", "cbcn", "zcode-free", "minimax-free", "trae-free"]);
   });
 
   it("empty cardOrder leaves the list unchanged in priority order (regression)", async () => {
@@ -337,7 +337,7 @@ describe("buildModelsList — provider order follows settings.providerCardOrder"
     const seq = providerPrefixSeq(await buildModelsList([LLM_KIND]));
     // cbai & cbcn both present; no card order → comparator tie-breaks by priority
     // (cbcn=90 before cbai=intl default 200). Exact ids asserted in the next run.
-    expect(new Set(seq)).toEqual(new Set(["cbcn", "cbai", "zcode-free", "trae-free"]));
+    expect(new Set(seq)).toEqual(new Set(["cbcn", "cbai", "zcode-free", "minimax-free", "trae-free"]));
   });
 
   it("pinned modelCaps override wins over the catalog in context_length", async () => {

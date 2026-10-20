@@ -332,7 +332,10 @@ export default function ProviderDetailPage() {
   const handleQoderCheckin = async () => {
     setQoderCheckinRunning(true);
     try {
-      const endpoint = providerId === "qoder-cn" ? "/api/oauth/qoder-cn/checkin" : "/api/oauth/qoder/checkin";
+      // minimax-code / minimax-code-global share the generic [provider]/checkin
+      // action route. minimax-free never reaches here: the button is not
+      // rendered for it (its check-in lives inside CreditDaddy).
+      const endpoint = providerId === "qoder-cn" ? "/api/oauth/qoder-cn/checkin" : providerId === "qoder" ? "/api/oauth/qoder/checkin" : `/api/oauth/${providerId}/checkin`;
       const res = await fetch(endpoint, {
         method: "POST",
         cache: "no-store",
@@ -2208,7 +2211,7 @@ export default function ProviderDetailPage() {
                         Cookie
                       </Button>
                     )}
-                    {(providerId === "qoder" || providerId === "qoder-cn") && renderQoderCheckinBlock()}
+                    {(providerId === "qoder" || providerId === "qoder-cn" || providerId === "minimax-code" || providerId === "minimax-code-global") && renderQoderCheckinBlock()}
                     {providerId === "codex" && (
                       <Button size="sm" icon="playlist_add" variant="secondary" onClick={() => setShowBulkImportCodex(true)}>
                         {translate("Bulk Add")}
@@ -2312,7 +2315,7 @@ export default function ProviderDetailPage() {
                       </Button>
                       {renderOAuthTransferButtons("w-full sm:w-auto")}
                       {codeBuddyCheckinOn && renderCbCheckinBlock()}
-                      {(providerId === "qoder" || providerId === "qoder-cn") && renderQoderCheckinBlock()}
+                      {(providerId === "qoder" || providerId === "qoder-cn" || providerId === "minimax-code" || providerId === "minimax-code-global") && renderQoderCheckinBlock()}
                     </>
                   ) : (
                     <>

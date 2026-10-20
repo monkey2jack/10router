@@ -173,6 +173,19 @@ export async function PATCH(request) {
       }
     }
 
+    // Auto daily check-in for MiniMax Code subscriptions (issue #75)
+    if (Object.prototype.hasOwnProperty.call(body, "minimaxCheckin")) {
+      if (settings.minimaxCheckin === true) {
+        import("@/sse/services/minimaxCheckin.js")
+          .then(({ startMinimaxCheckin }) => startMinimaxCheckin())
+          .catch((error) => console.warn("[MinimaxCheckin] start failed:", error.message));
+      } else {
+        import("@/sse/services/minimaxCheckin.js")
+          .then(({ stopMinimaxCheckin }) => stopMinimaxCheckin())
+          .catch((error) => console.warn("[MinimaxCheckin] stop failed:", error.message));
+      }
+    }
+
     const { password, oidcClientSecret, ...safeSettings } = settings;
     safeSettings.oidcConfigured = !!(safeSettings.oidcIssuerUrl && safeSettings.oidcClientId && oidcClientSecret);
     // Establishing protection used to kick the operator straight to the login

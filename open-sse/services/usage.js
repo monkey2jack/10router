@@ -24,6 +24,7 @@ import {
   getOllamaUsage,
   getVercelAiGatewayUsage,
   getQoderUsage,
+  getAlibabaTokenPlanUsage,
 } from "./usage/misc.js";
 import { getGlmUsage } from "./usage/glm.js";
 import { getCommandCodeUsage } from "./usage/commandcode.js";
@@ -92,6 +93,10 @@ const USAGE_HANDLERS = {
   commandcode: (c) => getCommandCodeUsage(c.apiKey, c.proxyOptions),
   "minimax-code": (c) => getMiniMaxCodeUsage(c.accessToken, "minimax-code", c.proxyOptions, c.providerSpecificData),
   "minimax-code-global": (c) => getMiniMaxCodeUsage(c.accessToken, "minimax-code-global", c.proxyOptions, c.providerSpecificData),
+  // Alibaba Token Plan（credit 订阅 key）：没有任何公开额度接口，handler 只返回
+  // 一条指向百炼控制台的说明，避免漏成 "Usage API not implemented"（见 misc.js）。
+  "alitp-intl": (c) => getAlibabaTokenPlanUsage("alitp-intl"),
+  "alitp-cn": (c) => getAlibabaTokenPlanUsage("alitp-cn"),
 };
 
 export async function getUsageForProvider(connection, proxyOptions = null, options = {}) {

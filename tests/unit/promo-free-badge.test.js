@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { isPromoFree, promoFreeUntilMs } from "../../src/shared/utils/promoFree.js";
 import intl from "../../open-sse/providers/registry/codebuddy-intl.js";
 import cn from "../../open-sse/providers/registry/codebuddy-cn.js";
+import intlQoder from "../../open-sse/providers/registry/qoder.js";
+import cnQoder from "../../open-sse/providers/registry/qoder-cn.js";
 
 const read = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8");
 const MODEL_ROW = read("../../src/app/(dashboard)/dashboard/providers/[id]/ModelRow.js");
@@ -99,4 +101,21 @@ describe("promo badge rendering contract", () => {
       expect(dict["promo free until"].length).toBeGreaterThan(0);
     }
   });
+});
+
+describe("qoder / qoder-cn 的 DeepSeek-V4.1-Flash-1017 限免", () => {
+  // 2026-10-20 Qoder 客户端模型卡：dfmodel = DeepSeek-V4.1-Flash-1017，
+  // 个人版 0.0x 至 2026-10-25 00:00 (UTC+8)，之后回 0.1x。
+  for (const [name, entry] of [["qoder", intlQoder], ["qoder-cn", cnQoder]]) {
+    it(`${name}: dfmodel 名称与限免窗口正确`, () => {
+      const m = entry.models.find((x) => x.id === "dfmodel");
+      expect(m).toMatchObject({
+        name: "DeepSeek-V4.1-Flash 1017",
+        // 必须是带时区的 ISO：裸日期会被解析成 UTC 零点，等于多送 8 小时
+        promoFreeUntil: "2026-10-25T00:00:00+08:00",
+      });
+      expect(isPromoFree(m, Date.parse("2026-10-24T23:59:59+08:00"))).toBe(true);
+      expect(isPromoFree(m, Date.parse("2026-10-25T00:00:01+08:00"))).toBe(false);
+    });
+  }
 });

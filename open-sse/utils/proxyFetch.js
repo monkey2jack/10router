@@ -5,6 +5,18 @@ import { dbg } from "./debugLog.js";
 const originalFetch = globalThis.fetch;
 const proxyDispatchers = new Map();
 
+// Direct-connection fallback after a proxy failure: bounded, never unbounded.
+// A blocked endpoint silently drops TCP handshakes — an unbounded direct retry
+// hangs for hundreds of seconds (issue #76: 788s observed) and blocks the
+// caller's account-relay / combo fallback from ever kicking in.
+function directFetchWithTimeout(url, options) {
+  const timeoutMs = MEMORY_CONFIG.directFallbackTimeoutMs;
+  if (options?.signal) return originalFetch(url, options); // caller already bounded it
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(new Error(`fetch connect timeout (${timeoutMs}ms)`)), timeoutMs);
+  return originalFetch(url, { ...options, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+}
+
 // ─── TLS fingerprinting via got-scraping (browser-like JA3) ───────────────
 // Disabled: not in use. Kept commented for future re-enable.
 // Restore the original block to re-enable per-host JA3 spoofing.
@@ -241,6 +253,38 @@ async function createBypassRequest(parsedUrl, realIP, options) {
 
   return new Promise((resolve, reject) => {
     const socket = new net.Socket();
+    let settled = false;
+    const settle = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(connectTimer);
+      cleanupAbort();
+      fn(arg);
+    };
+
+    // The bypass path exists because the caller's fetch already timed out once
+    // — hanging here again is exactly the 700s+ deadlock of issue #76. Every
+    // exit must be bounded: the socket connect, the TLS+response wait, and the
+    // caller's own signal all race the same timer.
+    const connectTimer = setTimeout(() => {
+      socket.destroy();
+      settle(reject, new Error(`[ProxyFetch] MITM bypass connect timeout after ${MEMORY_CONFIG.directFallbackTimeoutMs}ms`));
+    }, MEMORY_CONFIG.mitmBypassConnectTimeoutMs);
+
+    // Honor the caller's AbortSignal — executors pass a merged signal with a
+    // connect timeout; without this the raw request never learns about aborts
+    // and the awaiting promise hangs past the executor's own deadline.
+    const onAbort = () => {
+      socket.destroy();
+      settle(reject, new Error("[ProxyFetch] MITM bypass request aborted"));
+    };
+    if (options.signal) {
+      if (options.signal.aborted) { onAbort(); return; }
+      options.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const cleanupAbort = () => {
+      if (options.signal) options.signal.removeEventListener("abort", onAbort);
+    };
 
     socket.connect(HTTPS_PORT, realIP, () => {
       const reqOptions = {
@@ -274,17 +318,19 @@ async function createBypassRequest(parsedUrl, realIP, options) {
           },
           json: async () => JSON.parse(await response.text()),
         };
-        resolve(response);
+        // Response headers received — the connect phase is done; from here the
+        // body streams under the caller's signal via the res stream.
+        settle(resolve, response);
       });
 
-      req.on("error", reject);
+      req.on("error", (err) => settle(reject, err));
       if (options.body) {
         req.write(typeof options.body === "string" ? options.body : JSON.stringify(options.body));
       }
       req.end();
     });
 
-    socket.on("error", reject);
+    socket.on("error", (err) => settle(reject, err));
   });
 }
 
@@ -334,7 +380,7 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
     }
     // The proxy already failed (and was reported) above — go direct rather than
     // retrying it and firing onProxyFallback a second time.
-    if (proxyUrl) return originalFetch(url, options);
+    if (proxyUrl) return directFetchWithTimeout(targetUrl, options);
   }
 
   if (proxyUrl) {
@@ -350,7 +396,7 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
         try { proxyOptions.onProxyFallback(proxyError); } catch {}
       }
       console.warn(`[ProxyFetch] Proxy failed, falling back to direct: ${proxyError.message}`);
-      return originalFetch(url, options);
+      return directFetchWithTimeout(targetUrl, options);
     }
   }
 

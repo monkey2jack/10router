@@ -21,6 +21,10 @@ export default {
   transport: {
     baseUrls: [ANTIGRAVITY_IDE_BASE_URL],
     format: "antigravity",
+    // Issue #76: Google cloudcode 端点从被墙网络直连会被静默丢包,代理失败后
+    // 回退直连就是数百秒死等。默认 strictProxy 让失败快速抛错进入账号顺位接力;
+    // 连接上显式设置过 strictProxy 的用户不受影响。
+    strictProxy: true,
     headers: {
       "User-Agent": ANTIGRAVITY_IDE_USER_AGENT,
     },

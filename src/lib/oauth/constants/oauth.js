@@ -153,6 +153,17 @@ export const XIAOMI_MIMO_CONFIG = {
   pendingTtlMs: 24 * 60 * 60 * 1000,
 };
 
+// Trae — two independent ecosystems that share the same cloudide API shape but
+// NOT the same credentials. A refresh token minted on the CN site is rejected
+// by the intl hosts (and vice versa, Error 20101 "refresh token is invalid"),
+// so every call has to know which side the user signed in on.
+//   intl: www.trae.ai    — api.marscode.com / api.trae.ai / www.trae.ai
+//   cn:   www.trae.cn    — api.trae.com.cn / api.marscode.cn / api.trae.cn
+// The CN origins below are the ones the official www.trae.cn web build calls
+// (its bundle exports API_CN = https://api.trae.com.cn and gets LoginHost
+// www.trae.cn); all four answer GetLoginGuidance / ExchangeToken / GetUserInfo.
+// Kept as an ordered list so a retired host can be dropped without touching the
+// provider logic — each entry is tried in turn.
 export const TRAE_CONFIG = {
   clientId: "ono9krqynydwx5",
   clientSecret: "-",
@@ -167,6 +178,24 @@ export const TRAE_CONFIG = {
     "https://www.trae.ai",
     "https://www.marscode.com",
   ],
+  // ── CN (trae.cn) ──────────────────────────────────────────────────────────
+  cnLoginGuidanceUrls: [
+    "https://api.trae.com.cn/cloudide/api/v3/trae/GetLoginGuidance",
+    "https://api.marscode.cn/cloudide/api/v3/trae/GetLoginGuidance",
+    "https://api.trae.cn/cloudide/api/v3/trae/GetLoginGuidance",
+  ],
+  cnApiOrigins: [
+    "https://api.trae.com.cn",
+    "https://api.marscode.cn",
+    "https://api.trae.cn",
+  ],
+  // Hosts that only ever appear on the intl side — used to tell the two apart
+  // when all we have is a pasted callback / an already-stored loginHost.
+  intlHostSuffixes: ["trae.ai", "marscode.com"],
+  cnHostSuffixes: ["trae.cn", "trae.com.cn", "marscode.cn"],
+  // Done-card web console, one per ecosystem (accounts don't cross over).
+  consoleUrl: "https://www.trae.ai/settings",
+  cnConsoleUrl: "https://www.trae.cn/settings",
   exchangeTokenPath: "/cloudide/api/v3/trae/oauth/ExchangeToken",
   getUserInfoPath: "/cloudide/api/v3/trae/GetUserInfo",
   authorizationPath: "/authorization",

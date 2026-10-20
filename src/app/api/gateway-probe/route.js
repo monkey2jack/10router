@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import net from "node:net";
 import dns from "node:dns";
 
-// 免费线（zcode-free / trae-free）卡片的网关连通性探测（#49）。
+// 免费线（zcode-free / minimax-free / trae-free）卡片的网关连通性探测（#49）。
 // CreditDaddy 的本地网关默认 127.0.0.1:47860，局域网部署时是宿主机 IP——
 // 浏览器侧对跨源端口做连通性判断不可靠（CORS/混合内容），由 10Router 服务端
 // 发起 TCP connect 探测，卡片只读结果。

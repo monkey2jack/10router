@@ -83,6 +83,11 @@ export default {
     { id: "minimax/minimax-m2.5", name: "Minimax M2.5" },
     { id: "minimax/minimax-m2.7", name: "Minimax M2.7" },
     { id: "minimax/minimax-m2.7-highspeed", name: "Minimax M2.7 Highspeed" },
+    // M3.1-Flash：TokenRouter 用命名空间形态，且**没有**裸 id
+    // （2026-10-19 用账号 Key 拉 /v1/models 核对，163 条目录里的确切拼写）。
+    // 目录另有 `:free` 变体——它是独立 id，不是同一模型的后缀别名。
+    { id: "minimax/minimax-m3.1-flash", name: "Minimax M3.1 Flash" },
+    { id: "minimax/minimax-m3.1-flash:free", name: "Minimax M3.1 Flash (Free)" },
     { id: "miromind/mirothinker-1-7-deepresearch", name: "Mirothinker 1 7 Deepresearch" },
     { id: "miromind/mirothinker-1-7-deepresearch-mini", name: "Mirothinker 1 7 Deepresearch Mini" },
     { id: "mistralai/devstral-2512", name: "Devstral 2512" },

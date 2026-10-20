@@ -41,6 +41,14 @@
     },
     "format": "openai"
   },
+  "alitp-cn": {
+    "baseUrl": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
+    "headers": {},
+    "quirks": {
+      "preserveCacheControl": true
+    },
+    "format": "openai"
+  },
   "amd": {
     "baseUrl": "https://developer.amd.com.cn/radeon/api/v1/chat/completions",
     "validateUrl": "https://developer.amd.com.cn/radeon/api/v1/models",
@@ -59,6 +67,7 @@
       "https://daily-cloudcode-pa.googleapis.com"
     ],
     "format": "antigravity",
+    "strictProxy": true,
     "headers": {
       "User-Agent": "antigravity/ide/2.11.0 darwin/arm64"
     },
@@ -397,6 +406,7 @@
   "gemini-cli": {
     "baseUrl": "https://cloudcode-pa.googleapis.com/v1internal",
     "format": "gemini-cli",
+    "strictProxy": true,
     "cliVersion": "0.34.0",
     "apiClient": "google-genai-sdk/1.41.0 gl-node/v22.19.0",
     "usage": {
@@ -825,6 +835,11 @@
     },
     "clientId": "mcode-public",
     "tokenUrl": "https://account.minimax.cn/oauth2/token"
+  },
+  "minimax-free": {
+    "baseUrl": "http://127.0.0.1:47860/gateway/minimax/v1/messages",
+    "format": "claude",
+    "noAuth": true
   },
   "minimax": {
     "baseUrl": "https://api.minimax.io/anthropic/v1/messages",

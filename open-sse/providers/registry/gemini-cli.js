@@ -21,6 +21,8 @@ export default {
   transport: {
     baseUrl: "https://cloudcode-pa.googleapis.com/v1internal",
     format: "gemini-cli",
+    // Issue #76: 同 antigravity——cloudcode-pa 直连被墙网络会静默丢包死等,默认 strictProxy 快速失败。
+    strictProxy: true,
     cliVersion: "0.34.0",
     apiClient: "google-genai-sdk/1.41.0 gl-node/v22.19.0",
     usage: {

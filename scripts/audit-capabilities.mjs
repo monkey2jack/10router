@@ -101,9 +101,6 @@ export const ALLOWLIST = {
   // 行——见 capabilities.js 的虚拟档注释——故按「gained a row → 删除条目」规约移除。)
   "cursor/default": "aggregator",
   "bazaarlink/auto:free": "aggregator",
-  "kilo-gateway/kilo-auto/free": "aggregator",
-  "kilo-gateway/kilo-auto/frontier": "aggregator",
-  "kilo-gateway/kilo-auto/balanced": "aggregator",
 
   // Private codenames with no public spec and no models.dev entry.
   "github/oswe-vscode-prime": "codename",

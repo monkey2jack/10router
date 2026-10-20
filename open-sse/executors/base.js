@@ -39,7 +39,7 @@ export class BaseExecutor {
       const normalized = baseUrl.replace(/\/$/, "");
       return `${normalized}/messages`;
     }
-    if ((this.provider === "zcode-free" || this.provider === "trae-free") && credentials?.providerSpecificData?.baseUrl) {
+    if ((this.provider === "zcode-free" || this.provider === "minimax-free" || this.provider === "trae-free") && credentials?.providerSpecificData?.baseUrl) {
       // CreditDaddy 主机可配置（本机/局域网）——baseUrl 由 getProviderCredentials 注入
       const normalized = String(credentials.providerSpecificData.baseUrl).replace(/\/$/, "");
       return normalized.endsWith("/messages") ? normalized : `${normalized}/messages`;

@@ -51,7 +51,9 @@ export default {
     { id: "gfmodel", name: "GLM-5.3-Flash" },
     { id: "gm51model", name: "GLM-5.2" },
     { id: "dmodel", name: "DeepSeek-V4-Pro" },
-    { id: "dfmodel", name: "DeepSeek-V4-Flash" },
+    // 同 qoder：dfmodel = DeepSeek-V4.1-Flash-1017，个人版限免至
+    // 2026-10-25 00:00 (UTC+8)，之后回 0.1x。
+    { id: "dfmodel", name: "DeepSeek-V4.1-Flash 1017", promoFreeUntil: "2026-10-25T00:00:00+08:00" },
     { id: "mmodel", name: "MiniMax-M3" },
   ],
   oauth: {

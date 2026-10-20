@@ -1811,6 +1811,8 @@
   "accounts": "个账号",
   "Qoder auto daily credit claim": "Qoder 每日自动领积分",
   "Automatically claim daily campaign credits for Qoder and Qoder CN accounts": "自动领取 Qoder 和 Qoder CN 账号的每日活动积分（全天重试，当日确认完成即停）",
+  "MiniMax Code auto daily check-in": "MiniMax Code 每日自动签到",
+  "Automatically check in daily for MiniMax Code subscription accounts to earn free-pack credits (MiniMax Code Free is not covered — its check-in runs inside CreditDaddy)": "自动为 MiniMax Code 订阅账号每日签到领取免费体验包算力币（MiniMax Code Free 不在此列——其签到在 CreditDaddy 内进行）",
   "Resource Package": "资源包",
   "resource package": "资源包",
   "addOn": "资源包",

@@ -1,5 +1,5 @@
 import { ERROR_TYPES, DEFAULT_ERROR_MESSAGES } from "../config/errorConfig.js";
-import { withRealnameHint, withInsufficientBalanceHint } from "../services/accountFallback.js";
+import { withRealnameHint, withInsufficientBalanceHint, isInsufficientBalanceText } from "../services/accountFallback.js";
 
 /**
  * Build OpenAI-compatible error response body
@@ -163,8 +163,11 @@ export function createErrorResult(statusCode, message, resetsAtMs, extraHeaders 
  */
 export function unavailableResponse(statusCode, message, retryAfter, retryAfterHuman, extraHeaders = null) {
   const retryAfterSec = Math.max(Math.ceil((new Date(retryAfter).getTime() - Date.now()) / 1000), 1);
-  // For permanent issues like insufficient balance (402), do not append misleading countdown
-  const isBalanceIssue = statusCode === 402 || /insufficient[_\s-]*balance|余额不足|欠费/i.test(message);
+  // For permanent issues like insufficient balance (402), do not append misleading
+  // countdown. Routed through the shared predicate so every balance shape the
+  // gateway knows about (incl. TokenRouter's credit-limit / gift-balance wording)
+  // hides the countdown — an inline copy here would drift from it again.
+  const isBalanceIssue = statusCode === 402 || isInsufficientBalanceText(message);
   const msg = (isBalanceIssue || !retryAfterHuman) ? message : `${message} (${retryAfterHuman})`;
   return new Response(
     JSON.stringify({

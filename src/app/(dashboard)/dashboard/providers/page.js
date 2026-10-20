@@ -1034,6 +1034,7 @@ function ProviderCard({ providerId, provider, stats, authType, onToggle, topolog
             >
               <ProviderIcon
                 src={`/providers/${provider.id}.png`}
+                providerId={provider.id}
                 alt={provider.name}
                 size={30}
                 className="object-contain rounded-lg max-w-[32px] max-h-[32px]"
@@ -1194,6 +1195,7 @@ function ApiKeyProviderCard({
             >
               <ProviderIcon
                 src={getIconPath()}
+                providerId={provider.id}
                 alt={provider.name}
                 size={30}
                 className="object-contain rounded-lg max-w-[30px] max-h-[30px]"

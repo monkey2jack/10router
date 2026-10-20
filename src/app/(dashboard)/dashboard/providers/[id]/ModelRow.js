@@ -18,6 +18,24 @@ function useLocalHour() {
   return hour;
 }
 
+/**
+ * 限免截止时间：注册表存的是带时区 ISO（如 "2026-10-25T00:00:00+08:00"），
+ * 直接印在 tooltip 里是机器格式。这里按**浏览器本地时区**格式化成年月日，
+ * 用户看到的就是自己所在时区的截止日，不用心算时差。
+ */
+function formatPromoEnd(raw) {
+  const ms = Date.parse(String(raw || ""));
+  if (!Number.isFinite(ms)) return String(raw || "");
+  try {
+    return new Date(ms).toLocaleString(undefined, {
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit",
+    });
+  } catch {
+    return String(raw || "");
+  }
+}
+
 // Off-peak windows flip at HH:MM boundaries, so the leaf badge needs a
 // finer tick than the hourly one above — 30s is well inside a minute and
 // cheap (one shared interval per row, cleared on unmount).
@@ -364,7 +382,7 @@ export default function ModelRow({ model, fullModel, alias, copied, onCopy, test
                   nightFreeNow
                     ? `${translate("Night-free window")} (23:00–08:00) — ${translate("rides the free quota")}`
                     : promoFree
-                    ? translate("Credit multiplier") + `: ${rateMultiplier}x — ` + translate("promo free until") + ` ${model.promoFreeUntil}`
+                    ? translate("Credit multiplier") + `: ${rateMultiplier}x — ` + translate("promo free until") + ` ${formatPromoEnd(model.promoFreeUntil)}`
                     : displayMultiplier === 0
                     ? translate("Credit multiplier") + ": 0x — " + translate("rides the free quota")
                     : translate("Credit multiplier") + `: ${displayMultiplier}x`

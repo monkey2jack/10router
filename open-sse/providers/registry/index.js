@@ -5,6 +5,7 @@ import p2 from "./alicode-intl.js";
 import p3 from "./alicode.js";
 import p4 from "./alims-intl.js";
 import p5 from "./alitp-intl.js";
+import p5b from "./alitp-cn.js";
 import p6 from "./amd.js";
 import p7 from "./anthropic.js";
 import p8 from "./antigravity.js";
@@ -83,6 +84,7 @@ import p80 from "./mimo-free.js";
 import p81 from "./minimax-cn.js";
 import p82 from "./minimax-code-global.js";
 import p83 from "./minimax-code.js";
+import p84 from "./minimax-free.js";
 import p85 from "./minimax.js";
 import p86 from "./mistral.js";
 import p87 from "./mmf.js";
@@ -162,6 +164,7 @@ export default [
   p3,
   p4,
   p5,
+  p5b,
   p6,
   p7,
   p8,
@@ -240,6 +243,7 @@ export default [
   p81,
   p82,
   p83,
+  p84,
   p85,
   p86,
   p87,
