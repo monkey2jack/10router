@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import PropTypes from "prop-types";
-import { Card, Button, Input, Modal, CardSkeleton, Toggle, ConfirmModal } from "@/shared/components";
+import { Card, Button, Input, Modal, CardSkeleton, Toggle, ConfirmModal, ModelSelectModal } from "@/shared/components";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import {
   TUNNEL_BENEFITS,
@@ -53,11 +53,18 @@ export default function APIPageClient({ machineId }) {
   const [limitInput, setLimitInput] = useState("");
   const [limitSaving, setLimitSaving] = useState(false);
 
-  // Key Access Control Modal (Allowed Models & Combos)
+  // Key Access Control Modal (Allowed Models & Combos).
+  // allowedModels/allowedCombos are the checked concrete ids; allowedPatterns
+  // is the wildcard escape hatch (anthropic/*, *claude*) the backend also
+  // matches (checkApiKeyModelAccess) — a pure checkbox picker would lose it.
   const [accessModal, setAccessModal] = useState(null);
-  const [allowedModelsInput, setAllowedModelsInput] = useState("");
-  const [allowedCombosInput, setAllowedCombosInput] = useState("");
+  const [allowedModels, setAllowedModels] = useState([]);
+  const [allowedCombos, setAllowedCombos] = useState([]);
+  const [allowedPatterns, setAllowedPatterns] = useState("");
   const [accessSaving, setAccessSaving] = useState(false);
+  const [showAccessSelect, setShowAccessSelect] = useState(false);
+  const [activeProviders, setActiveProviders] = useState([]);
+  const [comboNames, setComboNames] = useState([]);
 
   const [createdKey, setCreatedKey] = useState(null);
   const [confirmState, setConfirmState] = useState(null);
@@ -752,25 +759,74 @@ export default function APIPageClient({ machineId }) {
     }
   };
 
+  // Open the access-control modal: split the stored whitelist into concrete
+  // checked ids (checkbox-able) and wildcard patterns (advanced box). The
+  // backend matches wildcards in allowedModels only (checkApiKeyModelAccess),
+  // so patterns live in the models field on save — round-trip is lossless.
+  const openAccessModal = async (key) => {
+    setAccessModal(key);
+    const allModels = key.allowedModels || [];
+    setAllowedModels(allModels.filter((m) => !m.includes("*")));
+    setAllowedPatterns(allModels.filter((m) => m.includes("*")).join(", "));
+    setAllowedCombos(key.allowedCombos || []);
+    // Lazy-load the picker's data sources once (cheap; powers both sections).
+    if (activeProviders.length === 0 || comboNames.length === 0) {
+      try {
+        const [providersRes, combosRes] = await Promise.all([
+          fetch("/api/providers", { cache: "no-store" }),
+          fetch("/api/combos", { cache: "no-store" }),
+        ]);
+        if (providersRes.ok) {
+          const data = await providersRes.json();
+          setActiveProviders(data.connections || []);
+        }
+        if (combosRes.ok) {
+          const data = await combosRes.json();
+          setComboNames((data.combos || []).map((c) => c.name));
+        }
+      } catch { /* picker degrades to empty lists; advanced box still works */ }
+    }
+  };
+
+  // ModelSelectModal hands us {value}; combos and models share the picker, so
+  // the combo-name list decides which field a pick lands in. Placeholder rows
+  // (custom-provider prefill) are meaningless in a whitelist — skip them.
+  const handleAccessSelect = (model) => {
+    const value = model?.value;
+    if (!value || model?.isPlaceholder) return;
+    if (comboNames.includes(value)) {
+      setAllowedCombos((prev) => (prev.includes(value) ? prev : [...prev, value]));
+    } else {
+      setAllowedModels((prev) => (prev.includes(value) ? prev : [...prev, value]));
+    }
+  };
+
+  const handleAccessDeselect = (model) => {
+    const value = model?.value;
+    if (!value) return;
+    if (comboNames.includes(value)) {
+      setAllowedCombos((prev) => prev.filter((m) => m !== value));
+    } else {
+      setAllowedModels((prev) => prev.filter((m) => m !== value));
+    }
+  };
+
   const handleSaveAccess = async () => {
     if (!accessModal) return;
     setAccessSaving(true);
     try {
-      const models = allowedModelsInput
+      const patterns = allowedPatterns
         .split(/[\n,]/)
         .map((s) => s.trim())
         .filter(Boolean);
-      const combos = allowedCombosInput
-        .split(/[\n,]/)
-        .map((s) => s.trim())
-        .filter(Boolean);
+      const models = [...allowedModels, ...patterns];
 
       const res = await fetch(`/api/keys/${accessModal.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           allowedModels: models.length > 0 ? models : null,
-          allowedCombos: combos.length > 0 ? combos : null,
+          allowedCombos: allowedCombos.length > 0 ? allowedCombos : null,
         }),
       });
       if (res.ok) {
@@ -1274,11 +1330,7 @@ export default function APIPageClient({ machineId }) {
                 </div>
                 <div className="flex items-center gap-1.5 self-end sm:self-auto shrink-0">
                   <button
-                    onClick={() => {
-                      setAccessModal(key);
-                      setAllowedModelsInput(key.allowedModels?.join("\n") || "");
-                      setAllowedCombosInput(key.allowedCombos?.join("\n") || "");
-                    }}
+                    onClick={() => openAccessModal(key)}
                     className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary transition-all"
                     title={translate("Allowed Models & Combos")}
                   >
@@ -1397,7 +1449,10 @@ export default function APIPageClient({ machineId }) {
         </div>
       </Modal>
 
-      {/* Edit Allowed Models & Combos Modal */}
+      {/* Edit Allowed Models & Combos Modal. Checkbox-first (issue: textareas
+          were "复古且不友好"): concrete ids come from the same multi-select
+          picker the combo editor uses; the wildcard box stays as the advanced
+          escape hatch the backend matches (anthropic/*, *claude*). */}
       <Modal
         isOpen={!!accessModal}
         title={`${translate("Allowed Models & Combos")}${accessModal ? ` — ${translateKeyName(accessModal.name)}` : ""}`}
@@ -1407,26 +1462,81 @@ export default function APIPageClient({ machineId }) {
           <p className="text-xs text-text-muted">
             {translate("Restrict this key to specific models or combos. Leave empty for unrestricted access.")}
           </p>
+
+          {/* Checked models */}
           <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-medium text-text-muted">{translate("Allowed Models (one per line or comma-separated)")}</label>
-            <textarea
-              rows={4}
-              value={allowedModelsInput}
-              onChange={(e) => setAllowedModelsInput(e.target.value)}
-              placeholder="claude-3-5-sonnet, gpt-4o, anthropic/*"
-              className="w-full text-xs font-mono p-2.5 rounded-lg border border-border bg-surface-2 focus:outline-none focus:border-primary resize-y"
-            />
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-medium text-text-muted">{translate("Allowed Models")}</label>
+              <Button size="sm" variant="secondary" icon="add" onClick={() => setShowAccessSelect(true)}>
+                {translate("Pick models")}
+              </Button>
+            </div>
+            {allowedModels.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto rounded-lg border border-border bg-surface-2 p-2">
+                {allowedModels.map((m) => (
+                  <span key={m} className="inline-flex items-center gap-1 rounded-full bg-primary/10 border border-primary/30 pl-2 pr-1 py-0.5 text-[11px] font-mono text-primary">
+                    {m}
+                    <button
+                      onClick={() => setAllowedModels((prev) => prev.filter((x) => x !== m))}
+                      className="rounded-full p-0.5 hover:bg-primary/20 transition-colors"
+                      title={translate("Remove")}
+                    >
+                      <span className="material-symbols-outlined leading-none" style={{ fontSize: "12px" }}>close</span>
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="text-[11px] text-text-muted italic">{translate("No models selected — unrestricted unless combos or patterns are set.")}</p>
+            )}
           </div>
+
+          {/* Checked combos */}
           <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-medium text-text-muted">{translate("Allowed Combos (one per line or comma-separated)")}</label>
-            <textarea
-              rows={3}
-              value={allowedCombosInput}
-              onChange={(e) => setAllowedCombosInput(e.target.value)}
-              placeholder="smart-coding, fallback-claude"
-              className="w-full text-xs font-mono p-2.5 rounded-lg border border-border bg-surface-2 focus:outline-none focus:border-primary resize-y"
-            />
+            <label className="text-xs font-medium text-text-muted">{translate("Allowed Combos")}</label>
+            {comboNames.length > 0 ? (
+              <div className="flex flex-wrap gap-x-4 gap-y-1.5 rounded-lg border border-border bg-surface-2 p-2 max-h-28 overflow-y-auto">
+                {comboNames.map((name) => (
+                  <label key={name} className="flex items-center gap-1.5 text-xs cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      className="w-3.5 h-3.5 rounded border-border accent-primary cursor-pointer"
+                      checked={allowedCombos.includes(name)}
+                      onChange={(e) =>
+                        setAllowedCombos((prev) =>
+                          e.target.checked ? [...prev, name] : prev.filter((x) => x !== name)
+                        )
+                      }
+                    />
+                    <span className="font-mono">{name}</span>
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <p className="text-[11px] text-text-muted italic">{translate("No combos yet.")}</p>
+            )}
           </div>
+
+          {/* Advanced: wildcard patterns */}
+          <details className="group">
+            <summary className="cursor-pointer text-xs font-medium text-text-muted hover:text-text-main transition-colors select-none list-none flex items-center gap-1">
+              <span className="material-symbols-outlined text-[14px] transition-transform group-open:rotate-90">chevron_right</span>
+              {translate("Wildcard patterns (advanced)")}
+            </summary>
+            <div className="mt-2 flex flex-col gap-1.5">
+              <textarea
+                rows={2}
+                value={allowedPatterns}
+                onChange={(e) => setAllowedPatterns(e.target.value)}
+                placeholder="anthropic/*, *claude*"
+                className="w-full text-xs font-mono p-2.5 rounded-lg border border-border bg-surface-2 focus:outline-none focus:border-primary resize-y"
+              />
+              <p className="text-[11px] text-text-muted">
+                {translate("Patterns like anthropic/* or *claude* match whole providers/families. One per line or comma-separated.")}
+              </p>
+            </div>
+          </details>
+
           <div className="flex gap-2">
             <Button onClick={handleSaveAccess} fullWidth disabled={accessSaving}>
               {translate("Save")}
@@ -1435,6 +1545,22 @@ export default function APIPageClient({ machineId }) {
           </div>
         </div>
       </Modal>
+
+      {/* Multi-select model picker (same component the combo editor uses:
+          click to add, click again to remove; combos route to their own list
+          via handleAccessSelect). */}
+      {showAccessSelect && (
+        <ModelSelectModal
+          isOpen={showAccessSelect}
+          onClose={() => setShowAccessSelect(false)}
+          onSelect={handleAccessSelect}
+          onDeselect={handleAccessDeselect}
+          activeProviders={activeProviders}
+          title={translate("Pick allowed models")}
+          addedModelValues={[...allowedModels, ...allowedCombos]}
+          closeOnSelect={false}
+        />
+      )}
 
       {/* Rotated Keys Modal */}
       <Modal

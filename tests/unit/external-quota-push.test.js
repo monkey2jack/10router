@@ -119,6 +119,38 @@ describe("external quota payload normalization", () => {
     expect(r.snapshot.entries[0].isCreditBalance).toBe(true);
   });
 
+  it("keeps checkinToday / streakDays as read-only display fields (#77)", () => {
+    const r = normalizeExternalQuotaPayload("cd", {
+      provider: "minimax-code",
+      quotas: {
+        "MM账号": { used: 0, total: 88, displayRemaining: true, recurring: true, checkinToday: true, streakDays: 7 },
+        other: { used: 0, total: 10, checkinToday: false },
+      },
+    });
+    expect(r.ok).toBe(true);
+    const byKey = Object.fromEntries(r.snapshot.entries.map((e) => [e.key, e]));
+    expect(byKey["MM账号"].checkinToday).toBe(true);
+    expect(byKey["MM账号"].streakDays).toBe(7);
+    // false is a real value ("not signed in today"), kept distinct from absent
+    expect(byKey.other.checkinToday).toBe(false);
+    expect(byKey.other.streakDays).toBeUndefined();
+  });
+
+  it("drops malformed check-in fields without failing the push (#77 向后兼容)", () => {
+    // Old CD payload: neither field at all → still a valid snapshot.
+    const old = normalizeExternalQuotaPayload("cd", { quotas: { a: { used: 0, total: 32 } } });
+    expect(old.ok).toBe(true);
+    expect(old.snapshot.entries[0].checkinToday).toBeUndefined();
+
+    // Non-boolean checkinToday / non-integer streakDays are dropped, not crashed on.
+    const bad = normalizeExternalQuotaPayload("cd", {
+      quotas: { a: { used: 0, total: 32, checkinToday: "yes", streakDays: 7.5 } },
+    });
+    expect(bad.ok).toBe(true);
+    expect(bad.snapshot.entries[0].checkinToday).toBeUndefined();
+    expect(bad.snapshot.entries[0].streakDays).toBeUndefined();
+  });
+
   it("claims by same provider + name (alias matching): claimed rows leave the wall, the connection finds them", () => {
     const rows = [
       { id: "ext:river-a", provider: "river", name: "谷歌#1" },

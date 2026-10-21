@@ -77,3 +77,20 @@ describe("Issue #76: 不可直连渠道 registry 默认 strictProxy", () => {
     expect(PROVIDERS.anthropic?.strictProxy).toBeUndefined();
   });
 });
+
+describe("Issue #76 — proxyFetch 读取的 MEMORY_CONFIG 键必须存在", () => {
+  // createBypassRequest 曾把建连超时写成不存在的 mitmBypassConnectTimeoutMs:
+  // setTimeout(fn, undefined) 约 1ms 即触发,所有 MITM bypass 请求被秒杀。
+  // 拼错的键不会报错,只能靠逐键核对。
+  it("每个 MEMORY_CONFIG.<key> 引用都有定义且为正数", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const { MEMORY_CONFIG } = await import("../../open-sse/config/runtimeConfig.js");
+    const src = readFileSync(fileURLToPath(new URL("../../open-sse/utils/proxyFetch.js", import.meta.url)), "utf8");
+    const keys = [...new Set([...src.matchAll(/MEMORY_CONFIG\.(\w+)/g)].map((m) => m[1]))];
+    expect(keys).toContain("directFallbackTimeoutMs");
+    for (const k of keys) {
+      expect(MEMORY_CONFIG[k], `MEMORY_CONFIG.${k}`).toBeGreaterThan(0);
+    }
+  });
+});

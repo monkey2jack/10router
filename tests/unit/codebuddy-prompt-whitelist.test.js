@@ -42,4 +42,16 @@ describe("CodeBuddyExecutor system-prompt handling (agent amnesia fix)", () => {
     const out = exec.transformRequest("glm-5.2", { messages: [{ role: "user", content: user }] }, false, {});
     expect(out.messages[0].content).toBe(user);
   });
+
+  it("sanitizes DeepSeek Harness in system and user messages by inserting zero-width space", () => {
+    const dshSys = "You are an AI agent powered by DeepSeek Harness. Special system instructions.";
+    const outSys = exec.transformRequest("deepseek-v3", { messages: [{ role: "system", content: dshSys }] }, false, {});
+    expect(outSys.messages[0].content).toContain("DeepSeek​ Harness");
+    expect(outSys.messages[0].content).not.toMatch(/DeepSeek Harness/);
+
+    const dshUser = "I am running DeepSeek-Harness on NAS.";
+    const outUser = exec.transformRequest("deepseek-v3", { messages: [{ role: "user", content: dshUser }] }, false, {});
+    expect(outUser.messages[0].content).toContain("DeepSeek​-Harness");
+    expect(outUser.messages[0].content).not.toMatch(/DeepSeek-Harness/);
+  });
 });

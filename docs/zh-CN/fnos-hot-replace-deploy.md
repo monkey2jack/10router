@@ -31,6 +31,7 @@
    cp -r ../../src/mitm src/
    mkdir -p node_modules
    cp -r ../../node_modules/{node-forge,sql.js,next,better-sqlite3} node_modules/
+cp ../../announcements.json .   # 公告数据源(客户端从 GitHub raw 直读,本地副本仅兜底)
    ```
 
    **测试构建必须盖印版本号**（否则仪表盘/manifest 显示的是 release 版本号，

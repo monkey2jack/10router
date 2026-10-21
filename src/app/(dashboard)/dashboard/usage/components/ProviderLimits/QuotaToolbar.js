@@ -6,7 +6,7 @@ import ProviderIcon from "@/shared/components/ProviderIcon";
 import { Popover, MenuItem } from "@/shared/components/PopoverMenu";
 import { translate } from "@/i18n/runtime";
 import { cn } from "@/shared/utils/cn";
-import { ACCOUNT_FILTER_OPTIONS, QUOTA_SORT_OPTIONS } from "./utils";
+import { ACCOUNT_FILTER_OPTIONS, QUOTA_SORT_OPTIONS, REFRESH_INTERVAL_OPTIONS } from "./utils";
 
 /**
  * Quota tracker toolbar — one control language for every button here:
@@ -60,6 +60,8 @@ export default function QuotaToolbar({
   autoRefresh,
   onToggleAutoRefresh,
   countdown,
+  refreshIntervalMs,
+  onChangeRefreshInterval,
   refreshingAll,
   onRefreshAll,
   accountCount,
@@ -67,6 +69,7 @@ export default function QuotaToolbar({
 }) {
   const [providerOpen, setProviderOpen] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
+  const [intervalOpen, setIntervalOpen] = useState(false);
   const cards = view === "cards";
 
   return (
@@ -277,33 +280,66 @@ export default function QuotaToolbar({
         </div>
         )}
 
-        {/* Auto-refresh: a real switch, with the countdown beside it. */}
+        {/* Auto-refresh: a real switch, with the countdown and interval dropdown beside it. */}
         {cards && (
-        <button
-          type="button"
-          role="switch"
-          aria-checked={autoRefresh}
-          onClick={onToggleAutoRefresh}
-          className={CONTROL}
-          title={translate(autoRefresh ? "Disable auto-refresh" : "Enable auto-refresh")}
-        >
-          <span
-            aria-hidden="true"
-            className={cn(
-              "relative h-4 w-7 rounded-full transition-colors",
-              autoRefresh ? "bg-primary" : "bg-black/15 dark:bg-white/20",
-            )}
-          >
-            <span
-              className={cn(
-                "absolute top-0.5 size-3 rounded-full bg-white shadow transition-[left]",
-                autoRefresh ? "left-[14px]" : "left-0.5",
+          <div className="flex items-center">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={autoRefresh}
+              onClick={onToggleAutoRefresh}
+              className={cn(CONTROL, autoRefresh && "rounded-r-none border-r-0")}
+              title={translate(autoRefresh ? "Disable auto-refresh" : "Enable auto-refresh")}
+            >
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "relative h-4 w-7 rounded-full transition-colors",
+                  autoRefresh ? "bg-primary" : "bg-black/15 dark:bg-white/20",
+                )}
+              >
+                <span
+                  className={cn(
+                    "absolute top-0.5 size-3 rounded-full bg-white shadow transition-[left]",
+                    autoRefresh ? "left-[14px]" : "left-0.5",
+                  )}
+                />
+              </span>
+              <span className="hidden @min-[980px]:inline">{translate("Auto-refresh")}</span>
+              {autoRefresh && (
+                <span className="w-7 text-right text-[11px] tabular-nums text-text-muted">
+                  {countdown >= 60 ? `${Math.ceil(countdown / 60)}m` : `${countdown}s`}
+                </span>
               )}
-            />
-          </span>
-          <span className="hidden @min-[980px]:inline">{translate("Auto-refresh")}</span>
-          {autoRefresh && <span className="w-6 text-right text-[11px] tabular-nums text-text-muted">{countdown}s</span>}
-        </button>
+            </button>
+            {autoRefresh && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setIntervalOpen((v) => !v)}
+                  className={cn(CONTROL, "rounded-l-none px-1.5 text-text-muted hover:text-text")}
+                  title={translate("Change refresh interval")}
+                  aria-label={translate("Change refresh interval")}
+                >
+                  <span className={cn(ICON, "text-[14px]")}>expand_more</span>
+                </button>
+                <Popover open={intervalOpen} onClose={() => setIntervalOpen(false)} align="right" className="w-36">
+                  {REFRESH_INTERVAL_OPTIONS.map((opt) => (
+                    <MenuItem
+                      key={opt.value}
+                      selected={refreshIntervalMs === opt.value}
+                      onClick={() => {
+                        setIntervalOpen(false);
+                        onChangeRefreshInterval?.(opt.value);
+                      }}
+                    >
+                      {opt.label}
+                    </MenuItem>
+                  ))}
+                </Popover>
+              </div>
+            )}
+          </div>
         )}
 
         <button

@@ -81,7 +81,9 @@ export const LOBE_PROVIDER_ICONS = {
   deepseek: DeepSeek,
   minimax: Minimax,
   "minimax-cn": Minimax,
-  "minimax-free": Minimax,
+  // minimax-free 故意不映射到 Lobe 的红色 Minimax 标：它是 MiniMax Code 的免费线，
+  // 与 minimax-code 同一张蓝色 Code 脸。走 /providers/minimax-free.png 才能让
+  // 列表卡片与详情页头部一致（Lobe 映射在 ProviderIcon 里优先于 PNG）。
   groq: Groq,
   nvidia: Nvidia,
   xai: XAI,

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { FORMATS } from "../../translator/formats.js";
 import { needsTranslation } from "../../translator/index.js";
 import { fromOpenAIFinish } from "../../translator/concerns/finishReason.js";
+import { openAICompletionToClaudeMessage } from "../../translator/concerns/claudeMessage.js";
 import { ollamaBodyToOpenAI } from "../../translator/response/ollama-to-openai.js";
 import { addBufferToUsage, filterUsageForFormat, usageOrEstimate } from "../../utils/usageTracking.js";
 import { createErrorResult } from "../../utils/error.js";
@@ -40,50 +41,6 @@ function shouldPreserveReasoningContent(model, responseBody, targetFormat) {
     .join(" ");
   if (/gemini/i.test(modelName)) return true;
   return false;
-}
-
-function openAICompletionToClaudeMessage(responseBody) {
-  if (responseBody?.type === "message" && Array.isArray(responseBody?.content)) {
-    return responseBody;
-  }
-  const choice = responseBody?.choices?.[0];
-  const message = choice?.message || {};
-  const content = [];
-
-  const reasoning = message.reasoning_content || message.provider_specific_fields?.reasoning_content || "";
-  if (reasoning) {
-    content.push({ type: "thinking", thinking: reasoning });
-  }
-  if (typeof message.content === "string" && message.content.length > 0) {
-    content.push({ type: "text", text: message.content });
-  }
-  for (const toolCall of message.tool_calls || []) {
-    const fn = toolCall.function || {};
-    content.push({
-      type: "tool_use",
-      id: toolCall.id || `toolu_${Date.now()}_${content.length}`,
-      name: fn.name || toolCall.name || "",
-      input: parseToolArguments(fn.arguments || toolCall.arguments),
-    });
-  }
-  if (content.length === 0) content.push({ type: "text", text: "" });
-
-  const usage = responseBody?.usage || {};
-  let msgId = String(responseBody?.id || `msg_${Date.now()}`).replace(/^chatcmpl-/, "");
-  if (!msgId.startsWith("msg_")) msgId = `msg_${msgId}`;
-  return {
-    id: msgId,
-    type: "message",
-    role: "assistant",
-    model: responseBody?.model || "unknown",
-    content,
-    stop_reason: fromOpenAIFinish(choice?.finish_reason, FORMATS.CLAUDE),
-    stop_sequence: null,
-    usage: {
-      input_tokens: usage.prompt_tokens || usage.input_tokens || 0,
-      output_tokens: usage.completion_tokens || usage.output_tokens || 0,
-    },
-  };
 }
 
 /**

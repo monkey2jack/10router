@@ -5,6 +5,8 @@ import { withCodexReviewModels } from "../models/helpers.js";
 // 上游 0.155 起：低于此版本的请求会被 OpenAI 限流拒绝（v0.5.95, ca6e8407）。
 const CODEX_CLI_VERSION = "0.159.0";
 
+const GPT_6_LITE_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+
 export default {
   id: "codex",
   priority: 20,
@@ -57,14 +59,13 @@ export default {
     // 请求被剥掉标记后按基础模型发出，变体 id 只用于账号 enabledModels 勾选
     // 与能力发布。
     { id: "gpt-6-astra[1m]", name: "GPT 6.0 Astra (extended context)", upstreamModelId: "gpt-6-astra" },
-    // 6.0 lite pair: upstream v0.5.91 ships both over the subscription flow.
-    { id: "gpt-6-sol", name: "GPT 6.0 Sol" },
-    { id: "gpt-6-sol[1m]", name: "GPT 6.0 Sol (extended context)", upstreamModelId: "gpt-6-sol" },
-    { id: "gpt-6-luna", name: "GPT 6.0 Luna" },
-    { id: "gpt-6-luna[1m]", name: "GPT 6.0 Luna (extended context)", upstreamModelId: "gpt-6-luna" },
-    // User-observed in the Codex app (2026-09-30); upstream has not picked it
-    // up yet. thinkingLevels' *gpt-6* pattern already covers the id.
-    { id: "gpt-6.1-sol", name: "GPT 6.1 Sol" },
+    // 6.0 lite pair + 6.1 (upstream v0.5.91/v0.5.104): Responses Lite transport,
+    // five thinking levels (no "minimal"; codex-ultra maps to max).
+    { id: "gpt-6.1-sol", name: "GPT 6.1 Sol", responsesLite: true, thinkingLevels: GPT_6_LITE_THINKING_LEVELS },
+    { id: "gpt-6-sol", name: "GPT 6.0 Sol", responsesLite: true, thinkingLevels: GPT_6_LITE_THINKING_LEVELS },
+    { id: "gpt-6-sol[1m]", name: "GPT 6.0 Sol (extended context)", upstreamModelId: "gpt-6-sol", responsesLite: true, thinkingLevels: GPT_6_LITE_THINKING_LEVELS },
+    { id: "gpt-6-luna", name: "GPT 6.0 Luna", responsesLite: true, thinkingLevels: GPT_6_LITE_THINKING_LEVELS },
+    { id: "gpt-6-luna[1m]", name: "GPT 6.0 Luna (extended context)", upstreamModelId: "gpt-6-luna", responsesLite: true, thinkingLevels: GPT_6_LITE_THINKING_LEVELS },
     { id: "gpt-5.6-sol", name: "GPT 5.6 Sol" },
     { id: "gpt-5.6-sol[1m]", name: "GPT 5.6 Sol (extended context)", upstreamModelId: "gpt-5.6-sol" },
     { id: "gpt-5.6-sol-review", name: "GPT 5.6 Sol Review", upstreamModelId: "gpt-5.6-sol", quotaFamily: "review" },
@@ -74,8 +75,8 @@ export default {
     { id: "gpt-5.6-luna", name: "GPT 5.6 Luna" },
     { id: "gpt-5.6-luna[1m]", name: "GPT 5.6 Luna (extended context)", upstreamModelId: "gpt-5.6-luna" },
     { id: "gpt-5.6-luna-review", name: "GPT 5.6 Luna Review", upstreamModelId: "gpt-5.6-luna", quotaFamily: "review" },
-    { id: "gpt-5.5", name: "GPT 5.5" },
-    { id: "gpt-5.5-review", name: "GPT 5.5 Review", upstreamModelId: "gpt-5.5", quotaFamily: "review" },
+    // gpt-5.5 / gpt-5.5-review removed: absent from backend-api/codex/models for
+    // ChatGPT accounts and return HTTP 400 (#4202, #4848, 上游 7878f53b).
     // gpt-5.4 / gpt-5.4-mini / gpt-5.3-codex-spark 已移除：不在 backend-api/codex/models 里，
     // 后端一律 400 "model is not supported"（上游 v0.5.95, 8f9ff44f）。
     // gpt-daybreak-blue-latest / gpt-reserve 已由 backend-api/codex/models 确认在线。
@@ -89,9 +90,9 @@ export default {
     { id: "gpt-5.6-sol-image", name: "GPT 5.6 Sol Image", capabilities: ["text2img","edit"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
     { id: "gpt-5.6-terra-image", name: "GPT 5.6 Terra Image", capabilities: ["text2img","edit"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
     { id: "gpt-5.6-luna-image", name: "GPT 5.6 Luna Image", capabilities: ["text2img","edit"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
-    { id: "gpt-5.5-image", name: "GPT 5.5 Image", capabilities: ["text2img","edit"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
+    // gpt-5.5-image removed alongside gpt-5.5 (dead on the backend).
     // gpt-5.4-image 随 gpt-5.4 一并移除（后端同样已下线）。
-    { id: "gpt-5.3-image", name: "GPT 5.3 Image", capabilities: ["text2img","edit"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
+
   ],
   serviceKinds: ["llm","image"],
   oauth: {

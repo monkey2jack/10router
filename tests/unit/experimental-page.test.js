@@ -27,11 +27,10 @@ const SIDEBAR = "src/shared/components/Sidebar.js";
 const HEADER = "src/shared/components/Header.js";
 const NEW_DESCRIPTION = "Beta toggles for provider tools, daily check-ins, and dashboard security";
 
-// The four beta toggles that left Settings, with the settings key each one writes.
+// The three beta toggles that left Settings, with the settings key each one writes.
 const MOVED_TOGGLES = [
   ["OAuth import / export", "codeBuddyOAuthImport"],
   ["Qoder auto daily credit claim", "qoderCheckin"],
-  ["CodeBuddy daily active session", "codeBuddyIntlSession"],
   ["CodeBuddy CN auto daily check-in", "codeBuddyCheckin"],
 ];
 

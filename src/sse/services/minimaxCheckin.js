@@ -99,14 +99,22 @@ export function isEligibleMinimaxConnection(conn) {
   return typeof token === "string" && token.trim().length > 0;
 }
 
-// Signed request pair for the signin endpoints (same signing scheme as the
+// Signed request for the signin endpoints (same signing scheme as the
 // membership probe in usage/minimax-code.js — signedAccountRequest builds the
-// full URL + headers; the signin paths need no body).
-function signinRequest(provider, accessToken, path) {
-  const site = provider === "minimax-code-global"
+// full URL + headers). signedAccountRequest picks the verb from `body`:
+// undefined → GET, anything else → POST. The two endpoints differ and the
+// wrong verb is a bare 404, not a signature error:
+//   signin/status → GET only  (POST = 404 "Not Found")
+//   signin/claim  → POST only (GET  = 404 "Not Found")
+function signinRequest(conn, path, body) {
+  const site = conn.provider === "minimax-code-global"
     ? { agent: "https://agent.minimax.io", lang: "en" }
     : { agent: "https://agent.minimax.cn", lang: "zh" };
-  return signedAccountRequest(site, path, { access: accessToken, body: {} });
+  return signedAccountRequest(site, path, {
+    access: conn.accessToken,
+    userID: conn.providerSpecificData?.realUserID,
+    body,
+  });
 }
 
 /**
@@ -129,7 +137,7 @@ export async function checkinOneMinimax(conn, deps = {}) {
 
   try {
     // 1. Status
-    const { url: statusUrl, init: statusInit } = signinRequest(conn.provider, token, "/minimax-cloud/api/v1/signin/status");
+    const { url: statusUrl, init: statusInit } = signinRequest(conn, "/minimax-cloud/api/v1/signin/status");
     const statusRes = await fetchFn(statusUrl, {
       ...statusInit,
       signal: AbortSignal.timeout(15000),
@@ -158,7 +166,7 @@ export async function checkinOneMinimax(conn, deps = {}) {
     }
 
     // 2. Claim
-    const { url: claimUrl, init: claimInit } = signinRequest(conn.provider, token, "/minimax-cloud/api/v1/signin/claim");
+    const { url: claimUrl, init: claimInit } = signinRequest(conn, "/minimax-cloud/api/v1/signin/claim", {});
     const claimRes = await fetchFn(claimUrl, {
       ...claimInit,
       signal: AbortSignal.timeout(15000),

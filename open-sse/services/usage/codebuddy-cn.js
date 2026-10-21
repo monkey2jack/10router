@@ -142,6 +142,7 @@ async function getCodeBuddyUsage(providerId, accessToken, apiKey, providerSpecif
         // Recurring allowance: the CycleEndTime is the next refresh, not the
         // final expiry. The UI must show "Resets in", not "Expires in".
         recurring: true,
+        giftPack: true,
       };
     });
     // Bonus packs: use the lifetime Capacity balance; resetAt is the expiry.
@@ -158,10 +159,21 @@ async function getCodeBuddyUsage(providerId, accessToken, apiKey, providerSpecif
       };
     });
 
+    // Detect if account has checked in today based on any package having CycleStartTime today
+    const nowMs = Date.now();
+    const todayCheckedIn = accounts.some((acc) => {
+      const start = Number(acc.CycleStartTime);
+      if (!start) return false;
+      const startMs = start < 1e12 ? start * 1000 : start;
+      const d = new Date(startMs);
+      const n = new Date(nowMs);
+      return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
+    });
+
     const basePkg = refills[0] || accounts[0] || {};
     const plan = basePkg.PackageName || basePkg.SubProductName || "CodeBuddy";
 
-    return { plan, quotas };
+    return { plan, quotas, checkinToday: todayCheckedIn };
   } catch (error) {
     return { message: `CodeBuddy (${providerId}) error: ${error.message}` };
   }

@@ -7,21 +7,33 @@ import ChangelogModal from "./ChangelogModal";
 import { ConfirmModal } from "./Modal";
 import { translate } from "@/i18n/runtime";
 
-function MenuItem({ icon, label, onClick, trailing, danger }) {
-  return (
-    <button
-      onClick={onClick}
-      className={`flex items-center gap-3 w-full px-4 py-2.5 text-sm transition-colors ${
-        danger
-          ? "text-red-500 hover:bg-red-500/10"
-          : "text-text-main hover:bg-black/5 dark:hover:bg-white/5"
-      }`}
-    >
+function MenuItem({ icon, label, onClick, href, trailing, danger }) {
+  const className = `flex items-center gap-3 w-full px-4 py-2.5 text-sm transition-colors ${
+    danger
+      ? "text-red-500 hover:bg-red-500/10"
+      : "text-text-main hover:bg-black/5 dark:hover:bg-white/5"
+  }`;
+  const inner = (
+    <>
       <span className={`material-symbols-outlined text-[20px] ${danger ? "" : "text-text-muted"}`}>
         {icon}
       </span>
       <span className="flex-1 text-left">{label}</span>
       {trailing && <span className="text-base">{trailing}</span>}
+    </>
+  );
+  // External entries are anchors, not buttons: middle-click / copy-link work,
+  // and the desktop shell (fnOS webview) still treats them as normal links.
+  if (href) {
+    return (
+      <a href={href} target="_blank" rel="noopener noreferrer" className={className} onClick={onClick}>
+        {inner}
+      </a>
+    );
+  }
+  return (
+    <button onClick={onClick} className={className}>
+      {inner}
     </button>
   );
 }
@@ -29,7 +41,8 @@ function MenuItem({ icon, label, onClick, trailing, danger }) {
 MenuItem.propTypes = {
   icon: PropTypes.string.isRequired,
   label: PropTypes.string.isRequired,
-  onClick: PropTypes.func.isRequired,
+  onClick: PropTypes.func,
+  href: PropTypes.string,
   trailing: PropTypes.node,
   danger: PropTypes.bool,
 };

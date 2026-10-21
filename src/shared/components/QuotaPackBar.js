@@ -13,6 +13,7 @@ import {
   isResettingRow,
   groupRowsByFamily,
   isStoredValueRow,
+  joinsPackPool,
   meterTone,
   splitFamilyWindow,
   nameWithoutUnit,
@@ -130,6 +131,9 @@ function QuotaRow({ row, label = null, inset = false }) {
   if (stored) {
     const unit = quotaUnitOf(row.name);
     const hasBalance = remaining > 0;
+    // Read-only daily check-in state pushed with the row (#77) — sits right
+    // after the balance number, mirroring the connection-card badge position.
+    const checkin = row.checkinToday === true;
     return (
       <div className="min-w-0 space-y-1">
         <div className="flex min-w-0 items-baseline justify-between gap-2 tabular-nums">
@@ -137,6 +141,17 @@ function QuotaRow({ row, label = null, inset = false }) {
             <CreditIcon className="size-[11px] shrink-0 self-center text-text-muted" />
             <b className={cn("text-[12px] font-bold", hasBalance ? "text-text" : TONE_TEXT.critical)}>{fmt(remaining)}</b>
             {unit ? <span className="text-[10px] text-text-muted">（{unit}）</span> : null}
+            {checkin && (
+              <span className="ml-1 inline-flex shrink-0 items-center gap-0.5 rounded bg-green-500/10 px-1 py-px text-[10px] font-medium text-green-600 dark:text-green-400" style={{ transform: "translateY(-1px)" }}>
+                <span className="material-symbols-outlined text-[11px]">check_circle</span>
+                {translate("Checked in today")}
+                {Number.isInteger(row.streakDays) && row.streakDays > 1 && (
+                  <span className="text-text-muted">
+                    {" · "}{translate("{count}-day streak").replace("{count}", String(row.streakDays))}
+                  </span>
+                )}
+              </span>
+            )}
           </span>
           <span className="shrink-0 text-[11px] text-text-muted">
             {translateQuotaName(nameWithoutUnit(row.name) || row.name)}
@@ -335,9 +350,12 @@ export default function QuotaPackBar({ packs = [], className, nestedCycle = fals
   // family; singletons are stored-value pools (余额/代金券) → their own rows.
   // Qoder-style 合集行「资源包」已在上游包含全部赠送包：存在时排除赠送包
   // 家族行，防止资源包 Credits 与赠送包被重复计数（用户实测重复）。
+  // joinsPackPool, not a bare !isRecurringQuotaRow: a pushed stored-value
+  // balance can arrive marked recurring (minimax-free's daily refill) and is
+  // still a settled pool — excluding it here blanked the whole card.
   const hasCollectionRow = withNums.some((p) => String(p.name || "") === "资源包");
   const nonRecurring = withNums
-    .filter((p) => !isRecurringQuotaRow(p))
+    .filter((p) => joinsPackPool(p))
     .filter((p) => !(hasCollectionRow && String(p.name || "").startsWith("赠送包")));
   const groups = new Map();
   for (const p of nonRecurring) {
@@ -501,6 +519,17 @@ export default function QuotaPackBar({ packs = [], className, nestedCycle = fals
             {poolUnit ? (
               <span className="text-[10px] leading-none text-text-muted">（{poolUnit}）</span>
             ) : null}
+            {pool[0]?.checkinToday && (
+              <span className="ml-1 inline-flex shrink-0 items-center gap-0.5 rounded bg-green-500/10 px-1 py-px text-[10px] font-medium text-green-600 dark:text-green-400" style={{ transform: "translateY(-1px)" }}>
+                <span className="material-symbols-outlined text-[11px]">check_circle</span>
+                {translate("Checked in today")}
+                {Number.isInteger(pool[0].streakDays) && pool[0].streakDays > 1 && (
+                  <span className="text-text-muted">
+                    {" · "}{translate("{count}-day streak").replace("{count}", String(pool[0].streakDays))}
+                  </span>
+                )}
+              </span>
+            )}
           </span>
           {/* A settled balance has no denominator worth printing — `14.95 / 14.95`
               just reprinted the big number beside it. Everything else keeps it:

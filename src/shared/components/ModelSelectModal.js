@@ -180,8 +180,11 @@ export default function ModelSelectModal({
 
     // Kinds where the provider IS the model (no per-model selection needed)
     const PROVIDER_AS_MODEL_KINDS = new Set(["webSearch", "webFetch"]);
-    // Kinds that map directly to model.type field
-    const TYPED_KINDS = new Set(["image", "tts", "stt", "embedding", "imageToText"]);
+    // Kinds that map directly to model.type field. "systemone" (decision
+    // models) joins it for the combo `router` strategy picker (issue #73):
+    // the decision model is a per-combo config, never a chat member, so the
+    // picker must list exactly the kind:"systemone" rows.
+    const TYPED_KINDS = new Set(["image", "tts", "stt", "embedding", "imageToText", "systemone"]);
     // For these kinds, providers without hardcoded models can still be picked (provider-as-model fallback)
     const ALLOW_PROVIDER_FALLBACK_KINDS = new Set(["tts", "image", "webFetch"]);
 

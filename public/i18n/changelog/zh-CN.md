@@ -2,6 +2,40 @@
 
 这里展示面向用户的关键更新；完整开发明细见 [CHANGELOG.md](https://github.com/techysy/10router/blob/main/CHANGELOG.md)。
 
+## v1.6.0 (2026-10-21)
+
+### ✨ 新增
+
+- **上游 9router v0.5.95 → v0.5.104 择优移植**：Gemini 4 Argon 三线收录；antigravity 支持 Claude Sonnet/Opus 5.5（家族共享配额路由）；antigravity 目录刷新（默认 3.8-flash-medium、IDE 指纹 2.22.0）；Codex GPT-6.1 Sol 与 Responses Lite 传输；gpt-5.5 系下线；现役 Claude 全系补 PDF 输入。
+- **Inception Labs 供应商**：Mercury 扩散模型（~1000 tok/s），mercury-3 launch 半价 $0.10/$0.35，新 key 送 1 亿 tokens；配额经 CreditDaddy 通用卡推送。
+- **组合 router 策略**：固定顺序/轮询不看谁更擅长当前任务；Router 分析 prompt 动态挑最擅长的成员回答（仅一次额外调用，兼顾能力与速度）；失败/超时 8s 内退回原顺序。
+- **Trae 国内站（trae.cn）登录**：站点选择 + 回调自证 + 裸 token 探测；国内/国际账号不互通，拿错端有明确提示。
+- **MiniMax 免费线回归 + 订阅线每日自动签到**；M3.1 Flash 正式 id 全线对齐。
+- **头部公告系统**：免费模型活动、关键变更实时推送（GitHub raw → Gitee 镜像 → 本地缓存三级兜底）。
+- **API Key 权限勾选器**：可调用模型/组合白名单改勾选式。
+- **MiniMax Code 卡面「今日已签」徽章**：CreditDaddy 推送签到状态即展示连签天数。
+- **到期优先调度防透支**：赠送类配额包耗尽后不再霸占「最早到期」位置，多账号不再齐指同一重置点；Round-Robin 在到期优先开启时自动置灰（到期优先接管轮询），配套轮询/配额包逻辑的用户文档。
+- **额度页刷新间隔可配置**：默认 5 分钟，可选 1m/5m/15m/30m/1h，不再强制 60s 轮询；Auto-Ping 升级三模式（关闭 / 重置即 ping / 固定钟点表），供应商页与额度页同一入口。
+- **CodeBuddy 双线「已签到/活跃」徽章本地判定**（看最新配额包周期起点，不依赖外部推送）；**Qoder 卡面 CD Sync / Native 双入口徽章**。
+
+### 🐛 修复
+
+- **MITM bypass 建连超时键错误**：请求被 1ms 计时器秒杀后回落可被劫持的直连（PR #76 收尾）。
+- **Trae SOLO 网关并发跨站串用**：token 不再打到错误站点。
+- **MiniMax 签到状态查询 404**：status 端点误发 POST，改 GET 后签到恢复。
+- **节点健康度误伤极速模型**：延迟轴改用首字延迟（TTFT），长输出快模型不再被总时长压分。
+- **CodeBuddy 国际站「每日活跃会话」下线**（上游已撤销活动，白付请求）；**CodeBuddy CN 消息数守卫放宽至 5000**。
+- **Alibaba Token Plan 补国内版**，四张阿里卡标明 Intl/CN；**Qoder 限免行**显示可读截止时间；**API 密钥校验提示**走翻译。
+- **配额包循环算法失效导致账号透支（T0）**：周期性赠送包耗尽后劫持到期排序、relay 环全体判红死锁单号的问题已修复，附完整故障报告。
+- **River AI 连接测试误报「不支持测试」（Issue #80）**：并入 OpenAI 兼容校验，点测试不再假失败。
+- **供应商详情页偶发整页打不开**：到期优先灰化 Round-Robin 的一处样式工具函数漏了引用，页面一渲染即崩；已修复并补进浏览器级验证。
+- **腾讯 WorkBuddy 400 风控**：自动清洗 DeepSeek Harness 敏感标识，CodeBuddy 通道不再被误拦。
+
+### 🎨 界面
+
+- 侧边栏字号恢复 14px，新增社区分区（飞书/Discord/Telegram/GitHub）；完整更新日志改为弹窗内打开（修飞牛壳打不开新标签页）；捐赠弹窗重做（爱发电 + 三张矢量收款码 + Star 按钮）；头部公告入口带未读红点。
+
+
 ## v1.5.1 (2026-10-18)
 
 ### ✨ 新增

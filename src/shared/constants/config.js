@@ -11,6 +11,12 @@ export const APP_CONFIG = {
 export const GITHUB_CONFIG = {
   repoUrl: "https://github.com/techysy/10router",
   donateUrl: "https://raw.githubusercontent.com/techysy/10router/refs/heads/main/donate.json",
+  // Live announcement feed (repo-root announcements.json), same trust shape as
+  // donateUrl: read straight from `main` by every installed client, so posting
+  // an entry is a push, not a release. Gitee raw as fallback for regions where
+  // raw.githubusercontent.com is unreachable.
+  announcementsUrl: "https://raw.githubusercontent.com/techysy/10router/refs/heads/main/announcements.json",
+  announcementsUrlFallback: "https://gitee.com/techysy/10router/raw/main/announcements.json",
   // Per-locale changelog markdown (public/i18n/changelog/<locale>.md) fetched
   // live from the repo, with Gitee as a fallback mirror. See ChangelogModal.
   // NOTE: these are read from `main` by every installed client, so a release
@@ -96,8 +102,8 @@ export const QUOTA_AUTOPING_CONFIG = {
       resetAtDriftMs: 30000,
       minPingIntervalMs: 600000,
       skipWhenBlockingQuotaExhausted: true,
-      // Free and Plus Codex accounts both expose gpt-5.5; avoid fallback probes that waste requests.
-      pingModel: "gpt-5.5",
+      // gpt-5.6-terra is the lightweight model for auto-pinging Codex 5h reset window.
+      pingModel: "gpt-5.6-terra",
       pingText: "hi",
       pingInstructions: "Reply with OK.",
       pingReasoningEffort: "none",

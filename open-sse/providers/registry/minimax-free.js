@@ -32,7 +32,9 @@ export default {
     noAuth: true,
   },
   models: [
-    { id: "MiniMax-M3.1-Flash-Preview", name: "MiniMax M3.1 Flash Preview" },
+    // 正式 id 优先，-Preview 保留一个周期（与订阅双线同口径，issue #70/#75）
+    { id: "MiniMax-M3.1-Flash", name: "MiniMax M3.1 Flash" },
+    { id: "MiniMax-M3.1-Flash-Preview", name: "MiniMax M3.1 Flash (Preview)" },
     { id: "MiniMax-M3", name: "MiniMax M3" },
     { id: "MiniMax-M2.7-highspeed", name: "MiniMax M2.7 Highspeed" },
     { id: "MiniMax-M2.7", name: "MiniMax M2.7" },

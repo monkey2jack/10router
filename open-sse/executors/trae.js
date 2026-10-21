@@ -129,7 +129,7 @@ export default class TraeExecutor extends BaseExecutor {
       auto_create_project: false,
       origin: "web",
     };
-    const res = await proxyAwareFetch(`${this._base}/chat_sessions`, {
+    const res = await proxyAwareFetch(`${this.base(psd)}/chat_sessions`, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
@@ -144,8 +144,8 @@ export default class TraeExecutor extends BaseExecutor {
 
   // GET /events SSE → invoke onEvent(eventType, dataObj) per frame.
   // Resolves when `done`/`error` arrives, the stream ends, or timeout fires.
-  async streamEvents(headers, sessionId, replyTo, onEvent, signal) {
-    const url = `${this._base}/chat_sessions/${sessionId}/events?reply_to_message_id=${encodeURIComponent(replyTo)}`;
+  async streamEvents(base, headers, sessionId, replyTo, onEvent, signal) {
+    const url = `${base}/chat_sessions/${sessionId}/events?reply_to_message_id=${encodeURIComponent(replyTo)}`;
     const ctrl = new AbortController();
     if (signal?.aborted) ctrl.abort();
     const timer = setTimeout(() => ctrl.abort(new Error("trae stream timeout")), STREAM_TIMEOUT_MS);
@@ -187,8 +187,9 @@ export default class TraeExecutor extends BaseExecutor {
   async execute({ model, body, stream, credentials, signal }) {
     const headers = this.buildHeaders(credentials, stream !== false);
     const psd = credentials?.providerSpecificData || {};
-    // 站点固定的 SOLO 网关，createSession / streamEvents 都读它。
-    this._base = this.base(psd);
+    // 站点固定的 SOLO 网关。按请求取局部值——执行器是全局单例，存实例字段
+    // 会让并发的国内站 / 国际站请求互相覆盖，token 打到错的一端。
+    const base = this.base(psd);
     const query = flattenQuery(body?.messages || []);
     const responseId = `chatcmpl-trae-${Date.now()}`;
     const created = Math.floor(Date.now() / 1000);
@@ -202,7 +203,7 @@ export default class TraeExecutor extends BaseExecutor {
     try {
       session = await this.createSession(headers, query, model, psd, signal);
     } catch (err) {
-      return { response: errResponse(502, err?.message ? String(err.message) : String(err)), url: this._base, headers, transformedBody: body };
+      return { response: errResponse(502, err?.message ? String(err.message) : String(err)), url: base, headers, transformedBody: body };
     }
 
     // Shared per-turn state: plan_item thoughts (cumulative, longest wins).
@@ -236,7 +237,7 @@ export default class TraeExecutor extends BaseExecutor {
             choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
           });
           try {
-            await this.streamEvents(headers, session.sessionId, session.messageId, (ev, data) => {
+            await this.streamEvents(base, headers, session.sessionId, session.messageId, (ev, data) => {
               if (ev === "error") { errorEvent = data; return true; }
               if (ev === "token_usage") usage = data;
               if (ev === "plan_item") {
@@ -301,7 +302,7 @@ export default class TraeExecutor extends BaseExecutor {
             "Connection": "keep-alive",
           },
         }),
-        url: this._base,
+        url: base,
         headers,
         transformedBody: body,
       };
@@ -309,17 +310,17 @@ export default class TraeExecutor extends BaseExecutor {
 
     // Non-streaming: drive to completion, return chat.completion JSON.
     try {
-      await this.streamEvents(headers, session.sessionId, session.messageId, (ev, data) => {
+      await this.streamEvents(base, headers, session.sessionId, session.messageId, (ev, data) => {
         if (ev === "error") { errorEvent = data; return true; }
         if (ev === "token_usage") usage = data;
         if (ev === "plan_item") renderNewText(data);
         return ev === "done";
       }, signal);
     } catch (err) {
-      return { response: errResponse(502, err?.message ? String(err.message) : String(err)), url: this._base, headers, transformedBody: body };
+      return { response: errResponse(502, err?.message ? String(err.message) : String(err)), url: base, headers, transformedBody: body };
     }
     if (errorEvent) {
-      return { response: errResponse(502, `trae ${errorEvent.code || ""}: ${errorEvent.message || ""}`), url: this._base, headers, transformedBody: body };
+      return { response: errResponse(502, `trae ${errorEvent.code || ""}: ${errorEvent.message || ""}`), url: base, headers, transformedBody: body };
     }
     const content = order.map((i) => thoughts[i]).join("");
     const out = {
@@ -338,7 +339,7 @@ export default class TraeExecutor extends BaseExecutor {
     }
     return {
       response: new Response(JSON.stringify(out), { status: 200, headers: { "Content-Type": "application/json" } }),
-      url: this._base,
+      url: base,
       headers,
       transformedBody: body,
     };

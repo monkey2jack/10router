@@ -9,6 +9,7 @@ import HeaderMenu from "@/shared/components/HeaderMenu";
 import HeaderLanguage from "@/shared/components/HeaderLanguage";
 import ThemeToggle from "@/shared/components/ThemeToggle";
 import DonateModal from "@/shared/components/DonateModal";
+import AnnouncementsModal, { useUnreadAnnouncements } from "@/shared/components/AnnouncementsModal";
 import { useHeaderSearchStore } from "@/store/headerSearchStore";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS } from "@/shared/constants/config";
 import { MEDIA_PROVIDER_KINDS, AI_PROVIDERS } from "@/shared/constants/providers";
@@ -191,6 +192,8 @@ export default function Header({ onMenuClick, onDesktopMenuClick, showMenuButton
   const [displayName, setDisplayName] = useState("");
   const [loginMethod, setLoginMethod] = useState("");
   const [donateOpen, setDonateOpen] = useState(false);
+  const [announcementsOpen, setAnnouncementsOpen] = useState(false);
+  const unreadAnnouncements = useUnreadAnnouncements();
 
   // Memoize page info to prevent unnecessary recalculations
   const pageInfo = useMemo(() => getPageInfo(pathname), [pathname]);
@@ -343,6 +346,20 @@ export default function Header({ onMenuClick, onDesktopMenuClick, showMenuButton
         )}
         <HeaderSearch />
         <button
+          onClick={() => setAnnouncementsOpen(true)}
+          className="relative flex items-center gap-1.5 px-3 h-8 rounded-lg border border-black/10 dark:border-white/10 text-text-muted hover:text-text-main hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-sm font-medium"
+          aria-label={translate("Announcements")}
+          title={translate("Announcements")}
+        >
+          <span className="material-symbols-outlined text-[18px]">campaign</span>
+          <span className="hidden sm:inline">{translate("Announcements")}</span>
+          {unreadAnnouncements > 0 && (
+            <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-red-500 text-white text-[10px] font-semibold leading-4 text-center">
+              {unreadAnnouncements > 9 ? "9+" : unreadAnnouncements}
+            </span>
+          )}
+        </button>
+        <button
           onClick={() => setDonateOpen(true)}
           className="flex items-center gap-1.5 px-3 h-8 rounded-lg border border-pink-500/30 bg-pink-500/10 text-pink-600 dark:text-pink-400 hover:bg-pink-500/20 transition-colors text-sm font-medium"
           aria-label="Donate"
@@ -355,6 +372,7 @@ export default function Header({ onMenuClick, onDesktopMenuClick, showMenuButton
         <HeaderMenu onLogout={handleLogout} />
       </div>
       <DonateModal isOpen={donateOpen} onClose={() => setDonateOpen(false)} />
+      <AnnouncementsModal isOpen={announcementsOpen} onClose={() => setAnnouncementsOpen(false)} />
     </header>
   );
 }

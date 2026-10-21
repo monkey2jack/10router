@@ -75,6 +75,12 @@ export default function ChangelogModal({ isOpen, onClose }) {
   const [html, setHtml] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  // "Full CHANGELOG.md" opens INSIDE this modal. The desktop shell (fnOS
+  // webview) cannot open target=_blank tabs, so the link used to do nothing
+  // there; loading the raw file in place works everywhere.
+  const [fullHtml, setFullHtml] = useState("");
+  const [fullLoading, setFullLoading] = useState(false);
+  const [fullError, setFullError] = useState("");
   const modalRef = useRef(null);
 
   useEffect(() => {
@@ -125,9 +131,36 @@ export default function ChangelogModal({ isOpen, onClose }) {
     if (isOpen && html) setHtml("");
   }, [currentLocale]);
 
+  const openFullChangelog = (e) => {
+    e.preventDefault();
+    setFullLoading(true);
+    setFullError("");
+    const urls = [
+      `${GITHUB_CONFIG.changelogUrlBase.replace(/changelog\/$/, "")}CHANGELOG.md`,
+      `${GITHUB_CONFIG.changelogUrlFallbackBase.replace(/changelog\/$/, "")}CHANGELOG.md`,
+      "https://raw.githubusercontent.com/techysy/10router/refs/heads/main/CHANGELOG.md",
+      "https://gitee.com/techysy/10router/raw/main/CHANGELOG.md",
+    ];
+    fetchChangelog(urls)
+      .then((md) => loadMarked().then((marked) => setFullHtml(marked.parse(md))))
+      .catch((err) => setFullError(err?.message || "Failed to load"))
+      .finally(() => setFullLoading(false));
+  };
+
+  // Delegated click handler for the rendered markdown: only the CHANGELOG.md
+  // link is intercepted, every other link keeps its normal behaviour.
+  const handleBodyClick = (e) => {
+    const a = e.target?.closest?.("a");
+    if (!a) return;
+    if (!/CHANGELOG\.md(\?|#|$)/.test(a.getAttribute("href") || "")) return;
+    openFullChangelog(e);
+  };
+
   useEffect(() => {
     const handleClickOutside = (e) => {
       if (modalRef.current && !modalRef.current.contains(e.target)) {
+        setFullHtml("");
+        setFullError("");
         onClose();
       }
     };
@@ -139,12 +172,20 @@ export default function ChangelogModal({ isOpen, onClose }) {
 
   if (!isOpen || typeof document === "undefined") return null;
 
+  // Reset the in-app full view on close so the next open starts at the
+  // release notes, not on the 5000-line CHANGELOG.
+  const handleClose = () => {
+    setFullHtml("");
+    setFullError("");
+    onClose();
+  };
+
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       {/* Overlay */}
       <div
         className="absolute inset-0 bg-black/30 backdrop-blur-sm"
-        onClick={onClose}
+        onClick={handleClose}
       />
 
       {/* Modal content */}
@@ -154,9 +195,23 @@ export default function ChangelogModal({ isOpen, onClose }) {
       >
         {/* Header */}
         <div className="flex items-center justify-between p-3 border-b border-black/5 dark:border-white/5">
-          <h2 className="text-lg font-semibold text-text-main">{translate("Change Log")}</h2>
+          <div className="flex min-w-0 items-center gap-2">
+            {fullHtml && (
+              <button
+                onClick={() => setFullHtml("")}
+                className="p-1.5 rounded-lg text-text-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                aria-label={translate("Back")}
+                title={translate("Back")}
+              >
+                <span className="material-symbols-outlined text-[20px]">arrow_back</span>
+              </button>
+            )}
+            <h2 className="truncate text-lg font-semibold text-text-main">
+              {fullHtml ? "CHANGELOG.md" : translate("Change Log")}
+            </h2>
+          </div>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="p-1.5 rounded-lg text-text-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
             aria-label={translate("Close")}
           >
@@ -175,11 +230,24 @@ export default function ChangelogModal({ isOpen, onClose }) {
           {error && (
             <div className="text-red-500 py-4">{translate("Failed to load changelog: ")}{error}</div>
           )}
-          {!loading && !error && html && (
+          {!loading && !error && html && !fullHtml && (
             <div
               className="changelog-body text-text-main"
+              onClick={handleBodyClick}
               dangerouslySetInnerHTML={{ __html: html }}
             />
+          )}
+          {fullLoading && (
+            <div className="flex items-center justify-center py-10 text-text-muted">
+              <span className="material-symbols-outlined animate-spin mr-2">progress_activity</span>
+              {translate("Loading...")}
+            </div>
+          )}
+          {fullError && (
+            <div className="text-red-500 py-4">{translate("Failed to load changelog: ")}{fullError}</div>
+          )}
+          {!fullLoading && !fullError && fullHtml && (
+            <div className="changelog-body text-text-main" dangerouslySetInnerHTML={{ __html: fullHtml }} />
           )}
         </div>
       </div>

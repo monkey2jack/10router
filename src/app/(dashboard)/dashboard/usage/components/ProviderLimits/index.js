@@ -50,6 +50,9 @@ import {
   CLAUDE_REFRESH_INTERVAL_MS,
   DEPLETED_QUOTA_THRESHOLD,
   AUTO_REFRESH_STORAGE_KEY,
+  AUTO_REFRESH_INTERVAL_KEY,
+  DEFAULT_REFRESH_INTERVAL_MS,
+  REFRESH_INTERVAL_OPTIONS,
   CONNECTIONS_PAGE_SIZE,
   ACCOUNT_PAGE_SIZE_OPTIONS,
   ACCOUNT_PAGE_SIZE_MAX,
@@ -59,6 +62,8 @@ import {
 import Card from "@/shared/components/Card";
 import { translate } from "@/i18n/runtime";
 import { ConfirmModal, EditConnectionModal, Modal } from "@/shared/components";
+import AutoPingScheduleModal from "@/app/(dashboard)/dashboard/providers/[id]/AutoPingScheduleModal";
+import { getScheduleSlotLabels } from "@/shared/services/quotaPingSchedule";
 import { USAGE_SUPPORTED_PROVIDERS, getProviderWebsite } from "@/shared/constants/providers";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 
@@ -198,11 +203,13 @@ export default function ProviderLimits() {
   const [loading, setLoading] = useState({});
   const [errors, setErrors] = useState({});
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const [autoPingMaps, setAutoPingMaps] = useState({ claude: {}, codex: {} });
+  const [refreshIntervalMs, setRefreshIntervalMs] = useState(DEFAULT_REFRESH_INTERVAL_MS);
+  const [autoPingConfigs, setAutoPingConfigs] = useState({ claude: {}, codex: {} });
+  const [scheduleConnection, setScheduleConnection] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [hasHydratedAutoRefresh, setHasHydratedAutoRefresh] = useState(false);
   const [refreshingAll, setRefreshingAll] = useState(false);
-  const [countdown, setCountdown] = useState(60);
+  const [countdown, setCountdown] = useState(Math.floor(DEFAULT_REFRESH_INTERVAL_MS / 1000));
   const [connectionsLoading, setConnectionsLoading] = useState(true);
   const [deletingId, setDeletingId] = useState(null);
   const [togglingId, setTogglingId] = useState(null);
@@ -860,50 +867,75 @@ export default function ProviderLimits() {
     if (typeof window === "undefined") return;
     const stored = window.localStorage.getItem(AUTO_REFRESH_STORAGE_KEY);
     setAutoRefresh(stored === null ? true : stored === "true");
+
+    const storedInterval = Number(window.localStorage.getItem(AUTO_REFRESH_INTERVAL_KEY));
+    if (Number.isFinite(storedInterval) && storedInterval > 0) {
+      setRefreshIntervalMs(storedInterval);
+      setCountdown(Math.floor(storedInterval / 1000));
+    }
     setHasHydratedAutoRefresh(true);
   }, []);
 
-  // Persist auto-refresh preference
+  // Persist auto-refresh preference and interval
   useEffect(() => {
     if (typeof window === "undefined" || !hasHydratedAutoRefresh) return;
     window.localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, String(autoRefresh));
-  }, [autoRefresh, hasHydratedAutoRefresh]);
+    window.localStorage.setItem(AUTO_REFRESH_INTERVAL_KEY, String(refreshIntervalMs));
+  }, [autoRefresh, refreshIntervalMs, hasHydratedAutoRefresh]);
 
-  // Load auto-ping per-connection maps
+  const handleChangeRefreshInterval = useCallback((newMs) => {
+    setRefreshIntervalMs(newMs);
+    setCountdown(Math.floor(newMs / 1000));
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(AUTO_REFRESH_INTERVAL_KEY, String(newMs));
+    }
+  }, []);
+
+  // Load auto-ping per-connection configs
   useEffect(() => {
     fetch("/api/settings", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : {}))
       .then((s) => {
-        setAutoPingMaps({
-          claude: s?.claudeAutoPing?.connections || {},
-          codex: s?.codexAutoPing?.connections || {},
+        setAutoPingConfigs({
+          claude: s?.claudeAutoPing || {},
+          codex: s?.codexAutoPing || {},
         });
         setQuotaVisibility(s?.quotaVisibility || {});
       })
       .catch(() => {});
   }, []);
 
-  const toggleAutoPing = useCallback(async (connectionId, provider, on) => {
+  const handleSaveAutoPing = useCallback(async (connectionId, provider, { reactive, schedule }) => {
     const settingsKey = AUTO_PING_SETTINGS_KEYS[provider];
     if (!settingsKey) return;
 
-    const previous = autoPingMaps;
-    const nextProviderMap = { ...(autoPingMaps[provider] || {}), [connectionId]: on };
-    const nextMaps = { ...autoPingMaps, [provider]: nextProviderMap };
-    setAutoPingMaps(nextMaps);
+    const previous = autoPingConfigs;
+    const prevCfg = autoPingConfigs[provider] || {};
+    const nextProviderCfg = {
+      ...prevCfg,
+      connections: { ...(prevCfg.connections || {}), [connectionId]: reactive },
+      schedules: { ...(prevCfg.schedules || {}), [connectionId]: schedule },
+    };
+    const nextConfigs = { ...autoPingConfigs, [provider]: nextProviderCfg };
+    setAutoPingConfigs(nextConfigs);
+
     try {
       const r = await fetch("/api/settings", { cache: "no-store" });
       const s = r.ok ? await r.json() : {};
-      const cfg = { ...(s[settingsKey] || {}), connections: nextProviderMap };
+      const fullCfg = {
+        ...(s[settingsKey] || {}),
+        connections: nextProviderCfg.connections,
+        schedules: nextProviderCfg.schedules,
+      };
       await fetch("/api/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [settingsKey]: cfg }),
+        body: JSON.stringify({ [settingsKey]: fullCfg }),
       });
     } catch {
-      setAutoPingMaps(previous);
+      setAutoPingConfigs(previous);
     }
-  }, [autoPingMaps]);
+  }, [autoPingConfigs]);
 
   const updateQuotaVisibility = useCallback(async (nextVisibility, previousVisibility) => {
     setQuotaVisibility(nextVisibility);
@@ -1070,15 +1102,19 @@ export default function ProviderLimits() {
       return;
     }
 
+    const intervalSec = Math.floor(refreshIntervalMs / 1000);
+    setCountdown(intervalSec);
+
     // Main refresh interval
     intervalRef.current = setInterval(() => {
       refreshAll();
-    }, REFRESH_INTERVAL_MS);
+      setCountdown(intervalSec);
+    }, refreshIntervalMs);
 
     // Countdown interval
     countdownRef.current = setInterval(() => {
       setCountdown((prev) => {
-        if (prev <= 1) return 60;
+        if (prev <= 1) return intervalSec;
         return prev - 1;
       });
     }, 1000);
@@ -1087,11 +1123,12 @@ export default function ProviderLimits() {
       if (intervalRef.current) clearInterval(intervalRef.current);
       if (countdownRef.current) clearInterval(countdownRef.current);
     };
-  }, [autoRefresh, refreshAll, hasHydratedAutoRefresh]);
+  }, [autoRefresh, refreshAll, hasHydratedAutoRefresh, refreshIntervalMs]);
 
   // Pause auto-refresh when tab is hidden (Page Visibility API)
   useEffect(() => {
     const handleVisibilityChange = () => {
+      const intervalSec = Math.floor(refreshIntervalMs / 1000);
       if (document.hidden) {
         if (intervalRef.current) {
           clearInterval(intervalRef.current);
@@ -1103,9 +1140,12 @@ export default function ProviderLimits() {
         }
       } else if (autoRefresh && hasHydratedAutoRefresh) {
         // Resume auto-refresh when tab becomes visible
-        intervalRef.current = setInterval(() => refreshAll(), REFRESH_INTERVAL_MS);
+        intervalRef.current = setInterval(() => {
+          refreshAll();
+          setCountdown(intervalSec);
+        }, refreshIntervalMs);
         countdownRef.current = setInterval(() => {
-          setCountdown((prev) => (prev <= 1 ? 60 : prev - 1));
+          setCountdown((prev) => (prev <= 1 ? intervalSec : prev - 1));
         }, 1000);
       }
     };
@@ -1114,7 +1154,7 @@ export default function ProviderLimits() {
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [autoRefresh, refreshAll, hasHydratedAutoRefresh]);
+  }, [autoRefresh, refreshAll, hasHydratedAutoRefresh, refreshIntervalMs]);
 
   const sortedConnections = useMemo(
     () =>
@@ -1301,6 +1341,8 @@ export default function ProviderLimits() {
         autoRefresh={autoRefresh}
         onToggleAutoRefresh={() => setAutoRefresh((prev) => !prev)}
         countdown={countdown}
+        refreshIntervalMs={refreshIntervalMs}
+        onChangeRefreshInterval={handleChangeRefreshInterval}
         refreshingAll={refreshingAll}
         onRefreshAll={() =>
           trackerView === "windows" ? setWindowsRefreshKey((k) => k + 1) : refreshAll(true)
@@ -1358,6 +1400,13 @@ export default function ProviderLimits() {
           // Subscription cards already show every row; the toggle only appears
           // when the card collapsed something (packs summed into the headline).
           const showDetails = needsPerPackDetails(visibleQuotas);
+          // Read-only daily check-in state pushed on a quota row (#77,
+          // CreditDaddy#33 方案 B). Card-level: one signed-in row lights the
+          // badge. false and absent both stay dark — absent means the pusher
+          // could not check, not that the account skipped today.
+          // Stored-value rows render the badge inside QuotaPackBar (beside the
+          // number, minimax-code style) — only badge here when no row does.
+          const checkinRow = rawQuotas.find((q) => q?.checkinToday === true && q?.isCreditBalance !== true);
           // 逐包明细展开 = 原始数据（用户拍板：不筛选不改序）；顶部块的分段
           // 条/剩余总额由 QuotaPackBar 内部聚合（月度并入，作为以重置日为
           // 到期日的资源包）。
@@ -1423,6 +1472,19 @@ export default function ProviderLimits() {
                           {getConnectionSecondaryLabel(conn)}
                         </p>
                       ) : null}
+                      {checkinRow && (
+                        <div className="mt-1 flex flex-wrap items-center gap-1">
+                          <span className="inline-flex items-center gap-0.5 rounded-full bg-green-500/10 px-2 py-0.5 text-[10px] font-semibold text-green-600 dark:text-green-400">
+                            <span className="material-symbols-outlined text-[12px]">check_circle</span>
+                            {translate("Checked in today")}
+                            {Number.isInteger(checkinRow.streakDays) && checkinRow.streakDays > 1 && (
+                              <span className="font-normal">
+                                {" · "}{translate("{count}-day streak").replace("{count}", String(checkinRow.streakDays))}
+                              </span>
+                            )}
+                          </span>
+                        </div>
+                      )}
                       {conn.provider === "kiro" && (
                         <div className="mt-1 flex flex-wrap items-center gap-1">
                           <span className="rounded-full bg-brand-500/10 px-2 py-0.5 text-[10px] font-semibold text-brand-600 dark:text-brand-300">
@@ -1448,6 +1510,18 @@ export default function ProviderLimits() {
                           >
                             {isInactive ? "disabled" : (connState === "needs-reauth" ? translate("Needs re-auth") : connState === "partial" ? "partial" : connState || "unknown")}
                           </span>
+                          {(conn.provider === "qoder" || conn.provider === "qoder-cn") && (
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                                conn.providerSpecificData?.creditDaddyWebSession
+                                  ? "bg-primary/10 text-primary"
+                                  : "bg-surface-2 text-text-muted"
+                              }`}
+                              title={conn.providerSpecificData?.creditDaddyWebSession ? translate("Synced via CreditDaddy web session (issue feedback goes to CreditDaddy)") : translate("Native Qoder authorization")}
+                            >
+                              {conn.providerSpecificData?.creditDaddyWebSession ? "CD Sync" : "Native"}
+                            </span>
+                          )}
                           {conn.providerSpecificData?.profileArn && (
                             <button
                               type="button"
@@ -1514,18 +1588,38 @@ export default function ProviderLimits() {
                         </Tooltip>
                       </>
                     )}
-                    {AUTO_PING_SETTINGS_KEYS[conn.provider] && conn.authType === "oauth" && (
-                      <Tooltip text={AUTO_PING_TOOLTIPS[conn.provider]}>
-                        <button
-                          type="button"
-                          onClick={() => toggleAutoPing(conn.id, conn.provider, !(autoPingMaps[conn.provider]?.[conn.id] === true))}
-                          aria-label="Toggle auto-ping"
-                          className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors hover:bg-black/5 dark:hover:bg-white/5 ${autoPingMaps[conn.provider]?.[conn.id] === true ? "text-primary" : "text-text-muted"}`}
-                        >
-                          <span className="material-symbols-outlined text-[18px]">bolt</span>
-                        </button>
-                      </Tooltip>
-                    )}
+                    {AUTO_PING_SETTINGS_KEYS[conn.provider] && conn.authType === "oauth" && (() => {
+                      const cfg = autoPingConfigs[conn.provider] || {};
+                      const isReactive = cfg.connections?.[conn.id] === true;
+                      const schedule = cfg.schedules?.[conn.id];
+                      const isSchedule = schedule?.enabled === true;
+                      const isActive = isReactive || isSchedule;
+
+                      const activeModes = [];
+                      if (isReactive) activeModes.push("On reset");
+                      if (isSchedule) {
+                        const summary = getScheduleSlotLabels(schedule).join(" / ");
+                        activeModes.push(`Scheduled (${summary || "active"})`);
+                      }
+                      const tooltipText = activeModes.length > 0
+                        ? `Auto-ping active: ${activeModes.join(" + ")}. Click to configure.`
+                        : conn.provider === "codex"
+                          ? "Auto-starts the next 5h Codex window after reset or on schedule. Click to configure."
+                          : "Auto-starts a new window on quota reset or fixed schedule. Click to configure.";
+
+                      return (
+                        <Tooltip text={tooltipText}>
+                          <button
+                            type="button"
+                            onClick={() => setScheduleConnection(conn)}
+                            aria-label="Configure auto-ping"
+                            className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors hover:bg-black/5 dark:hover:bg-white/5 ${isActive ? "text-primary" : "text-text-muted"}`}
+                          >
+                            <span className="material-symbols-outlined text-[18px]">bolt</span>
+                          </button>
+                        </Tooltip>
+                      );
+                    })()}
                     <Tooltip text="Refresh quota">
                       <button
                         type="button"
@@ -2086,6 +2180,17 @@ export default function ProviderLimits() {
           </div>
         </div>
       </Modal>
+
+      {scheduleConnection && (
+        <AutoPingScheduleModal
+          isOpen={!!scheduleConnection}
+          onClose={() => setScheduleConnection(null)}
+          connection={scheduleConnection}
+          reactive={autoPingConfigs[scheduleConnection.provider]?.connections?.[scheduleConnection.id] === true}
+          schedule={autoPingConfigs[scheduleConnection.provider]?.schedules?.[scheduleConnection.id] || null}
+          onSave={(result) => handleSaveAutoPing(scheduleConnection.id, scheduleConnection.provider, result)}
+        />
+      )}
     </div>
   );
 }

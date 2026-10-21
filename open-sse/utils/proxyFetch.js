@@ -269,7 +269,7 @@ async function createBypassRequest(parsedUrl, realIP, options) {
     const connectTimer = setTimeout(() => {
       socket.destroy();
       settle(reject, new Error(`[ProxyFetch] MITM bypass connect timeout after ${MEMORY_CONFIG.directFallbackTimeoutMs}ms`));
-    }, MEMORY_CONFIG.mitmBypassConnectTimeoutMs);
+    }, MEMORY_CONFIG.directFallbackTimeoutMs);
 
     // Honor the caller's AbortSignal — executors pass a merged signal with a
     // connect timeout; without this the raw request never learns about aborts
@@ -278,13 +278,15 @@ async function createBypassRequest(parsedUrl, realIP, options) {
       socket.destroy();
       settle(reject, new Error("[ProxyFetch] MITM bypass request aborted"));
     };
+    // Declared before the already-aborted check below: that path calls settle(),
+    // which calls cleanupAbort().
+    const cleanupAbort = () => {
+      if (options.signal) options.signal.removeEventListener("abort", onAbort);
+    };
     if (options.signal) {
       if (options.signal.aborted) { onAbort(); return; }
       options.signal.addEventListener("abort", onAbort, { once: true });
     }
-    const cleanupAbort = () => {
-      if (options.signal) options.signal.removeEventListener("abort", onAbort);
-    };
 
     socket.connect(HTTPS_PORT, realIP, () => {
       const reqOptions = {

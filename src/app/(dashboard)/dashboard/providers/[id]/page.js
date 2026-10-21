@@ -19,6 +19,7 @@ import { fetchSuggestedModels } from "@/shared/utils/providerModelsFetcher";
 import { getProviderCustomModelRows } from "@/shared/utils/providerCustomModels";
 import { extractAccountsVerificationUrl } from "@/shared/utils/validationUrl";
 import { translateQuotaError } from "@/shared/utils/quotaError";
+import { cn } from "@/shared/utils/cn";
 import ModelRow from "./ModelRow";
 import PassthroughModelsSection from "./PassthroughModelsSection";
 import CompatibleModelsSection from "./CompatibleModelsSection";
@@ -29,6 +30,8 @@ import AddCustomModelModal from "./AddCustomModelModal";
 import BulkImportCodexModal from "./BulkImportCodexModal";
 import CodeBuddyImportModal from "./CodeBuddyImportModal";
 import OAuthTransferModal from "./OAuthTransferModal";
+import AutoPingScheduleModal from "./AutoPingScheduleModal";
+import { getScheduleSlotLabels } from "@/shared/services/quotaPingSchedule";
 
 const ONE_BY_ONE_DELAY_MS = 1000;
 
@@ -221,6 +224,7 @@ export default function ProviderDetailPage() {
   // it was typed; on success we hand the verified value to the modal —
   // dropping this wiring makes EVERY export die with "Invalid password".
   const [oauthTransferPassword, setOauthTransferPassword] = useState("");
+  const [scheduleConnection, setScheduleConnection] = useState(null);
 
   // Manual CodeBuddy CN daily check-in trigger (only shown when the auto
   // check-in experimental toggle is on). Per-account results surface via the
@@ -429,6 +433,10 @@ export default function ProviderDetailPage() {
   const oauthTransferOn = isOAuth && providerInfo?.authModes?.includes("oauth") && oauthTransferEnabled;
   // Experimental auto daily check-in / compensation — mutually exclusive display vs import/export.
   const codeBuddyCheckinOn = isCodeBuddy && (codeBuddyCheckinEnabled || codeBuddyCompensationEnabled);
+  // Manual claim / check-in button (Qoder credits, MiniMax Code daily sign-in).
+  // Must appear in every action row — single-auth providers (minimax-code is
+  // OAuth-only) take the non-dual branch, which once lacked it.
+  const hasClaimCheckin = ["qoder", "qoder-cn", "minimax-code", "minimax-code-global"].includes(providerId);
   /**
    * The Export/Import button pair, hoisted out of the dual-auth-only branch.
    *
@@ -658,7 +666,11 @@ export default function ProviderDetailPage() {
       setThinkingMode(thinkingCfg.mode || "auto");
       const autoPingSettingsKey = AUTO_PING_SETTINGS_KEYS[providerId];
       const apCfg = autoPingSettingsKey ? settingsData[autoPingSettingsKey] || {} : {};
-      setAutoPing({ enabled: apCfg.enabled === true, connections: apCfg.connections || {} });
+      setAutoPing({
+        enabled: apCfg.enabled === true,
+        connections: apCfg.connections || {},
+        schedules: apCfg.schedules || {},
+      });
       if (nodesRes.ok) {
         let node = (nodesData.nodes || []).find((entry) => entry.id === providerId) || null;
 
@@ -817,8 +829,12 @@ export default function ProviderDetailPage() {
     }
   };
 
-  const handleAutoPingConnection = (connectionId, on) => {
-    saveAutoPing({ ...autoPing, connections: { ...autoPing.connections, [connectionId]: on } });
+  const handleSaveAutoPing = (connectionId, { reactive, schedule }) => {
+    saveAutoPing({
+      ...autoPing,
+      connections: { ...autoPing.connections, [connectionId]: reactive },
+      schedules: { ...(autoPing.schedules || {}), [connectionId]: schedule },
+    });
   };
 
   useEffect(() => {
@@ -1514,9 +1530,12 @@ export default function ProviderDetailPage() {
                 onMoveDown={() => handleSwapPriority(index, index + 1)}
                 onToggleActive={(isActive) => handleUpdateConnectionStatus(conn.id, isActive)}
                 autoPing={AUTO_PING_SETTINGS_KEYS[providerId] && conn.authType === "oauth" ? {
-                  on: autoPing.connections[conn.id] === true,
-                  onToggle: (on) => handleAutoPingConnection(conn.id, on),
+                  isActive: autoPing.connections[conn.id] === true || autoPing.schedules?.[conn.id]?.enabled === true,
+                  reactiveOn: autoPing.connections[conn.id] === true,
                   provider: providerId,
+                  scheduleOn: autoPing.schedules?.[conn.id]?.enabled === true,
+                  scheduleSummary: getScheduleSlotLabels(autoPing.schedules?.[conn.id]).join(" / "),
+                  onConfigure: () => setScheduleConnection(conn),
                 } : null}
                 onUpdateProxy={async (proxyPoolId) => {
                   try {
@@ -2155,17 +2174,24 @@ export default function ProviderDetailPage() {
 
               {/* Round Robin toggle */}
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs text-text-muted font-medium">{translate("Round Robin")}</span>
+                <span
+                  className={cn("text-xs font-medium", earliestExpiryFirst ? "text-text-muted/50 cursor-not-allowed" : "text-text-muted")}
+                  title={earliestExpiryFirst ? translate("Disabled while Earliest Expiry First is active (earliest-expiry takes precedence over round-robin)") : undefined}
+                >
+                  {translate("Round Robin")}
+                </span>
                 <Toggle
                   checked={providerStrategy === "round-robin"}
+                  disabled={earliestExpiryFirst}
                   onChange={handleRoundRobinToggle}
                 />
                 {providerStrategy === "round-robin" && (
-                  <div className="flex items-center gap-1.5">
+                  <div className={cn("flex items-center gap-1.5", earliestExpiryFirst && "opacity-50 pointer-events-none")}>
                     <span className="text-xs text-text-muted">{translate("Sticky:")}</span>
                     <input
                       type="number"
                       min={1}
+                      disabled={earliestExpiryFirst}
                       value={providerStickyLimit}
                       onChange={(e) => handleStickyLimitChange(e.target.value)}
                       placeholder="1"
@@ -2211,7 +2237,7 @@ export default function ProviderDetailPage() {
                         Cookie
                       </Button>
                     )}
-                    {(providerId === "qoder" || providerId === "qoder-cn" || providerId === "minimax-code" || providerId === "minimax-code-global") && renderQoderCheckinBlock()}
+                    {hasClaimCheckin && renderQoderCheckinBlock()}
                     {providerId === "codex" && (
                       <Button size="sm" icon="playlist_add" variant="secondary" onClick={() => setShowBulkImportCodex(true)}>
                         {translate("Bulk Add")}
@@ -2315,7 +2341,7 @@ export default function ProviderDetailPage() {
                       </Button>
                       {renderOAuthTransferButtons("w-full sm:w-auto")}
                       {codeBuddyCheckinOn && renderCbCheckinBlock()}
-                      {(providerId === "qoder" || providerId === "qoder-cn" || providerId === "minimax-code" || providerId === "minimax-code-global") && renderQoderCheckinBlock()}
+                      {hasClaimCheckin && renderQoderCheckinBlock()}
                     </>
                   ) : (
                     <>
@@ -2328,6 +2354,7 @@ export default function ProviderDetailPage() {
                         Add
                       </Button>
                       {renderOAuthTransferButtons("w-full sm:w-auto")}
+                      {hasClaimCheckin && renderQoderCheckinBlock()}
                     </>
                   )}
                 </div>
@@ -2626,6 +2653,17 @@ export default function ProviderDetailPage() {
         message={confirmState?.message}
         variant="danger"
       />
+
+      {scheduleConnection && (
+        <AutoPingScheduleModal
+          isOpen={!!scheduleConnection}
+          onClose={() => setScheduleConnection(null)}
+          connection={scheduleConnection}
+          reactive={autoPing.connections[scheduleConnection.id] === true}
+          schedule={autoPing.schedules?.[scheduleConnection.id] || null}
+          onSave={(result) => handleSaveAutoPing(scheduleConnection.id, result)}
+        />
+      )}
     </div>
   );
 }

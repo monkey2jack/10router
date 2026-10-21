@@ -12,14 +12,14 @@ describe("CodeBuddy CN oversized payload pre-check", () => {
     expect(isOversizedForCbcn(oversized)).toBe(true);
   });
 
-  it("lets long conversations through up to maxMessages (1800 条不再被拦)", () => {
-    // 消息数 1800 → 2048（2026-10-20）：每轮「assistant 工具调用 + tool 结果」各记
-    // 两条，挂 MCP 的真实会话很容易撞到 1800；这一维与 11128 无因果，不该先于体积触发。
-    expect(CBCN_PAYLOAD_LIMITS.maxMessages).toBe(2048);
+  it("lets long conversations through up to maxMessages (5000 条不再被拦)", () => {
+    // 消息数 2048 → 5000（2026-10-21）：每轮「assistant 工具调用 + tool 结果」各记
+    // 两条，挂 MCP 的真实会话很容易撞到 2048；这一维与 11128 无因果，不该先于体积触发。
+    expect(CBCN_PAYLOAD_LIMITS.maxMessages).toBe(5000);
     const fill = (n) => ({ messages: Array.from({ length: n }, () => ({ role: "user", content: "hi" })) });
-    expect(isOversizedForCbcn(fill(1800))).toBe(false);
     expect(isOversizedForCbcn(fill(2048))).toBe(false);
-    expect(isOversizedForCbcn(fill(2049))).toBe(true);
+    expect(isOversizedForCbcn(fill(5000))).toBe(false);
+    expect(isOversizedForCbcn(fill(5001))).toBe(true);
   });
 
   it("does NOT reject tool-heavy-but-small bodies (2026-10-03 回归)", () => {

@@ -29,6 +29,7 @@ import {
   shortDate,
   shortDuration,
   isStoredValueRow,
+  joinsPackPool,
   detailRows,
   groupRowsByFamily,
   healthHue,
@@ -489,5 +490,37 @@ describe("healthHue — one friendly gradient for every meter", () => {
     expect(healthHue(-5)).toBe(4);
     expect(healthHue(250)).toBe(158);
     expect(healthHue(undefined)).toBe(4);
+  });
+});
+
+describe("joinsPackPool — a recurring stored-value balance must not blank the card", () => {
+  // CreditDaddy's minimax-free push carries recurring:true on its balance rows
+  // (daily 16:00 refill). Excluding recurring rows from the additive pool while
+  // the cycle bucket excludes stored-value rows left such a row in NEITHER —
+  // the card rendered nothing but its header (2026-10-21 白卡).
+  const mmFreeRows = [
+    { name: "备", used: 0, total: 2600.64, resetAt: "2026-10-21T16:00:00.000Z", recurring: true, displayRemaining: true, isCreditBalance: true, checkinToday: true, streakDays: 5 },
+    { name: "主", used: 0, total: 2599.87, resetAt: "2026-10-21T16:00:00.000Z", recurring: true, displayRemaining: true, isCreditBalance: true, checkinToday: true, streakDays: 2 },
+  ];
+
+  it("recurring stored-value rows join the pool", () => {
+    for (const r of mmFreeRows) {
+      expect(isStoredValueRow(r)).toBe(true);
+      expect(joinsPackPool(r)).toBe(true);
+    }
+  });
+
+  it("plain recurring windows still stay out of the pool", () => {
+    expect(joinsPackPool(row("session (5h)"))).toBe(false);
+    expect(joinsPackPool(row("weekly (7d)"))).toBe(false);
+  });
+
+  it("one-shot packs keep joining the pool", () => {
+    expect(joinsPackPool({ name: "Bonus Pack 1", recurring: false })).toBe(true);
+  });
+
+  it("classifyCycleRows still excludes them — a balance is not a window", () => {
+    const { hasAnyCycle } = classifyCycleRows(mmFreeRows);
+    expect(hasAnyCycle).toBe(false);
   });
 });

@@ -152,8 +152,7 @@ export async function PATCH(request) {
     // turning it off later needs no extra wiring. Module is idempotent.
     if (
       (Object.prototype.hasOwnProperty.call(body, "codeBuddyCheckin") && settings.codeBuddyCheckin === true) ||
-      (Object.prototype.hasOwnProperty.call(body, "codeBuddyCompensation") && settings.codeBuddyCompensation === true) ||
-      (Object.prototype.hasOwnProperty.call(body, "codeBuddyIntlSession") && settings.codeBuddyIntlSession === true)
+      (Object.prototype.hasOwnProperty.call(body, "codeBuddyCompensation") && settings.codeBuddyCompensation === true)
     ) {
       import("@/sse/services/codebuddyCheckin.js")
         .then(({ startCodebuddyCheckin }) => startCodebuddyCheckin())

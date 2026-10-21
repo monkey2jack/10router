@@ -21,6 +21,7 @@ import {
 import { createGeminiToolNamer, attachToolNameMap } from "../concerns/geminiTools.js";
 import { deriveSessionId, toNumericSessionId } from "../../utils/sessionManager.js";
 import { ROLE, GEMINI_ROLE, OPENAI_BLOCK, CLAUDE_BLOCK } from "../schema/index.js";
+import { isGemini4Model } from "../../providers/capabilities.js";
 
 // Declared tool names, in declaration order. Registered with the namer before
 // history so a collision rename lands on the history-only name, not a live tool.
@@ -42,14 +43,15 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
   const toolNamer = createGeminiToolNamer();
   for (const name of declaredToolNames(body.tools)) toolNamer.name(name);
 
-  // Generation config
-  if (body.temperature !== undefined) {
+  // Generation config — Gemini 4 removed the sampling params, forwarding them fails the request
+  const allowSampling = !isGemini4Model(model);
+  if (allowSampling && body.temperature !== undefined) {
     result.generationConfig.temperature = body.temperature;
   }
-  if (body.top_p !== undefined) {
+  if (allowSampling && body.top_p !== undefined) {
     result.generationConfig.topP = body.top_p;
   }
-  if (body.top_k !== undefined) {
+  if (allowSampling && body.top_k !== undefined) {
     result.generationConfig.topK = body.top_k;
   }
   if (body.max_tokens !== undefined) {
@@ -230,7 +232,7 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
 
   // #4345：首/尾回合守卫 —— 以 model 轮收尾（含未响应的 functionCall）会被
   // Google 拒绝 400 "Requests ending with a model turn are not supported"。
-  result.contents = normalizeGeminiContents(result.contents, { guardTurns: true });
+  result.contents = normalizeGeminiContents(result.contents, { guardTurns: true, model });
   return attachToolNameMap(result, toolNamer.toolNameMap);
 }
 
@@ -419,7 +421,7 @@ function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = nu
   }
 
   // #4345：同上，antigravity/gemini 端点都拒绝以 model 轮收尾的请求。
-  envelope.request.contents = normalizeGeminiContents(envelope.request.contents, { guardTurns: true });
+  envelope.request.contents = normalizeGeminiContents(envelope.request.contents, { guardTurns: true, model });
   return attachToolNameMap(envelope, toolNamer.toolNameMap);
 }
 

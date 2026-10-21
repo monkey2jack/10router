@@ -1,6 +1,7 @@
 "use client";
 
 import { cn } from "@/shared/utils/cn";
+import { translate } from "@/i18n/runtime";
 
 export default function Select({
   label,
@@ -41,7 +42,7 @@ export default function Select({
           {...props}
         >
           <option value="" disabled>
-            {placeholder}
+            {translate(placeholder)}
           </option>
           {options.map((option) => (
             <option key={option.value} value={option.value}>

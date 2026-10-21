@@ -53,8 +53,12 @@ const proxyAwareFetch = vi.fn(async (url, opts = {}) => {
     }) };
   }
   if (url.includes("/sash/api/v1/me/campaigns")) {
+    // startAt is relative (now−1d), NOT a fixed epoch: buildQoderAddOnPacks
+    // drops RELATIVE_DAYS campaigns once startAt+days < now, so a hardcoded
+    // timestamp made this suite a time bomb — it detonated on 2026-10-21 when
+    // the old fixture's 30-day validity lapsed.
     return { ok: true, status: 200, json: async () => ({ campaigns: [
-      { claimStatus: "CLAIMED", benefit: { kind: "CREDITS", amount: 100, validity: { mode: "RELATIVE_DAYS", days: 30 } }, startAt: 1790000000 },
+      { claimStatus: "CLAIMED", benefit: { kind: "CREDITS", amount: 100, validity: { mode: "RELATIVE_DAYS", days: 30 } }, startAt: Math.floor(Date.now() / 1000) - 86400 },
     ] }) };
   }
   return { ok: false, status: 404, json: async () => ({}) };

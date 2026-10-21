@@ -30,6 +30,10 @@ const GHOST_IDS = [
   "gpt-5.3-codex-spark",
   "gpt-5.3-codex-spark-review",
   "gpt-5.4-image",
+  // gpt-5.5 系随 ChatGPT 登录下线（2026-10-14, 上游 7878f53b）——后端一律 400
+  "gpt-5.5",
+  "gpt-5.5-review",
+  "gpt-5.5-image",
 ];
 
 const codexIds = () => getModelsByProviderId("codex").map((m) => m.id);
@@ -51,10 +55,9 @@ describe("codex registry — still-live models kept (regression guard)", () => {
     "gpt-6-astra",
     "gpt-5.6-terra",
     "gpt-5.6-terra-review",
-    "gpt-5.5",
-    "gpt-5.5-review",
-    "gpt-5.5-image",
-    "gpt-5.3-image",
+    "gpt-5.6-sol",
+    "gpt-6-sol",
+    "gpt-6.1-sol",
   ])("%s still present", (id) => {
     expect(codexIds()).toContain(id);
   });

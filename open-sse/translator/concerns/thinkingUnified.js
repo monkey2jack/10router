@@ -282,8 +282,10 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, targetFormat = null,
       // "auto" is not a value Anthropic accepts in output_config.effort — map it to high.
       // xhigh 按模型分档（Opus/Sonnet 4.6 拒绝该值）——模型未声明支持时钳回 high。
       const level = toLevel(eff);
+      // Claude effort has no "minimal" (always-on models clamp "none" to it).
       body.output_config = { effort: level === "auto" ? "high"
-        : level === "xhigh" && !supportedLevels?.includes("xhigh") ? "high" : level };
+        : level === "xhigh" && !supportedLevels?.includes("xhigh") ? "high"
+        : level === "minimal" ? "low" : level };
       break;
     }
     case "claude-budget": {
@@ -295,7 +297,10 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, targetFormat = null,
       break;
     }
     case "gemini-level": {
-      const level = none ? "minimal" : toGeminiThinkingLevel(eff);
+      let level = none ? "minimal" : toGeminiThinkingLevel(eff);
+      // Models without a "minimal" tier (Gemini 4) reject it with 400 — clamp to the lowest supported level.
+      const lowest = supportedLevels?.find((l) => l !== "none");
+      if (supportedLevels?.length && lowest && !supportedLevels.includes(level)) level = lowest;
       setGeminiThinking(body, { thinkingLevel: level, includeThoughts: level !== "minimal" });
       ensureGeminiOutputFloor(body, geminiLevelOutputFloor(level), caps);
       break;

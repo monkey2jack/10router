@@ -42,6 +42,20 @@ export function isStoredValueRow(row) {
 }
 
 /**
+ * Whether a row joins QuotaPackBar's additive-pool bucket (one-shot packs +
+ * stored-value singletons). A stored-value balance is a settled pool, never a
+ * cycle window — even when the pusher marks it recurring (CreditDaddy's
+ * minimax-free balances carry recurring:true for their daily 16:00 refill).
+ * Without the stored-value escape hatch here the row fell into NEITHER bucket:
+ * the cycle bucket excludes stored-value rows (classifyCycleRows) while this
+ * bucket excluded recurring ones — the card rendered nothing but its header
+ * (2026-10-21 minimax-free 白卡).
+ */
+export function joinsPackPool(row) {
+  return !isRecurringQuotaRow(row) || isStoredValueRow(row);
+}
+
+/**
  * `"Balance (CNY)"` → `"CNY"`; `"Weekly"` → `""`.
  * The stored-value unit is lifted out of the row name so it can be re-attached
  * to the number as small print instead of living in the label.

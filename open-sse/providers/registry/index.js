@@ -156,6 +156,7 @@ import p152 from "./zed.js";
 import p153 from "./modelscope.js";
 import p154 from "./codiv.js";
 import p155 from "./thx.js";
+import p156 from "./inception.js";
 
 export default [
   p0,
@@ -315,4 +316,5 @@ export default [
   p153,
   p154,
   p155,
+  p156,
 ];

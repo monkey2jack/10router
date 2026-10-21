@@ -69,7 +69,7 @@
     "format": "antigravity",
     "strictProxy": true,
     "headers": {
-      "User-Agent": "antigravity/ide/2.11.0 darwin/arm64"
+      "User-Agent": "antigravity/ide/2.22.0 darwin/arm64"
     },
     "retry": {
       "429": {
@@ -1392,6 +1392,12 @@
   "codiv": {
     "baseUrl": "https://api.codiv.ai/v1/chat/completions",
     "validateUrl": "https://api.codiv.ai/v1/models",
+    "format": "openai"
+  },
+  "inception": {
+    "baseUrl": "https://api.inceptionlabs.ai/v1/chat/completions",
+    "validateUrl": "https://api.inceptionlabs.ai/v1/models",
+    "thinkingFormat": "openai",
     "format": "openai"
   }
 }

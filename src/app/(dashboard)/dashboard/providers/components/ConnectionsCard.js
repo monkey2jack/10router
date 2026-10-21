@@ -5,6 +5,7 @@ import { translate } from "@/i18n/runtime";
 import { getStatusVariant as getConnectionStatusVariant } from "@/shared/utils/connectionStatus";
 import { classifyConnectionCooldown, sameConnectionCooldown } from "@/shared/utils/connectionCooldown";
 import { translateQuotaError } from "@/shared/utils/quotaError";
+import { cn } from "@/shared/utils/cn";
 import PropTypes from "prop-types";
 import { Card, Badge, Button, Modal, Select, Toggle, EditConnectionModal, ConfirmModal } from "@/shared/components";
 
@@ -475,9 +476,15 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
               />
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-xs text-text-muted font-medium">{translate("Round Robin")}</span>
+              <span
+                className={cn("text-xs font-medium", earliestExpiryFirst ? "text-text-muted/50 cursor-not-allowed" : "text-text-muted")}
+                title={earliestExpiryFirst ? translate("Disabled while Earliest Expiry First is active (earliest-expiry takes precedence over round-robin)") : undefined}
+              >
+                {translate("Round Robin")}
+              </span>
               <Toggle
                 checked={providerStrategy === "round-robin"}
+                disabled={earliestExpiryFirst}
                 onChange={(enabled) => {
                   const strategy = enabled ? "round-robin" : null;
                   setProviderStrategy(strategy);
@@ -486,10 +493,11 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
                 }}
               />
               {providerStrategy === "round-robin" && (
-                <div className="flex flex-wrap items-center gap-1.5">
+                <div className={cn("flex flex-wrap items-center gap-1.5", earliestExpiryFirst && "opacity-50 pointer-events-none")}>
                   <span className="text-xs text-text-muted">{translate("Sticky:")}</span>
                   <input
                     type="number" min={1} value={providerStickyLimit}
+                    disabled={earliestExpiryFirst}
                     onChange={(e) => { setProviderStickyLimit(e.target.value); saveStrategy("round-robin", e.target.value, earliestExpiryFirst); }}
                     className="w-16 px-2 py-1 text-xs border border-border rounded-md bg-surface focus:outline-none focus:border-primary"
                   />

@@ -2,6 +2,7 @@
 
 import { safeParseJSON } from "../concerns/json.js";
 import { OPENAI_BLOCK } from "../schema/index.js";
+import { isGemini4Model } from "../../providers/capabilities.js";
 
 // Unsupported JSON Schema constraints that should be removed for Antigravity
 export const UNSUPPORTED_SCHEMA_CONSTRAINTS = [
@@ -445,20 +446,30 @@ export function toGeminiParameters(parameters) {
 const GEMINI_LEADING_USER_TEXT = "...";
 const GEMINI_CONTINUE_TEXT = "Continue.";
 
+// Gemini 4 rejects a merged user turn whose last part is not a functionResponse (#4802)
+function moveFunctionResponsesLast(parts) {
+  const responses = parts.filter(p => p.functionResponse);
+  if (!responses.length) return parts;
+  return [...parts.filter(p => !p.functionResponse), ...responses];
+}
+
 // Normalize Gemini contents: drop empty parts/turns and merge adjacent same-role turns.
 // `guardTurns` (Antigravity) also makes the conversation start with a user turn and
 // never end on a model turn — a trailing model turn gets a "Continue." user turn, and
 // trailing unanswered functionCalls get matching functionResponses, since Gemini
 // rejects a functionCall that is not followed by its response.
-export function normalizeGeminiContents(contents, { guardTurns = false } = {}) {
+export function normalizeGeminiContents(contents, { guardTurns = false, model = null } = {}) {
+  const frLast = isGemini4Model(model);
   const out = [];
   for (const c of contents || []) {
     if (!c?.role || !Array.isArray(c.parts)) continue;
     const parts = c.parts.filter(p => p && typeof p === "object" && Object.keys(p).length > 0);
     if (parts.length === 0) continue;
     const last = out.at(-1);
-    if (last?.role === c.role) last.parts.push(...parts);
-    else out.push({ ...c, parts });
+    if (last?.role === c.role) {
+      last.parts.push(...parts);
+      if (frLast) last.parts = moveFunctionResponsesLast(last.parts);
+    } else out.push({ ...c, parts });
   }
   if (!guardTurns || out.length === 0) return out;
 

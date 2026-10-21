@@ -137,14 +137,13 @@ async function runHeavyStartup() {
     .then(({ startBackgroundTokenRefresh }) => startBackgroundTokenRefresh())
     .catch((e) => console.log("[BackgroundTokenRefresh] scheduler start failed:", e.message));
 
-  // Experimental CodeBuddy CN auto daily check-in / compensation / intl session.
-  // Started when any toggle is on at boot; each scheduled fire re-reads the flags
-  // and no-ops when turned off later, so no restart is needed to disable it.
-  // Turning any on at runtime from the UI is handled by the PATCH /api/settings route.
+  // Experimental CodeBuddy CN auto daily check-in / compensation.
+  // Started when either toggle is on at boot; each scheduled fire re-reads the
+  // flags and no-ops when turned off later, so no restart is needed to disable
+  // it. Turning one on at runtime is handled by PATCH /api/settings.
   if (
     settings.codeBuddyCheckin === true ||
-    settings.codeBuddyCompensation === true ||
-    settings.codeBuddyIntlSession === true
+    settings.codeBuddyCompensation === true
   ) {
     import("@/sse/services/codebuddyCheckin.js")
       .then(({ startCodebuddyCheckin }) => startCodebuddyCheckin())

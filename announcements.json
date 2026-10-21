@@ -1,0 +1,103 @@
+{
+  "_format": {
+    "level": "feature(蓝框,新功能) | promo(绿框,免费模型活动) | info(默认) | warning(行为变更) | critical(紧急)",
+    "title/body": "中文主字段，所有界面默认显示",
+    "titleEn/bodyEn": "可选英文；英文界面优先显示，缺省回退主字段",
+    "date": "YYYY-MM-DD，超过 90 天自动隐藏",
+    "link": "可选，显示「了解更多」按钮",
+    "note": "id 唯一且不变更（未读红点与已读标记依赖它）；本文件推送到 main 即生效，无需发版"
+  },
+  "updatedAt": "2026-10-21T00:30:00+08:00",
+  "items": [
+    {
+      "id": "2026-10-20-proxy-strict",
+      "date": "2026-10-20",
+      "level": "warning",
+      "title": "代理行为变更：不可直连渠道默认严格模式",
+      "body": "Google Cloud Code、Gemini CLI 等渠道代理失败立即报错并顺位接力，不再回退直连死等（此前实测 788s）。连接级显式 strictProxy 优先。",
+      "titleEn": "Proxy behavior change: direct-connect channels now default to strict mode",
+      "bodyEn": "For channels that cannot connect directly (Google Cloud Code, Gemini CLI, …), a proxy failure now errors immediately and relays to the next account/combo member instead of hanging on a blocked direct connection (788s observed). Connection-level strictProxy overrides the default."
+    },
+    {
+      "id": "2026-10-20-qoder-qfmodel-free",
+      "date": "2026-10-20",
+      "level": "promo",
+      "title": "Qoder qfmodel 双线限免至 10-25",
+      "body": "qfmodel 更名 DeepSeek-V4.1-Flash 1017，qoder / qoder-cn 国际国内双线限免（倍率 0x）至 10-25。",
+      "titleEn": "Qoder qfmodel free on both lanes until 10-25",
+      "bodyEn": "qfmodel is renamed DeepSeek-V4.1-Flash 1017; free (0x rate) on both qoder and qoder-cn until 10-25."
+    },
+    {
+      "id": "2026-10-20-cb-v41-flash",
+      "date": "2026-10-20",
+      "level": "promo",
+      "title": "CodeBuddy CN V4.1-Flash 1017 限免中",
+      "body": "codebuddy-cn 的 V4.1-Flash 1017 限免窗口内倍率 0x，结束后恢复发布倍率。",
+      "titleEn": "CodeBuddy CN V4.1-Flash 1017 free now",
+      "bodyEn": "codebuddy-cn's V4.1-Flash 1017 runs at 0x during the promo window and returns to the published rate afterwards."
+    },
+    {
+      "id": "2026-10-20-minimax-free-back",
+      "date": "2026-10-20",
+      "level": "promo",
+      "title": "MiniMax Code Free 回归",
+      "body": "minimax-free 免登录网关线回归（CreditDaddy 闭环）；订阅线支持每日自动签到，模型面已对齐 M3.1 Flash 正式 id。",
+      "titleEn": "MiniMax Code Free is back",
+      "bodyEn": "The minimax-free no-auth gateway lane is back (CreditDaddy closed loop); subscription lines gain daily auto check-in, and the model list is aligned to the official M3.1 Flash ids."
+    },
+    {
+      "id": "2026-10-20-inception",
+      "date": "2026-10-20",
+      "level": "feature",
+      "title": "新增 Inception Labs（Mercury 扩散模型）",
+      "body": "OpenAI 兼容。mercury-3：1M ctx / 工具调用 / ~1000 tok/s，launch 半价 $0.10/$0.35，新 key 送 1 亿 tokens（额度经 CreditDaddy 通用卡推送）。",
+      "titleEn": "New provider: Inception Labs (Mercury diffusion models)",
+      "bodyEn": "OpenAI compatible. mercury-3: 1M ctx / tool calling / ~1000 tok/s, 50% off launch at $0.10/$0.35; new keys include 100M free tokens (quota via the CreditDaddy generic card)."
+    },
+    {
+      "id": "2026-10-20-combo-router",
+      "date": "2026-10-20",
+      "level": "feature",
+      "title": "组合新增 router 策略",
+      "body": "固定顺序/轮询不看谁更擅长当前任务；Router 由决策模型分析用户 prompt，动态挑最擅长的成员回答——仅一次额外调用，兼顾能力与速度；失败/超时 8s 内自动退回原顺序。",
+      "titleEn": "Combo router strategy",
+      "bodyEn": "Order/round-robin ignores model strengths. Router analyzes your prompt and picks the best-suited member to answer — one extra call; failures/timeouts fall back to the original order within 8s."
+    },
+    {
+      "id": "2026-10-21-gemini4-argon-gpt61",
+      "date": "2026-10-21",
+      "level": "feature",
+      "title": "Gemini 4 Argon 与 GPT-6.1 Sol 正式收录",
+      "body": "Gemini 4 Argon 全线接入（gemini / vertex / antigravity 官方三线），支持常开推理与 1M 上下文；Codex 接入 GPT-6.1 Sol，采用全新极速 Responses Lite 协议传输。",
+      "titleEn": "Gemini 4 Argon & GPT-6.1 Sol official support",
+      "bodyEn": "Full Gemini 4 Argon support across gemini, vertex, and antigravity with always-on reasoning and 1M context; Codex adds GPT-6.1 Sol over the new Responses Lite transport protocol."
+    },
+    {
+      "id": "2026-10-20-endpoint-picker",
+      "date": "2026-10-20",
+      "level": "feature",
+      "title": "端点模型白名单改勾选式",
+      "body": "端点「允许调用的模型与组合」由手敲 id 改为勾选式选择器。",
+      "titleEn": "Endpoint model allowlist is now checkbox-based",
+      "bodyEn": "The endpoint's allowed models/combos are picked via checkboxes instead of typing ids."
+    },
+    {
+      "id": "2026-10-21-external-quota-single-card",
+      "date": "2026-10-21",
+      "level": "feature",
+      "title": "外配额卡升级：单账号单卡 + 签到徽章",
+      "body": "MiniMax Code Free 等推送卡改为每账号一张独立卡（余额不再跨账号加总），签到徽章紧贴余额数字；弹窗移动端居中体验对齐更新日志。",
+      "titleEn": "Pushed quota cards: one card per account, badge beside the balance",
+      "bodyEn": "Pushed cards (MiniMax Code Free and friends) are now one independent card per account — balances are no longer summed across accounts — with the check-in badge right beside the number; modals are now centered on mobile, matching the changelog dialog."
+    },
+    {
+      "id": "2026-10-20-community",
+      "date": "2026-10-20",
+      "level": "info",
+      "title": "社区与捐赠",
+      "body": "侧边栏新增 Community 分区：飞书群 / Discord / Telegram / GitHub。捐赠渠道：GitHub Sponsors / 爱发电 / 支付宝 / 微信。",
+      "titleEn": "Community & donations",
+      "bodyEn": "New sidebar Community section: Feishu / Discord / Telegram / GitHub. Donations: GitHub Sponsors / AiFaDian / Alipay / WeChat."
+    }
+  ]
+}

@@ -19,15 +19,16 @@ import crypto from "node:crypto";
 
 export function maskApiKey(key) {
   if (!key || typeof key !== "string") return null;
-  if (key.length <= 12) return key.charAt(0) + "***";
+  const trimmed = key.trim();
+  if (trimmed.length <= 12) return trimmed.charAt(0) + "***";
   // Keep the tail: keys sharing a machine-id prefix (team keys) must not
   // collide into one indistinguishable display string.
-  return key.slice(0, 8) + "***" + key.slice(-4);
+  return trimmed.slice(0, 8) + "***" + trimmed.slice(-4);
 }
 
 export function hashApiKey(key) {
   if (!key || typeof key !== "string") return null;
-  return crypto.createHash("sha256").update(key).digest("hex");
+  return crypto.createHash("sha256").update(key.trim()).digest("hex");
 }
 
 // Everything the usage log stores about a key, derived from the raw value.

@@ -112,15 +112,39 @@ describe("minimaxCheckin unit tests", () => {
       expect(capturedUrl).toContain("client=mcode");
     });
 
+    it("status is a GET and claim is a POST — the wrong verb is a bare 404", async () => {
+      // 实测 2026-10-20：signin/status 只认 GET（POST → 404 "Not Found"），
+      // signin/claim 只认 POST（GET → 404）。曾两者都发 POST，状态查询必 404。
+      const calls = [];
+      const mockFetch = vi.fn((url, init) => {
+        calls.push({ url: String(url), method: init?.method, body: init?.body });
+        return Promise.resolve(calls.length === 1
+          ? { ok: true, status: 200, json: async () => statusPayload(1, 3, 20, 5) }
+          : { ok: true, status: 200, json: async () => ({ base_resp: { status_code: 0 }, data: { claim_result: 1, day_no: 3, points: 25 } }) });
+      });
+      await checkinOneMinimax(
+        { id: "c1", provider: "minimax-code", accessToken: "at-1", providerSpecificData: { realUserID: "u42" } },
+        { fetch: mockFetch },
+      );
+      expect(calls[0].url).toContain("/signin/status");
+      expect(calls[0].method).toBe("GET");
+      expect(calls[0].body).toBeUndefined();
+      expect(calls[1].url).toContain("/signin/claim");
+      expect(calls[1].method).toBe("POST");
+      // userID rides the signed query like the membership probe
+      expect(calls[0].url).toContain("user_id=u42");
+    });
+
     it("matches the reference signing from signedAccountRequest (cn line)", async () => {
       // The signin request must be signed exactly like the membership probe —
       // same yy/x-signature derivation, different path.
       const { url, init } = signedAccountRequest(
         { agent: "https://agent.minimax.cn", lang: "zh" },
         "/minimax-cloud/api/v1/signin/status",
-        { access: "at-1", body: {} },
+        { access: "at-1" },
       );
       expect(url).toContain("https://agent.minimax.cn/minimax-cloud/api/v1/signin/status");
+      expect(init.method).toBe("GET");
       expect(init.headers.Authorization).toBe("Bearer at-1");
       expect(init.headers["x-signature"]).toMatch(/^[0-9a-f]{32}$/);
       expect(init.headers.yy).toMatch(/^[0-9a-f]{32}$/);

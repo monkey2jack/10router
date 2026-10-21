@@ -622,8 +622,8 @@ export async function getUsageStats(period = "all") {
 
     for (const r of filtered) {
       const tokens = parseJson(r.tokens, {}) || {};
-      const promptTokens = tokens.prompt_tokens || 0;
-      const completionTokens = tokens.completion_tokens || 0;
+      const promptTokens = tokens.prompt_tokens || tokens.input_tokens || r.promptTokens || 0;
+      const completionTokens = tokens.completion_tokens || tokens.output_tokens || r.completionTokens || 0;
       const cachedTokens = tokens.cached_tokens || tokens.cache_read_input_tokens || 0;
       const entryCost = r.cost || 0;
       const providerDisplayName = providerNodeNameMap[r.provider] || r.provider;
@@ -950,6 +950,22 @@ function latencyScoreFromMs(avgMs) {
   return 20;
 }
 
+// TTFT-based latency score. Total latency measures the WHOLE request, which
+// for agent workloads is dominated by generation time — a Mercury-class model
+// at ~1000 tok/s streaming for 60s scores 20 on the total-latency axis even
+// though it is the fastest node in the fleet (its SPEED axis is already 100;
+// the two axes double-count the same seconds). First-token latency is the
+// node's own responsiveness; how long the output runs is the request's size.
+// TTFT thresholds sit an order of magnitude below the total ones.
+function ttftScoreFromMs(avgTtftMs) {
+  if (avgTtftMs == null) return null;
+  if (avgTtftMs < 400) return 100;
+  if (avgTtftMs < 800) return 80;
+  if (avgTtftMs < 1500) return 60;
+  if (avgTtftMs < 3000) return 40;
+  return 20;
+}
+
 function speedScoreFromTps(tps) {
   if (tps == null) return null;
   if (tps >= 80) return 100;
@@ -966,6 +982,9 @@ function speedScoreFromTps(tps) {
 // data is not a neutral score, it is no score). Only the speed axis can be
 // missing here (latency measured but no token-timed durations); it takes a
 // neutral 50 rather than being rewarded with the success rate.
+// Exposed for the TTFT-scoring regression test (node-health-ttft-scoring.test.js): the scoring helpers are module-private by design, the test pins their thresholds rather than re-deriving them.
+export const __scoreInternals = { latencyScoreFromMs, ttftScoreFromMs, speedScoreFromTps, computeScore };
+
 function computeScore(successRate, latencyScore, speedScore) {
   const ls = latencyScore == null ? 50 : latencyScore;
   const ss = speedScore == null ? 50 : speedScore;
@@ -1304,9 +1323,11 @@ export async function getUsageDashboard({ minRequests = 50 } = {}) {
     // other combination once the two data stores merge per-metric).
     hasTtft: avgTtftMs != null,
     hasSpeed: avgSpeed != null,
+    // Latency axis prefers TTFT (see ttftScoreFromMs) and only falls back to
+    // total latency for rows that never recorded a first-token sample.
     score: avgLatencyMs == null
       ? null
-      : computeScore(successRate, latencyScoreFromMs(avgLatencyMs), speedScoreFromTps(avgSpeed)),
+      : computeScore(successRate, ttftScoreFromMs(avgTtftMs) ?? latencyScoreFromMs(avgLatencyMs), speedScoreFromTps(avgSpeed)),
       promptTokens: row.promptTokens || 0,
       completionTokens: row.completionTokens || 0,
       cost: row.cost || 0,

@@ -1896,11 +1896,13 @@ export default function ProfilePage() {
 
             <p className="text-xs text-text-muted italic pt-2 border-t border-border/50">
               {settings.fallbackStrategy === "round-robin"
-                ? `Currently distributing requests across all available accounts with ${settings.stickyRoundRobinLimit || 3} calls per account.`
-                : "Currently using accounts in priority order (Fill First)."}
+                ? translate(`Currently distributing requests across all available accounts with ${settings.stickyRoundRobinLimit || 3} calls per account.`)
+                : translate("Currently using accounts in priority order (Fill First).")}
               {settings.comboStrategy === "round-robin"
                 ? ` Combos rotate after ${settings.comboStickyRoundRobinLimit || 1} call${(settings.comboStickyRoundRobinLimit || 1) === 1 ? "" : "s"} per model.`
                 : " Combos always start with their first model."}
+              {" "}
+              {translate("Note: Per-provider strategies (such as Earliest Expiry First or specific fallback/round-robin) take precedence over these global defaults.")}
             </p>
           </div>
         </Card>

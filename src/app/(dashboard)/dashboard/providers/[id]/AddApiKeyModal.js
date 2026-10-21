@@ -350,11 +350,11 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
         )}
         {validationResult && (
           <Badge variant={validationResult === "success" ? "success" : (validationMaintenance ? "warning" : "error")}>
-            {validationResult === "success" ? "Valid" : (validationMaintenance ? "Check endpoint" : "Invalid")}
+            {validationResult === "success" ? translate("Valid") : (validationMaintenance ? translate("Check endpoint") : translate("Invalid"))}
           </Badge>
         )}
         {validationMaintenance && validationError && (
-          <p className="text-xs text-amber-500 break-words">{validationError}</p>
+          <p className="text-xs text-amber-500 break-words">{translate(validationError)}</p>
         )}
         {error && (
           <p className="text-xs text-red-500 break-words">{error}</p>

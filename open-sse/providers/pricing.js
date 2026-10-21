@@ -31,8 +31,18 @@ export function isFreeModel(model) {
  */
 export const MODEL_PRICING = {
   // === Anthropic / Claude ===
+  "claude-opus-5-5":              { input: 4.00,  output: 20.00, cached: 0.20,  reasoning: 20.00,  cache_creation: 5.00  },
+  "claude-opus-5-5-thinking":     { input: 4.00,  output: 20.00, cached: 0.20,  reasoning: 20.00,  cache_creation: 5.00  },
+  "claude-opus-5-5-high":         { input: 4.00,  output: 20.00, cached: 0.20,  reasoning: 20.00,  cache_creation: 5.00  },
+  "claude-opus-5-5-medium":       { input: 4.00,  output: 20.00, cached: 0.20,  reasoning: 20.00,  cache_creation: 5.00  },
+  "claude-opus-5-5-low":          { input: 4.00,  output: 20.00, cached: 0.20,  reasoning: 20.00,  cache_creation: 5.00  },
   "claude-opus-4-6":              { input: 5.00,  output: 25.00, cached: 0.50,  reasoning: 25.00,  cache_creation: 6.25  },
   "claude-opus-4-5-20251101":     { input: 5.00,  output: 25.00, cached: 0.50,  reasoning: 25.00,  cache_creation: 6.25  },
+  "claude-sonnet-5-5":            { input: 2.00,  output: 10.00, cached: 0.10,  reasoning: 10.00,  cache_creation: 2.50  },
+  "claude-sonnet-5-5-thinking":   { input: 2.00,  output: 10.00, cached: 0.10,  reasoning: 10.00,  cache_creation: 2.50  },
+  "claude-sonnet-5-5-high":       { input: 2.00,  output: 10.00, cached: 0.10,  reasoning: 10.00,  cache_creation: 2.50  },
+  "claude-sonnet-5-5-medium":     { input: 2.00,  output: 10.00, cached: 0.10,  reasoning: 10.00,  cache_creation: 2.50  },
+  "claude-sonnet-5-5-low":        { input: 2.00,  output: 10.00, cached: 0.10,  reasoning: 10.00,  cache_creation: 2.50  },
   "claude-sonnet-4-6":            { input: 3.00,  output: 15.00, cached: 0.30,  reasoning: 15.00,  cache_creation: 3.75  },
   "claude-sonnet-4-5-20250929":   { input: 3.00,  output: 15.00, cached: 0.30,  reasoning: 15.00,  cache_creation: 3.75  },
   "claude-haiku-4-5-20251001":    { input: 1.00,  output: 5.00,  cached: 0.10,  reasoning: 5.00,   cache_creation: 1.25  },
@@ -272,6 +282,13 @@ export const PROVIDER_PRICING = {
     "deepseek-ai/DeepSeek-V4-Pro": { input: 1.68, output: 3.36, cached: 0.14, reasoning: 3.36 },
     "deepseek-ai/DeepSeek-V4-Flash": { input: 0.21, output: 0.63, cached: 0.02, reasoning: 0.63 },
     "moonshotai/Kimi-K2.6": { input: 0.91, output: 3.78, cached: 0.15, reasoning: 3.78 },
+  },
+  // Inception Labs — first-party launch pricing (docs.inceptionlabs.ai/get-started,
+  // 2026-10-20): mercury-3 50% off → $0.10/$0.35, cached $0.01. reasoning billed
+  // at the output rate. mercury-2.5 keeps its legacy $0.20/$0.75 rates.
+  inception: {
+    "mercury-3":    { input: 0.10, output: 0.35, cached: 0.01, reasoning: 0.35 },
+    "mercury-2.5":  { input: 0.20, output: 0.75, cached: 0.02, reasoning: 0.75 },
   },
   // TokenRouter — exact rates from https://api.tokenrouter.com/api/pricing ($1/1M tokens).
   // Ratio→USD: input = model_ratio×2, output = model_ratio×completion_ratio×2.

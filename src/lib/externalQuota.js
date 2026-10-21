@@ -55,6 +55,11 @@ const QUOTA_ROW_FIELDS = {
   detailOnly: "boolean",     // collapsed into 逐包明细, kept off the headline pool
   summarizesDetail: "boolean", // summary row (headline restatement) — charted, never listed in 逐包明细
   isCreditBalance: "boolean", // stored-value balance (钱/币余额) — single value + unit, never "X / Y"
+  // Read-only daily check-in state carried on the row (CreditDaddy#33 方案 B):
+  // the push says "this account signed in today"; 10Router only ever displays
+  // it. Absent = unknown (the pusher's query failed) — no badge, never an error.
+  checkinToday: "boolean",
+  streakDays: "positiveInteger", // consecutive-day streak, rendered beside the badge when present
   name: "shortString",       // explicit display name, <= 80 chars
 };
 
@@ -67,6 +72,10 @@ function coerceField(kind, value) {
       return Number.isFinite(value) && value >= 0 ? value : undefined;
     case "positiveNumber":
       return Number.isFinite(value) && value > 0 ? value : undefined;
+    case "positiveInteger":
+      // A streak of "7.5" is malformed, not rounded — drop it rather than
+      // inventing a number the pusher never sent.
+      return Number.isInteger(value) && value > 0 ? value : undefined;
     case "boolean":
       return typeof value === "boolean" ? value : undefined;
     case "shortString":
@@ -254,6 +263,8 @@ function snapshotToRow(snap) {
     ...(e.detailOnly !== undefined ? { detailOnly: e.detailOnly } : {}),
     ...(e.summarizesDetail !== undefined ? { summarizesDetail: e.summarizesDetail } : {}),
     ...(e.isCreditBalance !== undefined ? { isCreditBalance: e.isCreditBalance } : {}),
+    ...(e.checkinToday !== undefined ? { checkinToday: e.checkinToday } : {}),
+    ...(e.streakDays !== undefined ? { streakDays: e.streakDays } : {}),
   }));
   return {
     id: `ext:${snap.source}`,

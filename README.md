@@ -14,6 +14,8 @@
 [![Platform](https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20fnOS%20%7C%20Docker-6b7280)](#下载)
 [![Node](https://img.shields.io/badge/Node.js-%E2%89%A5%2018-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![License](https://img.shields.io/github/license/techysy/10router?label=%E8%AE%B8%E5%8F%AF&color=f59e0b)](LICENSE)
+[![Star](https://img.shields.io/github/stars/techysy/10router?style=flat&logo=github&label=Star&color=%23000)](https://github.com/techysy/10router)
+[![爱发电](https://img.shields.io/badge/%E7%88%B1%E5%8F%91%E7%94%B5-AiFaDian-7c3aed)](https://ifdian.net/a/10router)
 
 [下载](#下载) · [功能](#功能) · [架构](#架构) · [快速开始](#快速开始) · [用量同步插件](#用量同步插件10router-sync) · [同步上游](#同步上游) · [项目结构](#项目结构) · [更新日志](CHANGELOG.md)
 

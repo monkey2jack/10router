@@ -10,6 +10,7 @@ import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
 import { aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
+import { cn } from "@/shared/utils/cn";
 import { translate } from "@/i18n/runtime";
 
 // Validate combo name: only a-z, A-Z, 0-9, -, _
@@ -205,12 +206,13 @@ export default function CombosPage() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <p className="text-sm text-text-muted mt-1">
-            Group models under one name, then pick a strategy per combo:
+            {translate("Group models under one name, then pick a strategy per combo:")}
           </p>
           <ul className="text-sm text-text-muted mt-2 flex flex-col gap-1">
-            <li><span className="font-medium text-text-main">Fallback</span> — tries models in order (next on failure)</li>
-            <li><span className="font-medium text-text-main">Round Robin</span> — rotates models across requests to spread load</li>
-            <li><span className="font-medium text-text-main">Fusion</span> — queries all models in parallel, then a judge synthesizes one answer. Best quality, but costs the most: every request bills all panel models + the judge (N+1 calls)</li>
+            <li><span className="font-medium text-text-main">{translate("Fallback")}</span> {translate("— tries models in order (next on failure)")}</li>
+            <li><span className="font-medium text-text-main">{translate("Round Robin")}</span> {translate("— rotates models across requests to spread load")}</li>
+            <li><span className="font-medium text-text-main">{translate("Fusion")}</span> {translate("— queries all models in parallel, then a judge synthesizes one answer. Best quality, but costs the most: every request bills all panel models + the judge (N+1 calls)")}</li>
+            <li><span className="font-medium text-text-main">{translate("Router")}</span> {translate("— decision model analyzes user prompt and selects the best-suited member model to answer (fast, capability-aware routing)")}</li>
           </ul>
         </div>
         <Button icon="add" onClick={() => setShowCreateModal(true)} className="w-full sm:w-auto whitespace-nowrap">
@@ -307,17 +309,22 @@ const fmtK = (n) => {
   return `${Math.round(n / 1000)}k`;
 };
 
+// Labels go through translate() — Select renders option.label verbatim.
 const STRATEGY_OPTIONS = [
-  { value: "fallback", label: "Fallback — try in order" },
-  { value: "round-robin", label: "Round Robin — rotate" },
-  { value: "fusion", label: "Fusion — panel + judge" },
+  { value: "fallback", label: translate("Fallback — try in order") },
+  { value: "round-robin", label: translate("Round Robin — rotate") },
+  { value: "fusion", label: translate("Fusion — panel + judge") },
+  { value: "router", label: translate("Router — decision model picks member") },
 ];
 
 function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], copied, onCopy, onEdit, onDelete, strategy = {}, onSetStrategy }) {
   const [showJudgeSelect, setShowJudgeSelect] = useState(false);
+  const [showRouterSelect, setShowRouterSelect] = useState(false);
   const current = strategy.fallbackStrategy || "fallback";
   const judge = strategy.judgeModel || "";
   const isFusion = current === "fusion";
+  const isRouter = current === "router";
+  const routerModel = strategy.routerModel || "";
   // The synced catalog is server-only, so resolving here would fall back to the
   // generic patterns and under-report the limits. getCaps carries the server's
   // answer for /api/models; the local tables still own tools/pdf/thinking*.
@@ -377,6 +384,38 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
                     onClick={() => onSetStrategy({ judgeModel: "" })}
                     className="p-0.5 rounded text-text-muted hover:text-red-500 hover:bg-red-500/10 transition-colors"
                     title="Reset judge to Auto"
+                  >
+                    <span className="material-symbols-outlined text-[13px]">close</span>
+                  </button>
+                )}
+              </div>
+            )}
+            {/* Router: decision-model picker (issue #73). Required — without a
+                decision model the strategy degrades to plain fallback, so the
+                empty state is surfaced, not hidden. */}
+            {isRouter && (
+              <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+                <span className="text-[11px] font-medium text-text-muted">Router</span>
+                <button
+                  onClick={() => setShowRouterSelect(true)}
+                  className={cn(
+                    "inline-flex max-w-full items-center gap-1 rounded border border-dashed px-1.5 py-0.5 font-mono text-[11px] transition-colors",
+                    routerModel
+                      ? "border-primary/40 text-primary hover:border-primary hover:bg-primary/5"
+                      : "border-amber-500/50 text-amber-600 dark:text-amber-400 hover:border-amber-500"
+                  )}
+                  title={routerModel
+                    ? "Pick the decision model that selects the answering member"
+                    : "No decision model set — the combo falls back to the normal order"}
+                >
+                  <span className="material-symbols-outlined text-[13px]">alt_route</span>
+                  <span className="truncate">{routerModel || translate("Select decision model")}</span>
+                </button>
+                {routerModel && (
+                  <button
+                    onClick={() => onSetStrategy({ routerModel: "" })}
+                    className="p-0.5 rounded text-text-muted hover:text-red-500 hover:bg-red-500/10 transition-colors"
+                    title="Clear decision model (falls back to normal order)"
                   >
                     <span className="material-symbols-outlined text-[13px]">close</span>
                   </button>
@@ -453,6 +492,22 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
           activeProviders={activeProviders}
           title="Select Judge Model"
           addedModelValues={judge ? [judge] : []}
+          closeOnSelect={true}
+        />
+      )}
+
+      {/* Router decision-model picker (issue #73): decision lane only — a
+          System One model picks the answering member and never answers itself,
+          so the picker lists exactly kind:"systemone" rows. */}
+      {showRouterSelect && (
+        <ModelSelectModal
+          isOpen={showRouterSelect}
+          onClose={() => setShowRouterSelect(false)}
+          onSelect={(m) => { onSetStrategy({ routerModel: m?.value || "" }); setShowRouterSelect(false); }}
+          activeProviders={activeProviders}
+          kindFilter="systemone"
+          title={translate("Select Decision Model")}
+          addedModelValues={routerModel ? [routerModel] : []}
           closeOnSelect={true}
         />
       )}

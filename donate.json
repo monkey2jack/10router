@@ -1,28 +1,39 @@
 {
   "title": "Support 10Router",
-  "message": "If you find 10Router useful, consider supporting its development!",
+  "message": "If you find 10Router useful, consider supporting its development — every token of the free-channel work is powered by coffee. Thanks to all the backers ❤️",
   "channels": [
     {
       "id": "github",
       "label": "GitHub Sponsors",
-      "description": "Support via GitHub Sponsors",
+      "description": "Support via Sponsors",
       "icon": "favorite",
       "color": "#db61a2",
       "url": "https://github.com/sponsors/techysy"
     },
     {
-      "id": "wechat",
-      "label": "WeChat Pay",
-      "description": "Scan QR code to tip",
-      "icon": "qr_code",
-      "color": "#07c160"
+      "id": "ifdian",
+      "label": "AiFaDian",
+      "description": "Power me ⚡️",
+      "icon": "electric_bolt",
+      "color": "#7c3aed",
+      "url": "https://afdian.com/a/yu_shiyang",
+      "qr": "https://raw.githubusercontent.com/techysy/10router/refs/heads/main/public/donate/ifdian.svg"
     },
     {
       "id": "alipay",
       "label": "Alipay",
-      "description": "Scan QR code to tip",
+      "description": "Scan with Alipay to tip",
       "icon": "qr_code",
-      "color": "#1677ff"
+      "color": "#1677ff",
+      "qr": "https://raw.githubusercontent.com/techysy/10router/refs/heads/main/public/donate/alipay.svg"
+    },
+    {
+      "id": "wechat",
+      "label": "WeChat Pay",
+      "description": "Scan with WeChat to tip",
+      "icon": "qr_code",
+      "color": "#07c160",
+      "qr": "https://raw.githubusercontent.com/techysy/10router/refs/heads/main/public/donate/wechat.svg"
     }
   ]
 }

@@ -246,7 +246,7 @@ export class AntigravityExecutor extends BaseExecutor {
       return c;
     });
     // Merge/strip, then make sure the turn order is one Antigravity accepts.
-    const contents = rawContents && normalizeGeminiContents(rawContents, { guardTurns: true });
+    const contents = rawContents && normalizeGeminiContents(rawContents, { guardTurns: true, model });
 
     // Sanitize tool schemas and function names before sending to Antigravity.
     // Translated requests arrive already renamed (the translator records the

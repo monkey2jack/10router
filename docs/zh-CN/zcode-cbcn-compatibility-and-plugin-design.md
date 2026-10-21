@@ -62,7 +62,7 @@ Turn execution failed / provider=cbcn model=cbcn/glm-5.3-flash / reason=invalid_
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ 2. 10Router 网关服务端 (10router 本地/网关层)                │
-│  - 极端体积兜底拦截 (isOversizedForCbcn >32MB/2048msgs)     │
+│  - 极端体积兜底拦截 (isOversizedForCbcn >32MB/5000msgs)     │
 │    ※ 仅防极端巨型会话白耗 strike，拦不住常规 11128          │
 │  - 协议标准包装 ({ type: "error" }) 传递精准指导             │
 │  - 渠道级阶梯熔断保护 (60s / 10min，不锁账号，止血防连打)     │
@@ -142,7 +142,7 @@ Turn execution failed / provider=cbcn model=cbcn/glm-5.3-flash / reason=invalid_
 
 ### 1. 极端体积兜底（非 11128 通用防护）
 在 `open-sse/executors/codebuddy-cn.js` 与 `src/sse/handlers/chat.js` 中：
-- 阈值：`maxBytes = 32MB`、`maxMessages = 2048`（体积 2026-10-18 由 3.2MB 放宽；消息数 2026-10-20 由 1800 放宽，此前依次是 1200 → 1500 → 1800；`maxTools` 早已移除，工具数只进诊断文本）；
+- 阈值：`maxBytes = 32MB`、`maxMessages = 5000`（体积 2026-10-18 由 3.2MB 放宽；消息数 2026-10-21 由 2048 放宽，此前依次是 1200 → 1500 → 1800 → 2048；`maxTools` 早已移除，工具数只进诊断文本）；
 - **定位说明**：这是**极端量级兜底**，不是 11128 的防护手段。实测 60KB 请求同样会中 11128、113KB 反而通过，体积与拦截无因果。本拦截仅用于阻止超大巨型会话白白消耗一次熔断 strike——32MB 对上游客端 128MB 的 body 上限仍留足余量。
 
 ### 2. 渠道级熔断（11128 的真正处理手段）

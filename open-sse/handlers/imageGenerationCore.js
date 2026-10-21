@@ -24,6 +24,7 @@ function serializeRequestBody(requestBody) {
  * @param {boolean} [options.binaryOutput] - Return raw image bytes
  * @param {function} [options.onCredentialsRefreshed]
  * @param {function} [options.onCredentialsRefreshFailed] - called on an unrecoverable refresh failure
+ * @param {function} [options.onUsage] - Receives exact provider-reported usage when available
  * @param {function} [options.onRequestSuccess]
  * @returns {Promise<{ success: boolean, response: Response, status?: number, error?: string }>}
  */
@@ -36,6 +37,7 @@ export async function handleImageGenerationCore({
   binaryOutput = false,
   onCredentialsRefreshed,
   onCredentialsRefreshFailed,
+  onUsage,
   onRequestSuccess,
 }) {
   const { provider, model } = modelInfo;
@@ -177,6 +179,7 @@ export async function handleImageGenerationCore({
         requestBody,
         model,
         body,
+        onUsage,
       });
       // Codex streaming case: returns an SSE Response directly
       if (parsed?.sseResponse) {

@@ -33,21 +33,28 @@ export function extractEarliestPackageExpiry(usage) {
     // Sentinel dates (year 9999) mean "permanent" — same as having no date.
     const isFuture = hasReset && resetTime > now && new Date(resetTime).getFullYear() <= 2099;
 
-    // A RECURRING window (recurring:true, e.g. CodeBuddy refills / MiMo
-    // weekly / MiniMax Code M Plan / Antigravity 5h+7d) resets instead of
-    // dying: when it's drained, the upcoming reset time is exactly the
-    // information the badge exists to show. A drained ONE-SHOT pack is dead
-    // weight — its expiry must never rank the account. That phantom countdown
-    // was a real routing bug: a spent 0/100 gift pack expiring in 3 days kept
-    // pulling its account to the front of the earliest-expiry queue while the
-    // only pack actually spendable had 19 days left, so the account got burned
-    // on a schedule that described nothing it still had.
-    if (pkg.recurring !== true) {
+    // A RECURRING window (recurring:true, e.g. MiMo weekly / MiniMax Code M Plan /
+    // Antigravity 5h+7d) resets instead of dying: when it's drained, the upcoming
+    // reset time is exactly the information the badge exists to show.
+    //
+    // However, when a recurring pack is marked `giftPack: true` (e.g. CodeBuddy CN's
+    // Monthly refill allowance alongside multiple bonus packs): it is an additive
+    // quota package, NOT a rate limit. When its cycle balance is 100% drained
+    // (used >= total or remaining <= 0), it must NOT hijack the earliest expiry
+    // timestamp over unconsumed bonus packs! Doing so makes every account report
+    // the identical month-end reset date and wedges multi-account earliest-expiry
+    // dispatch.
+    const isExhausted = () => {
       const used = Number(pkg.used ?? 0);
       const total = Number(pkg.total ?? 0);
-      if (total > 0 && used >= total) return;
-      if (pkg.remaining !== undefined && Number(pkg.remaining) <= 0) return;
-      if (pkg.remainingPercentage !== undefined && Number(pkg.remainingPercentage) <= 0) return;
+      if (total > 0 && used >= total) return true;
+      if (pkg.remaining !== undefined && Number(pkg.remaining) <= 0) return true;
+      if (pkg.remainingPercentage !== undefined && Number(pkg.remainingPercentage) <= 0) return true;
+      return false;
+    };
+
+    if (pkg.recurring !== true || pkg.giftPack === true) {
+      if (isExhausted()) return;
     }
     // A row whose reset date exists but is NOT a live future time is spent
     // (one-shot expired) or mid-refill (recurring past its mark) — it has no

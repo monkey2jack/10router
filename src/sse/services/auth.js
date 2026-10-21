@@ -6,6 +6,7 @@ import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.
 import { getUsageForProvider } from "open-sse/services/usage.js";
 import { extractEarliestPackageExpiry } from "open-sse/services/usage/expiryExtractor.js";
 import { selectRelayCarrier } from "open-sse/services/relaySelection.js";
+import { getAntigravityQuotaCache, getAntigravityModelQuota } from "./antigravityQuota.js";
 import { NEEDS_REAUTH_MESSAGE } from "./tokenRefresh.js";
 import { hashApiKey } from "@/lib/db/crypto/apiKeyIdentity.js";
 import { errorResponse } from "open-sse/utils/error.js";
@@ -193,9 +194,20 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     }
 
     // Filter out model-locked and excluded connections
+    const isAntigravity = providerId === "antigravity";
+    const agQuotaCache = isAntigravity && model ? getAntigravityQuotaCache() : null;
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
       if (isModelLockActive(c, model)) return false;
+      // Antigravity: skip if live quota exhausted for this model (family-aware lookup)
+      if (isAntigravity && agQuotaCache) {
+        const connQuotas = agQuotaCache.get(c.id);
+        const quota = getAntigravityModelQuota(connQuotas, model) || connQuotas?.[model];
+        if (quota && quota.remainingPercentage <= 0 && quota.resetAt && new Date(quota.resetAt).getTime() > Date.now()) {
+          log.info("AG_QUOTA", `${c.id?.slice(0, 8) || "unknown"} | CACHE_BLOCK ${model} — skip upstream until ${quota.resetAt}`);
+          return false;
+        }
+      }
       // Dead refresh token cooling down (needs-reauth). Timed, not permanent:
       // once the cooldown lapses the account is probed again, and a re-auth
       // clears the mark immediately — see accountFallback.isNeedsReauthCooling.
@@ -226,9 +238,21 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       // "No active credentials" 404, which lies about what is wrong (there ARE
       // credentials; they need re-authorization, and there is a retry time).
       const reauthConns = connections.filter(c => isNeedsReauthCooling(c));
+      // Antigravity lazy quota-cache resets participate in retry timing too —
+      // a pool of all cache-blocked accounts must report its reset, not null.
+      const agExpiries = [];
+      if (isAntigravity && model && agQuotaCache) {
+        connections.forEach((c) => {
+          const connQuotas = agQuotaCache.get(c.id);
+          const quota = getAntigravityModelQuota(connQuotas, model) || connQuotas?.[model];
+          const resetAt = quota?.resetAt;
+          if (resetAt && new Date(resetAt).getTime() > Date.now()) agExpiries.push(resetAt);
+        });
+      }
       const expiries = [
         ...lockedConns.map(c => getEarliestModelLockUntil(c)),
         ...reauthConns.map(c => c.needsReauthUntil),
+        ...agExpiries,
       ].filter(Boolean);
       const earliest = expiries.sort()[0] || null;
       if (earliest) {

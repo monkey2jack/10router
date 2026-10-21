@@ -89,8 +89,6 @@ const DEFAULT_SETTINGS = {
   pxpipeTimeoutMs: 15000,
   // Experimental: auto daily check-in for CodeBuddy CN accounts.
   codeBuddyCheckin: false,
-  // Experimental: intl daily active-session probe (campaign credits).
-  codeBuddyIntlSession: false,
   // Experimental: auto compensation & gift claim for CodeBuddy CN accounts.
   codeBuddyCompensation: false,
   // Daily-done memo for both passes: { [connectionId]: "YYYY-MM-DD" } (local).

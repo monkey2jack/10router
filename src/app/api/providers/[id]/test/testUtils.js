@@ -1093,7 +1093,8 @@ case "llm7": {
       case "alitp-intl":
       case "alitp-cn":
       case "tokenbom":
-      case "codiv": {
+      case "codiv":
+      case "river": {
         // Generic OpenAI-compatible freeTier/apikey providers with a GET
         // /models endpoint and default Bearer auth — validate via that.
         const validateUrl =
