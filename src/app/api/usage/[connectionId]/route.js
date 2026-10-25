@@ -4,6 +4,7 @@ import "open-sse/index.js";
 import { getProviderConnectionById, updateProviderConnection } from "@/lib/localDb";
 import { getUsageForProvider } from "open-sse/services/usage.js";
 import { extractEarliestPackageExpiry } from "open-sse/services/usage/expiryExtractor.js";
+import { extractConnectionBalance } from "open-sse/services/usage/balanceExtractor.js";
 import { isUnrecoverableRefreshError } from "open-sse/services/tokenRefresh.js";
 import { markConnectionNeedsReauth, NEEDS_REAUTH_MESSAGE } from "@/sse/services/tokenRefresh.js";
 import { getExecutor } from "open-sse/executors/index.js";
@@ -217,23 +218,41 @@ export async function computeConnectionUsage(connection, { force = false } = {})
       }
     }
 
-    // Persist earliest available package expiry for expire-first routing
+    // Persist earliest available package expiry for expire-first routing and balance for balance routing
     try {
       const expiryInfo = extractEarliestPackageExpiry(usage);
+      const parsedBalance = extractConnectionBalance(usage);
+      const balancePatch = typeof parsedBalance === "number" ? { quotaBalance: parsedBalance } : {};
       if (expiryInfo) {
         await updateProviderConnection(connection.id, {
           earliestPackageExpiry: expiryInfo.expiry || null,
           earliestPackageName: expiryInfo.name || null,
           earliestPackageRemaining:
             typeof expiryInfo.remainingPercentage === "number" ? expiryInfo.remainingPercentage : null,
+          shortWindowRemaining:
+            typeof expiryInfo.shortRemainingPct === "number" ? expiryInfo.shortRemainingPct : null,
+          longWindowRemaining:
+            typeof expiryInfo.longRemainingPct === "number" ? expiryInfo.longRemainingPct : null,
+          quotaZone: expiryInfo.zone || null,
+          shortZone: expiryInfo.shortZone || null,
+          longZone: expiryInfo.longZone || null,
+          quotaWindowSource: expiryInfo.windowSource || null,
           quotaCheckedAt: new Date().toISOString(),
+          ...balancePatch,
         });
       } else if (usage && usage.quotas) {
         await updateProviderConnection(connection.id, {
           earliestPackageExpiry: null,
           earliestPackageName: null,
           earliestPackageRemaining: null,
+          shortWindowRemaining: null,
+          longWindowRemaining: null,
+          quotaZone: null,
+          shortZone: null,
+          longZone: null,
+          quotaWindowSource: null,
           quotaCheckedAt: new Date().toISOString(),
+          ...balancePatch,
         });
       }
     } catch (e) {
@@ -258,6 +277,13 @@ export async function computeConnectionUsage(connection, { force = false } = {})
         } else {
           usage = { quotas: extQuotas, plan: claimed.quota.plan ?? usage?.plan ?? null };
         }
+        // Update balance if extracted from claimed rows
+        try {
+          const extBalance = extractConnectionBalance(usage);
+          if (typeof extBalance === "number") {
+            await updateProviderConnection(connection.id, { quotaBalance: extBalance });
+          }
+        } catch { /* ignore */ }
       } else if (PUSH_ONLY_USAGE_PROVIDERS.has(connection.provider) && usage && usage.message) {
         usage = { message: "No pushed balance matched this connection — set the CreditDaddy account alias to this connection's name (same name claims the card)" };
       }

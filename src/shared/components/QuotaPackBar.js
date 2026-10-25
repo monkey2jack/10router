@@ -9,6 +9,7 @@ import {
   cycleRowLines,
   CRITICAL_PCT,
   isAggregateQuotaRow,
+  isDrainedGiftPack,
   isRecurringQuotaRow,
   isResettingRow,
   groupRowsByFamily,
@@ -377,8 +378,16 @@ export default function QuotaPackBar({ packs = [], className, nestedCycle = fals
   // as a giftPack / credit pool (e.g. CodeBuddy Intl with no bonus packs).
   // Alone without those flags, a monthly row is a subscription window (opencode-go),
   // not an additive spendable balance.
+  // A DRAINED monthly grant (giftPack at 0) stops counting into the pool —
+  // same rule the router's expiryExtractor applies for earliest-expiry (T0
+  // sibling): it is a burned asset, and summing its total into the denominator
+  // read "30 / 130" on CodeBuddy Intl cards whose 100 credits were gone. The
+  // row itself still renders in the per-pack details (逐包明细).
   const monthlyPacks = cycle.monthly.filter(
-    (r) => !inLadder.has(r) && (families.length > 0 || r.giftPack === true || r.displayRemaining === true)
+    (r) =>
+      !inLadder.has(r) &&
+      !isDrainedGiftPack(r) &&
+      (families.length > 0 || r.giftPack === true || r.displayRemaining === true)
   );
   // Stored-value singletons with IDENTICAL values are the same pool rendered
   // twice upstream (stepfun-cn: 余额(CNY) + 代金券(CNY) both 14.95/14.95) —
@@ -433,6 +442,13 @@ export default function QuotaPackBar({ packs = [], className, nestedCycle = fals
   // breakdown — the same segments + "N 个资源包" line a CodeBuddy card gets.
   const byBreakdown = isPoolFullyRepresented && breakdown.length > 0;
   const barPacks = byBreakdown ? breakdown : pool;
+  // A pool whose rows carry an expiry is never the "one settled pool" shape —
+  // it is packs that will run out, and the meta line's pack-count + nearest
+  // expiry is real information. Without this guard, the drained-giftPack
+  // exclusion collapsed CodeBuddy pools to a single family/row and the card
+  // degraded to a bare name line ("赠送包 1") with no countdown at all
+  // (2026-10-22 user report: 没有了 xxx 于多久过期).
+  const poolHasExpiry = pool.some((p) => p.resetAt);
 
   const renderPoolBar = (poolPacks, poolTotal) => {
     const livePacks = poolPacks
@@ -572,8 +588,11 @@ export default function QuotaPackBar({ packs = [], className, nestedCycle = fals
         // (MiMo's 现金/赠送 legs fold into 逐包明细): "N 个资源包" copy is wrong
         // for a stored-value card — the name IS what the number is
         // ("现金余额：… · 赠送余额：…"). Pack-count copy stays for real pack
-        // families (Qoder's Resource Package).
-        const isSinglePool = isPoolFullyRepresented && (!byBreakdown || poolIsSettledBalance);
+        // families (Qoder's Resource Package), and for ANY pool whose rows
+        // carry an expiry — the countdown is information, never noise
+        // (poolHasExpiry guard; see its comment above).
+        const isSinglePool =
+          isPoolFullyRepresented && !poolHasExpiry && (!byBreakdown || poolIsSettledBalance);
         if (isSinglePool) {
           return (
             <div className="text-[11px] text-text-muted">

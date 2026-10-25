@@ -254,6 +254,19 @@ export function cycleRowLines(rows = []) {
 }
 
 /**
+ * A monthly GRANT (giftPack) whose balance is fully spent. Same rule as the
+ * router's expiryExtractor giftPack exclusion (T0): a drained grant is a burned
+ * asset, not headroom. Counting it in QuotaPackBar's pool inflated the
+ * denominator — "30 / 130" where the 100 had nothing left (user-reported
+ * CodeBuddy Intl card reading like 100 credits vanished). It stays visible in
+ * the per-pack details (逐包明细); the card's pool just stops counting it.
+ */
+export function isDrainedGiftPack(row) {
+  if (row?.giftPack !== true) return false;
+  return percentOf(row) <= 0;
+}
+
+/**
  * Whether a row RESETS (cycle window) or EXPIRES (one-shot pack / balance).
  * One rule for every quota surface — the card and the per-pack table used to
  * disagree (the table defaulted a missing flag to recurring, the card read the

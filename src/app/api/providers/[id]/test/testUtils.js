@@ -1,8 +1,8 @@
 import { getProviderConnectionById, updateProviderConnection } from "@/lib/localDb";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { testProxyUrl } from "@/lib/network/proxyTest";
-import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, USAGE_SUPPORTED_PROVIDERS } from "@/shared/constants/providers";
-import { getDefaultModel } from "open-sse/config/providerModels.js";
+import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, USAGE_SUPPORTED_PROVIDERS, AI_PROVIDERS } from "@/shared/constants/providers";
+import { getDefaultModel, getModelUpstreamId } from "open-sse/config/providerModels.js";
 import { CODEX_CLI_VERSION } from "open-sse/config/appConstants.js";
 import { GROK_CLI_PAGER_USER_AGENT, GROK_CLI_VERSION } from "open-sse/config/grokCli.js";
 import { resolveOllamaLocalHost, PROVIDERS } from "open-sse/config/providers.js";
@@ -249,12 +249,138 @@ function parseProviderErrorMessage(bodyText, fallback) {
  * one-click "Verify your account" URL inside the response body. Surface that URL —
  * the bare error.message ("Verify your account to continue.") leaves the user with
  * no next step. Exported for unit tests.
+ *
+ * "Requested entity was not found" on the generation probe is Google's blanket
+ * answer for an account the model is not granted to (preview/灰度 not rolled out)
+ * — never a token problem. Expand it into an actionable sentence instead of the
+ * cryptic upstream string. Issue #82 follow-up.
  */
-export function buildCloudCodeProbeError(bodyText, fallbackStatus) {
-  return (
+const NOT_FOUND_ENTITY_RE = /Requested entity was not found/i;
+
+export function buildCloudCodeProbeError(bodyText, fallbackStatus, targetModel = null) {
+  const base = (
     buildAccountValidationMessage(bodyText) ||
     parseProviderErrorMessage(bodyText, `API returned ${fallbackStatus}`)
   );
+  // 404-with-entity-not-found during a MODEL probe is the preview-grant signal.
+  // Both facts matter to the user: the credential is fine, and THIS account is
+  // not in the model's rollout yet. Raw "Requested entity was not found" reads
+  // as a server bug and sent users hunting for one.
+  // Exact-match skeleton (no interpolation) so the server-side i18n dictionary
+  // can translate it; the model name is appended after translation by the route.
+  if (NOT_FOUND_ENTITY_RE.test(base)) {
+    return targetModel
+      ? "Model not available on this account (Google preview/rollout not granted)"
+      : "Requested resource not available on this account (Google preview/rollout not granted)";
+  }
+  return base;
+}
+
+/**
+ * Resolve the connection's real cloudcode project ID. The generateContent probe
+ * MUST carry the account's actual project: a fabricated id makes Google answer a
+ * blanket "404 Requested entity was not found" that is identical for every model
+ * and looks exactly like "model not in preview" — which is how the probe burned
+ * healthy accounts. Order: stored projectId → loadCodeAssist lookup.
+ */
+async function resolveCloudCodeProjectId(connection, accessToken, effectiveProxy = null) {
+  const stored = String(connection.projectId || "").trim();
+  if (stored) return stored;
+  try {
+    const res = await fetchWithConnectionProxy(CLOUD_CODE_ASSIST_TEST_URL, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        "User-Agent": connection.provider === "antigravity"
+          ? "antigravity/ide/2.22.0 darwin/arm64"
+          : "google-api-nodejs-client/9.15.1 gemini-cli/0.34.0",
+      },
+      body: JSON.stringify({ metadata: { ideType: "IDE_UNSPECIFIED", platform: "PLATFORM_UNSPECIFIED", pluginType: "GEMINI" } }),
+    }, effectiveProxy);
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    const pid = data?.cloudaicompanionProject?.id || data?.cloudaicompanionProject;
+    const s = typeof pid === "string" ? pid.trim() : "";
+    return s || null;
+  } catch {
+    return null;
+  }
+}
+
+async function probeAntigravityModelAccess(connection, accessToken, effectiveProxy = null, targetModel = "gemini-3.8-flash-high") {
+  // Hand-rolling the envelope burned two releases: a missing requestId/sessionId
+  // makes Google answer a blanket 404 identical for every model, which reads as
+  // "rollout not granted" but is really a malformed probe. So the probe now goes
+  // through the REAL AntigravityExecutor transform chain — same body shape, same
+  // headers, same URL builder as live chat. Issue #82 follow-up x2.
+  const { AntigravityExecutor } = await import("open-sse/executors/antigravity.js");
+  const executor = new AntigravityExecutor();
+
+  // No real project → skip the generation probe entirely rather than send a
+  // fabricated project id (Google 404s those, indistinguishable from a
+  // not-granted model and wrong for every model equally).
+  const projectId = await resolveCloudCodeProjectId(connection, accessToken, effectiveProxy);
+  if (!projectId) {
+    return { valid: true, error: null, warning: "Credential OK; model probe skipped (no project ID — reconnect OAuth to store it)" };
+  }
+
+  const credentials = {
+    accessToken,
+    projectId,
+    connectionId: connection.id,
+    email: connection.email,
+    providerSpecificData: connection.providerSpecificData,
+  };
+
+  const openaiishBody = {
+    model: targetModel,
+    stream: false,
+    messages: [{ role: "user", content: "ping" }],
+    max_tokens: 8,
+  };
+  // Translate to the antigravity native envelope via the same pipeline chat uses.
+  const { translateRequest, initTranslators } = await import("open-sse/translator/index.js");
+  const { stripThinkingSuffix } = await import("open-sse/translator/concerns/thinkingUnified.js");
+  await initTranslators();
+  const nativeBody = translateRequest("openai", "antigravity", targetModel, openaiishBody, false, credentials, "antigravity", null, [], connection.id, null);
+
+  // chatCore strips the "(level)" suffix from envelope.model AFTER translation —
+  // the tier rides in thinkingConfig, and Google 404s ("entity was not found")
+  // any envelope whose model still carries it (e.g. gemini-3.8-flash-high(high)).
+  // The probe must do the same or every model 404s identically.
+  const cleanModel = stripThinkingSuffix(targetModel);
+  nativeBody.model = cleanModel;
+
+  const transformedBody = executor.transformRequest(cleanModel, nativeBody, false, credentials);
+  const url = executor.buildUrl(cleanModel, false, 0, credentials);
+  const headers = executor.buildHeaders(credentials, false, null, cleanModel, transformedBody);
+
+  const res = await fetchWithConnectionProxy(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(transformedBody),
+  }, effectiveProxy);
+
+  // 2xx = completely valid
+  if (res.ok) {
+    // Drain a little so the connection is not left half-open.
+    try { await res.text(); } catch { /* best effort */ }
+    return { valid: true, error: null };
+  }
+
+  const bodyText = await res.text().catch(() => "");
+
+  // 429 = credentials and model access are valid, just rate-limited
+  if (res.status === 429) {
+    return { valid: true, error: null, warning: "Model rate-limited (quota exhausted)" };
+  }
+
+  return {
+    valid: false,
+    error: buildCloudCodeProbeError(bodyText, res.status, targetModel),
+    status: res.status,
+  };
 }
 
 async function probeCloudCodeAssistAccess(connection, accessToken, effectiveProxy = null) {
@@ -496,14 +622,50 @@ async function testOAuthConnection(connection, effectiveProxy = null, options = 
   }
 
   if (connection.provider === "gemini-cli" || connection.provider === "antigravity") {
-    const initial = await probeCloudCodeAssistAccess(connection, accessToken, effectiveProxy);
-    if (initial.valid) return { valid: true, error: null, refreshed, newTokens };
+    // If a specific model was requested (e.g. from the one-by-one dropdown), probe real generation for that model
+    // so that accounts lacking model access/preview access (such as 404 Requested entity not found or 403 VALIDATION_REQUIRED)
+    // are correctly identified rather than giving a false positive token check. Issue #82.
+    const selectedModel = options?.model;
+    const targetModel = selectedModel ? getModelUpstreamId(connection.provider, selectedModel) : null;
+
+    const runProbe = async (token) => {
+      // 1. First probe general Cloud Code access
+      const accessProbe = await probeCloudCodeAssistAccess(connection, token, effectiveProxy);
+      if (!accessProbe.valid) return accessProbe;
+
+      // 2. If a specific model is targeted, probe generateContent with that model
+      if (targetModel) {
+        const modelProbe = await probeAntigravityModelAccess(connection, token, effectiveProxy, targetModel);
+        if (!modelProbe.valid) return modelProbe;
+        if (modelProbe.warning) return { valid: true, error: null, warning: modelProbe.warning, soft: true };
+      }
+      return { valid: true, error: null };
+    };
+
+    const initial = await runProbe(accessToken);
+    if (initial.valid) {
+      return {
+        valid: true,
+        error: initial.warning || null,
+        warning: initial.warning || null,
+        refreshed,
+        newTokens,
+      };
+    }
 
     if (initial.status === 401 && config.refreshable && !refreshed && connection.refreshToken) {
       const tokens = await refreshOAuthToken(connection);
       if (tokens?.accessToken) {
-        const retry = await probeCloudCodeAssistAccess(connection, tokens.accessToken, effectiveProxy);
-        if (retry.valid) return { valid: true, error: null, refreshed: true, newTokens: tokens };
+        const retry = await runProbe(tokens.accessToken);
+        if (retry.valid) {
+          return {
+            valid: true,
+            error: retry.warning || null,
+            warning: retry.warning || null,
+            refreshed: true,
+            newTokens: tokens,
+          };
+        }
         return { valid: false, error: retry.error, refreshed: true, newTokens: tokens };
       }
       return { valid: false, error: "Token invalid or revoked", refreshed: false };
@@ -617,7 +779,105 @@ async function fetchWithConnectionProxy(url, options = {}, effectiveProxy = null
   });
 }
 
-async function testApiKeyConnection(connection, effectiveProxy = null, options = {}) {
+/**
+ * Model-aware probe for generic OpenAI-compatible providers.
+ *
+ * With a model selected in the one-by-one picker, the user is asking for the
+ * REAL generation path — a /models 200 cannot see a maintenance 503 on the
+ * chat surface (live: oxion `service_upgrading` green-lit the key check while
+ * every model 503'd). So a selected model sends a 1-token chat completion and
+ * the verdict maps like the antigravity model probe (#82): 2xx valid, 429
+ * valid + soft warning, 401/403 bad key, everything else invalid with the
+ * unwrapped upstream message (the route's pattern layer localizes it).
+ *
+ * With no model, fall back to the cheap key check: GET the registry-declared
+ * `validateUrl` (or a /models URL derived from the chat baseUrl) and judge by
+ * status, auth-only. The gate for either shape is the registry's explicit
+ * `validateUrl` declaration (or a baseUrl that ends in /chat/completions).
+ * Providers without either — vertex, media-only, selfhosted-*, custom-format
+ * chat endpoints — are not probeable this way and keep answering "Provider
+ * test not supported" from the switch default. Exported for unit tests.
+ */
+export async function probeOpenAIModelsEndpoint(connection, effectiveProxy, options = {}) {
+  const config = PROVIDERS[connection.provider];
+  if (options.model && config?.baseUrl) {
+    const { stripThinkingSuffix } = await import("open-sse/translator/concerns/thinkingUnified.js");
+    const model = stripThinkingSuffix(getModelUpstreamId(connection.provider, options.model));
+    let res;
+    try {
+      res = await fetchWithConnectionProxy(config.baseUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${connection.apiKey}` },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "ping" }], max_tokens: 1, stream: false }),
+      }, effectiveProxy);
+    } catch (err) {
+      return {
+        valid: false,
+        error: "Endpoint unreachable — the provider may be under maintenance, try again later",
+        maintenance: true,
+      };
+    }
+    if (res.status === 401 || res.status === 403) return { valid: false, error: "Invalid API key" };
+    if (res.status === 429) return { valid: true, error: "Model rate-limited (quota exhausted)" };
+    const bodyText = await res.text().catch(() => "");
+    if (!res.ok) {
+      const detail = parseProviderErrorMessage(bodyText, `API returned ${res.status}`);
+      return {
+        valid: false,
+        error: `HTTP ${res.status}: ${detail}`,
+        maintenance: res.status >= 500,
+      };
+    }
+    return { valid: true, error: null };
+  }
+
+  // Derive /models ONLY from a chat-shaped baseUrl — appending "/models" to a
+  // non-chat baseUrl (vertex's https://aiplatform.googleapis.com) fabricates a
+  // garbage URL that would then be probed.
+  const validateUrl = config?.validateUrl
+    || (config?.baseUrl?.endsWith("/chat/completions")
+      ? config.baseUrl.replace(/\/chat\/completions$/, "") + "/models"
+      : null);
+  if (!validateUrl || validateUrl === "/models") return { valid: false, error: "Provider test not supported" };
+  let res;
+  try {
+    res = await fetchWithConnectionProxy(validateUrl, {
+      headers: { Authorization: `Bearer ${connection.apiKey}` },
+    }, effectiveProxy);
+  } catch (err) {
+    // Network-level failure (DNS, timeout, TLS, connection reset) — the
+    // upstream endpoint may be down / still under maintenance.
+    return {
+      valid: false,
+      error: "Endpoint unreachable — the provider may be under maintenance, try again later",
+      maintenance: true,
+    };
+  }
+  // Verdict stays auth-only for JSON bodies (402/429/5xx say nothing about the
+  // key itself — Oxion 503 `service_upgrading` was live-proven), but an HTML
+  // page on a 5xx is a gateway block page (Cloudflare challenge / upstream
+  // error wall): that says the endpoint is NOT serving, and the old
+  // `!valid && …` guard made that branch unreachable for exactly those
+  // statuses (a 503 HTML page validated as green). 403 counts as blocked in
+  // both shapes — several gateways answer risk-control 403 with JSON.
+  const contentType = res.headers.get("content-type") || "";
+  const isHtml = /text\/html/i.test(contentType);
+  const html5xx = res.status >= 500 && isHtml;
+  const valid = !html5xx && res.status !== 401 && res.status !== 403;
+  if (!valid && (isHtml || res.status === 403 || !/json/i.test(contentType))) {
+    return {
+      valid: false,
+      error: "Provider may be under maintenance — blocked by its gateway (e.g. Cloudflare). Try again later or check the provider status page",
+      maintenance: true,
+    };
+  }
+  return { valid, error: valid ? null : "Invalid API key" };
+}
+
+// Exported for the test suite: the provider switch is the only place that
+// knows how each provider's key is verified, so the systemone probes are
+// asserted against this function rather than a copy of it.
+export async function testApiKeyConnection(connection, effectiveProxy = null, options = {}) {
   const { model } = options;
   if (isOpenAICompatibleProvider(connection.provider)) {
     const modelsBase = connection.providerSpecificData?.baseUrl;
@@ -1097,36 +1357,23 @@ case "llm7": {
       case "river": {
         // Generic OpenAI-compatible freeTier/apikey providers with a GET
         // /models endpoint and default Bearer auth — validate via that.
-        const validateUrl =
-          PROVIDERS[connection.provider]?.validateUrl ||
-          (PROVIDERS[connection.provider]?.baseUrl?.replace(/\/chat\/completions$/, "") + "/models");
-        if (!validateUrl || validateUrl === "/models") return { valid: false, error: "Provider test not supported" };
-        let res;
-        try {
-          res = await fetchWithConnectionProxy(validateUrl, {
-            headers: { Authorization: `Bearer ${connection.apiKey}` },
-          }, effectiveProxy);
-        } catch (err) {
-          // Network-level failure (DNS, timeout, TLS, connection reset) — the
-          // upstream endpoint may be down / still under maintenance.
-          return {
-            valid: false,
-            error: "Endpoint unreachable — the provider may be under maintenance, try again later",
-            maintenance: true,
-          };
-        }
-        // Cloudflare challenge page (or any HTML, not JSON) means the gateway
-        // is up but blocking direct API access — likely WAF / under maintenance.
-        const contentType = res.headers.get("content-type") || "";
-        const isCloudflare = /text\/html/i.test(contentType) || res.status === 403;
+        return probeOpenAIModelsEndpoint(connection, effectiveProxy, options);
+      }
+      case "modelscope":
+      case "sambanova":
+      case "kilo-gateway": {
+        // These gateways answer their /models catalog WITHOUT checking the key
+        // (verified with a bogus Bearer on 2026-10-25: 200), so the generic
+        // /models probe cannot discriminate — fall back to a 1-token chat ping
+        // (same shape as the codebuddy/dots pattern), judged auth-only.
+        const baseUrl = PROVIDERS[connection.provider]?.baseUrl;
+        if (!baseUrl) return { valid: false, error: "Provider test not supported" };
+        const res = await fetchWithConnectionProxy(baseUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${connection.apiKey}` },
+          body: JSON.stringify({ model: options.model ? getModelUpstreamId(connection.provider, options.model) : getDefaultModel(connection.provider), messages: [{ role: "user", content: "ping" }], max_tokens: 1, stream: false }),
+        }, effectiveProxy);
         const valid = res.status !== 401 && res.status !== 403;
-        if (!valid && (isCloudflare || !/json/i.test(contentType))) {
-          return {
-            valid: false,
-            error: "Provider may be under maintenance — blocked by its gateway (e.g. Cloudflare). Try again later or check the provider status page",
-            maintenance: true,
-          };
-        }
         return { valid, error: valid ? null : "Invalid API key" };
       }
       case "codebuddy-cn": {
@@ -1182,8 +1429,49 @@ case "llm7": {
         const valid = res.status !== 401 && res.status !== 403;
         return { valid, error: valid ? null : "Invalid API key" };
       }
+      case "systemone-pure":
+      case "drex":
+      case "v1m":
+      case "thx": {
+        // Pure System One decision providers (drex / v1m / thx — serviceKinds
+        // is systemone-only). The decision endpoint itself is the only
+        // validator: no /models, no chat surface, so without this case the
+        // Test button answered "Provider test not supported" for a healthy
+        // key and the row stayed "unknown" forever. Minimal typed decision in
+        // (same shape as the model ping). Endpoint honors the connection-level
+        // providerSpecificData.baseUrl override, mirroring handleSystemoneCore.
+        // Dual-surface providers that merely list a systemone kind (codiv,
+        // openrouter) keep their own probes above — do not add them here.
+        const cfg = AI_PROVIDERS[connection.provider]?.systemoneConfig;
+        const baseUrl = connection.providerSpecificData?.baseUrl || cfg?.baseUrl;
+        if (!baseUrl) return { valid: false, error: "Provider test not supported" };
+        const res = await fetchWithConnectionProxy(baseUrl.replace(/\/$/, ""), {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${connection.apiKey}` },
+          body: JSON.stringify({
+            model: model || getDefaultModel(connection.provider) || "test",
+            state: "Customer: I was charged twice for my order this morning.",
+            questions: { probe: { type: "noul", instructions: "Is the customer reporting a billing problem?" } },
+          }),
+        }, effectiveProxy);
+        // 404 is NOT a pass. THX-01 answers an UNAUTHENTICATED post with 404
+        // carrying a full decision body (so "any non-auth status" would green
+        // an empty key), and 404 also means "endpoint moved". Accept only a
+        // real 2xx, or the request-shaped 4xx that can only happen once auth
+        // passed (400/422 = payload/model rejected).
+        const valid = res.ok || res.status === 400 || res.status === 422;
+        return { valid, error: valid ? null : "Invalid API key" };
+      }
       default:
-        return { valid: false, error: "Provider test not supported" };
+        // No curated case for this provider. Registry entries that declare an
+        // explicit `validateUrl` are standard OpenAI-compatible gateways
+        // (GET /models, Bearer) — probe them instead of dead-ending on
+        // "Provider test not supported". Every provider shipped without a
+        // switch case landed here with a dead Test button until someone
+        // remembered the case list (modelscope / inception / apinex / oxion
+        // all did); the validateUrl declaration is the real gate. Providers
+        // without one keep the old answer via the helper's guard.
+        return probeOpenAIModelsEndpoint(connection, effectiveProxy, options);
     }
   } catch (err) {
     return { valid: false, error: err.message };

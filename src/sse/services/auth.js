@@ -1,12 +1,14 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
-import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil, channelBlockRemainingMs, isNeedsReauthCooling, NEEDS_REAUTH_STATUS, MODEL_LOCK_ALL } from "open-sse/services/accountFallback.js";
-import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
+import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil, channelBlockRemainingMs, isNeedsReauthCooling, NEEDS_REAUTH_STATUS, MODEL_LOCK_ALL, extractQuotaResetMs } from "open-sse/services/accountFallback.js";
+import { MAX_RATE_LIMIT_COOLDOWN_MS, MAX_QUOTA_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { getUsageForProvider } from "open-sse/services/usage.js";
 import { extractEarliestPackageExpiry } from "open-sse/services/usage/expiryExtractor.js";
+import { extractConnectionBalance } from "open-sse/services/usage/balanceExtractor.js";
+import { getProviderQuotaCategory, PROVIDER_QUOTA_TYPES } from "open-sse/config/providerCategories.js";
 import { selectRelayCarrier } from "open-sse/services/relaySelection.js";
-import { getAntigravityQuotaCache, getAntigravityModelQuota } from "./antigravityQuota.js";
+import { getAntigravityQuotaCache, getAntigravityModelQuota, getAntigravityModelFamily } from "./antigravityQuota.js";
 import { NEEDS_REAUTH_MESSAGE } from "./tokenRefresh.js";
 import { hashApiKey } from "@/lib/db/crypto/apiKeyIdentity.js";
 import { errorResponse } from "open-sse/utils/error.js";
@@ -20,6 +22,99 @@ let selectionMutex = Promise.resolve();
 // In-flight tracking for non-blocking background quota refresh
 const _quotaRefreshInFlight = new Set();
 
+const ZONE_EMOJI = {
+  green: "🟩",
+  yellow: "🟨",
+  red: "🟥",
+};
+
+/**
+ * Zone marker for the selection log.
+ *
+ * The colour block leads the line, standing in for the logger's ℹ️ marker, and
+ * `zone=<word>` stays as the greppable token further along — the block is for
+ * the eye scrolling a live tail, the word is for `grep 'zone=red'`. Emitting
+ * both in the same field (zone=🟩green) duplicated the colour and read badly.
+ */
+function zoneMarker(conn) {
+  return ZONE_EMOJI[conn?.quotaZone] || "⚪";
+}
+
+function formatTimeRemaining(isoDate) {
+  if (!isoDate) return "";
+  const diffMs = new Date(isoDate).getTime() - Date.now();
+  if (diffMs <= 0) return "expired";
+  const sec = Math.round(diffMs / 1000);
+  const min = Math.floor(sec / 60);
+  const hr = Math.floor(min / 60);
+  const day = Math.floor(hr / 24);
+  if (day >= 1) {
+    const remHr = hr % 24;
+    return remHr > 0 ? `${day}d ${remHr}h` : `${day}d`;
+  }
+  if (hr >= 1) {
+    const remMin = min % 60;
+    return remMin > 0 ? `${hr}h ${remMin}m` : `${hr}h`;
+  }
+  return `${Math.max(1, min)}m`;
+}
+
+/**
+ * Concise, human-friendly quota line for selection logs.
+ * Tailored by provider type so it highlights what matters without line-wrapping noise:
+ *   - Pack assets (CodeBuddy, Qoder): account | pack (remaining%) | expires in
+ *   - Rolling buckets (Antigravity): account | family (5h xx%, 7d xx%) | reset in
+ */
+function quotaTag(conn, providerId, options = {}) {
+  if (!conn) return "no-account";
+  const idStr = conn.id?.slice(0, 8) || "?";
+  const name = conn.name || conn.email || idStr;
+  const isPackAsset = ["codebuddy-cn", "codebuddy-intl", "qoder", "qoder-cn"].includes(providerId);
+  const pct = (v) => (typeof v === "number" && Number.isFinite(v) ? `${v.toFixed(1)}%` : null);
+
+  if (isPackAsset) {
+    const pkg = conn.earliestPackageName || "pack";
+    const rem = pct(conn.shortWindowRemaining ?? conn.earliestPackageRemaining);
+    const exp = conn.earliestPackageExpiry ? formatTimeRemaining(conn.earliestPackageExpiry) : null;
+    const parts = [name];
+    if (rem) parts.push(`${pkg} (${rem})`);
+    else parts.push(pkg);
+    if (exp) parts.push(`exp in ${exp}`);
+    return parts.join(" | ");
+  }
+
+  if (providerId === "antigravity") {
+    const fam = options.family || (conn.earliestPackageName?.includes("claude") || conn.earliestPackageName?.includes("gpt") ? "claude_gpt" : "gemini");
+    const s = pct(conn.shortWindowRemaining);
+    const l = pct(conn.longWindowRemaining);
+    const windows = [];
+    if (s) windows.push(`5h ${s}`);
+    if (l) windows.push(`7d ${l}`);
+    const reset = conn.earliestPackageExpiry ? formatTimeRemaining(conn.earliestPackageExpiry) : null;
+    const parts = [name, `${fam} (${windows.join(", ")})`];
+    if (reset) parts.push(`reset in ${reset}`);
+    return parts.join(" | ");
+  }
+
+  const parts = [name];
+  if (conn.priority != null) parts.push(`prio=${conn.priority}`);
+  return parts.join(" | ");
+}
+
+function mostRecentUsedCarrier(ring, exclude) {
+  let best = null;
+  let bestTime = -Infinity;
+  for (const c of ring) {
+    if (!c.lastUsedAt || c.id === exclude?.id) continue;
+    const t = new Date(c.lastUsedAt).getTime();
+    if (Number.isFinite(t) && t > bestTime) {
+      bestTime = t;
+      best = c;
+    }
+  }
+  return best;
+}
+
 /**
  * Background quota refresh for the earliest-expiry strategy.
  *
@@ -30,7 +125,7 @@ const _quotaRefreshInFlight = new Set();
  * cleared by a successful chat request, so refresh resumes on its own.
  */
 function triggerBackgroundQuotaRefresh(connections) {
-  const STALE_MS = 15 * 60 * 1000;
+  const STALE_MS = 5 * 60 * 1000; // 5 minutes stale threshold aligns with dashboard auto-refresh
   const now = Date.now();
 
   for (const conn of connections) {
@@ -50,6 +145,33 @@ function triggerBackgroundQuotaRefresh(connections) {
         };
         const usage = await getUsageForProvider(conn, proxyOptions);
         const expiryInfo = extractEarliestPackageExpiry(usage);
+
+        // Family-partitioned pools (Antigravity: gemini_* / claude_gpt_*) must be
+        // stored per family. A single merged reading lets the LONGEST window of
+        // the other family win the "long window" slot — with claude_gpt_weekly
+        // at 100% and gemini_weekly at 87%, the stored long came out 100 and the
+        // Gemini row reported "long=100%" while its own card showed 87%. The
+        // request path reads these columns whenever its in-memory family view
+        // misses, so a contaminated column silently overrides the correct one.
+        const famPatch = {};
+        if (usage?.quotas && conn.provider === "antigravity") {
+          for (const family of ["gemini", "claude_gpt"]) {
+            const fam = extractEarliestPackageExpiry(usage, { family });
+            if (!fam) continue;
+            const key = family === "gemini" ? "Gemini" : "ClaudeGpt";
+            famPatch[`${key}ShortWindowRemaining`] =
+              typeof fam.shortRemainingPct === "number" ? fam.shortRemainingPct : null;
+            famPatch[`${key}LongWindowRemaining`] =
+              typeof fam.longRemainingPct === "number" ? fam.longRemainingPct : null;
+            famPatch[`${key}Zone`] = fam.zone || null;
+            famPatch[`${key}PackageExpiry`] = fam.expiry || null;
+            famPatch[`${key}PackageName`] = fam.name || null;
+          }
+        }
+
+        const parsedBalance = extractConnectionBalance(usage);
+        const balancePatch = typeof parsedBalance === "number" ? { quotaBalance: parsedBalance } : {};
+
         await updateProviderConnection(conn.id, {
           earliestPackageExpiry: expiryInfo?.expiry || null,
           earliestPackageName: expiryInfo?.name || null,
@@ -58,7 +180,20 @@ function triggerBackgroundQuotaRefresh(connections) {
           // percentage quota (relay then degrades to "burn until 429").
           earliestPackageRemaining:
             typeof expiryInfo?.remainingPercentage === "number" ? expiryInfo.remainingPercentage : null,
+          // Fire-and-forget quota refresh stays cheap, but it must write the
+          // same split the request path reads, or the relay would keep judging
+          // on the stale "smallest of every bucket" number.
+          shortWindowRemaining:
+            typeof expiryInfo?.shortRemainingPct === "number" ? expiryInfo.shortRemainingPct : null,
+          longWindowRemaining:
+            typeof expiryInfo?.longRemainingPct === "number" ? expiryInfo.longRemainingPct : null,
+          quotaZone: expiryInfo?.zone || null,
+          shortZone: expiryInfo?.shortZone || null,
+          longZone: expiryInfo?.longZone || null,
+          quotaWindowSource: expiryInfo?.windowSource || null,
           quotaCheckedAt: new Date().toISOString(),
+          ...famPatch,
+          ...balancePatch,
         });
       } catch {
         // Non-blocking, ignore background errors
@@ -284,32 +419,112 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     // clears the breaker, after which this resumes on its own.
     const channelBlockLeftMs = channelBlockRemainingMs(settings.channelBlocks?.[providerId]);
     if (channelBlockLeftMs > 0) {
-      log.debug("AUTH", `${providerId} | channel blocked (${Math.ceil(channelBlockLeftMs / 1000)}s left) — skipping quota refresh`);
+      // info, not debug: this is the one path that silently skips the refresh,
+      // and a stale family column on the row is exactly what it causes.
+      log.info("AUTH", `${providerId} | channel blocked (${Math.ceil(channelBlockLeftMs / 1000)}s left) — skipping quota refresh`);
     } else if (earliestExpiryFirst && availableConnections.length > 1) {
       triggerBackgroundQuotaRefresh(availableConnections);
     }
 
     // If earliestExpiryFirst is enabled, sort available connections so that the account
     // with the nearest future package expiration date is selected first.
-    let orderedConnections = availableConnections;
-    if (earliestExpiryFirst && availableConnections.length > 1) {
-      const now = Date.now();
-      orderedConnections = [...availableConnections].sort((a, b) => {
-        const timeA = (a.earliestPackageExpiry && new Date(a.earliestPackageExpiry).getTime() > now)
-          ? new Date(a.earliestPackageExpiry).getTime()
-          : Infinity;
-        const timeB = (b.earliestPackageExpiry && new Date(b.earliestPackageExpiry).getTime() > now)
-          ? new Date(b.earliestPackageExpiry).getTime()
-          : Infinity;
+    const targetFamily = isAntigravity ? getAntigravityModelFamily(model) : null;
+    let poolConnections = availableConnections;
+    if (isAntigravity && targetFamily) {
+      // Live in-memory cache first (freshest), then the per-family columns the
+      // background refresh persists, and only then the merged columns. The
+      // merged ones are family-agnostic: with claude_gpt_weekly at 100% and
+      // gemini_weekly at 87%, the merged long came out 100 and the Gemini row
+      // logged long=100% against a card reading 87%. Falling back to them is
+      // still better than nothing, but they must not outrank a family-specific
+      // reading.
+      const key = targetFamily === "gemini" ? "Gemini" : "ClaudeGpt";
+      poolConnections = availableConnections.map((c) => {
+        const famExpiry = (() => {
+          const connQuotas = agQuotaCache?.get(c.id);
+          if (connQuotas) {
+            const live = extractEarliestPackageExpiry({ quotas: connQuotas }, { family: targetFamily });
+            if (live) return { ...live, source: "cache" };
+          }
+          const short = c[`${key}ShortWindowRemaining`];
+          const long = c[`${key}LongWindowRemaining`];
+          if (typeof short === "number" || typeof long === "number") {
+            return {
+              shortRemainingPct: short ?? null,
+              longRemainingPct: long ?? null,
+              zone: c[`${key}Zone`] || null,
+              expiry: c[`${key}PackageExpiry`] || null,
+              name: c[`${key}PackageName`] || null,
+              source: "stored",
+            };
+          }
+          return null;
+        })();
+        if (!famExpiry) return c;
+        return {
+          ...c,
+          shortWindowRemaining: typeof famExpiry.shortRemainingPct === "number" ? famExpiry.shortRemainingPct : c.shortWindowRemaining,
+          longWindowRemaining: typeof famExpiry.longRemainingPct === "number" ? famExpiry.longRemainingPct : c.longWindowRemaining,
+          quotaZone: famExpiry.zone || c.quotaZone,
+          earliestPackageExpiry: famExpiry.expiry || c.earliestPackageExpiry,
+          earliestPackageName: famExpiry.name || c.earliestPackageName,
+          family: targetFamily,
+          familyQuotaSource: famExpiry.source,
+        };
+      });
+    }
 
-        if (timeA !== timeB) {
-          return timeA - timeB;
+    let orderedConnections = poolConnections;
+    const quotaCategory = getProviderQuotaCategory(providerId);
+    const isPackAssetProvider = quotaCategory === PROVIDER_QUOTA_TYPES.PACK_ASSET;
+    const isPureBalanceProvider = quotaCategory === PROVIDER_QUOTA_TYPES.PURE_BALANCE;
+    const balanceStrategy = providerOverride.balanceStrategy || null;
+
+    if (earliestExpiryFirst && poolConnections.length > 1) {
+      const now = Date.now();
+      // Two distinct ranking philosophies:
+      //
+      // 1. Rolling Bucket Providers (Antigravity/Google):
+      //    A red account is spent/cooling down and sinks to the end (zoneRank = 1).
+      //
+      // 2. Pack Asset Providers (CodeBuddy, Qoder):
+      //    An account with an expiring pack (e.g. 100 points expiring in 22h) MUST
+      //    stay at the top, even if its balance is low — those points must be squeezed
+      //    before they expire! Sinking it to the end would let the points rot.
+      const zoneRank = (c) => (isPackAssetProvider ? 0 : (c.quotaZone === "red" ? 1 : 0));
+      const expiryMs = (c) => (c.earliestPackageExpiry && new Date(c.earliestPackageExpiry).getTime() > now
+        ? new Date(c.earliestPackageExpiry).getTime()
+        : Infinity);
+
+      orderedConnections = [...poolConnections].sort((a, b) => {
+        const z = zoneRank(a) - zoneRank(b);
+        if (z !== 0) return z;
+        const timeA = expiryMs(a);
+        const timeB = expiryMs(b);
+        if (timeA !== timeB) return timeA - timeB;
+        return (a.priority || 999) - (b.priority || 999);
+      });
+    } else if (isPureBalanceProvider && (balanceStrategy === "lowest-first" || balanceStrategy === "highest-first") && poolConnections.length > 1) {
+      orderedConnections = [...poolConnections].sort((a, b) => {
+        const balA = typeof a.quotaBalance === "number" ? a.quotaBalance : null;
+        const balB = typeof b.quotaBalance === "number" ? b.quotaBalance : null;
+
+        // Accounts without known balance sort last
+        if (balA !== null && balB === null) return -1;
+        if (balA === null && balB !== null) return 1;
+        if (balA !== null && balB !== null && balA !== balB) {
+          return balanceStrategy === "lowest-first" ? balA - balB : balB - balA;
         }
         return (a.priority || 999) - (b.priority || 999);
       });
     }
 
     let connection;
+    // Set once a strategy branch has already emitted its own quota line, so the
+    // closing "earliest-expiry selected" line below stays a summary for the
+    // branches that log nothing (pinned / round-robin / fill-first) instead of
+    // repeating the same tag twice for relay and pack-asset picks.
+    let quotaLogged = false;
     // Pin to preferred connection if specified and available
     if (preferredConnectionId) {
       connection = orderedConnections.find((c) => c.id === preferredConnectionId);
@@ -320,21 +535,46 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     if (connection) {
       // skip strategy
     } else if (earliestExpiryFirst && orderedConnections.length > 1) {
-      // Relay: single-point dead-burn on the earliest-expiry ring. The carrier
-      // (most recently used account) keeps 100% of traffic until its live quota
-      // crosses the red zone, then the ring steps FORWARD — a refilled earlier
-      // account never cuts back in. This supersedes round-robin under the same
-      // toggle on purpose: spreading the load is exactly what drains every
-      // recurring bucket in the pool at once (the "all accounts black-hole
-      // together" failure the design forbids).
-      const relay = selectRelayCarrier(orderedConnections);
-      connection = relay.connection;
-      if (relay.stepped) {
-        log.info("AUTH", `${provider} | relay handoff → ${connection.id?.slice(0, 8)} (${connection.name || connection.email || "unnamed"}) | remaining=${connection.earliestPackageRemaining ?? "?"}%`);
+      // Distinct scheduling philosophy per provider type:
+      //
+      // 1. Pack Asset Providers (CodeBuddy CN/Intl, Qoder CN/Global):
+      //    Accounts hold discrete quota packs (e.g. 100 points expiring in 22h).
+      //    When a pack expires, it is permanently lost. The goal is 100% strict
+      //    consumption of the soonest-expiring pack right now — never lock into a
+      //    single carrier via Relay (which would keep burning 30-day packs on
+      //    account 1698 while a 9-day pack on 1697 expires untouched), and never
+      //    pre-emptively abandon the final 5% before it expires.
+      //
+      // 2. Rolling Bucket Providers (Antigravity/Google):
+      //    Accounts hold auto-refilling burst/weekly windows (5h/7d). Single-point
+      //    dead-burn with forward-only Relay step and 5% red-zone handoff is
+      //    critical here to prevent all accounts from synchronizing and draining
+      //    simultaneously.
+      if (isPackAssetProvider) {
+        connection = orderedConnections[0];
+        log.info(
+          "AUTH",
+          `${zoneMarker(connection)} ${provider} | ${quotaTag(connection, providerId, { family: targetFamily })} | #1-pack-first`
+        );
+        quotaLogged = true;
+        await updateProviderConnection(connection.id, { lastUsedAt: new Date().toISOString() });
+      } else {
+        const relay = selectRelayCarrier(orderedConnections);
+        const prevCarrier = relay.stepped ? mostRecentUsedCarrier(orderedConnections, connection) : null;
+        connection = relay.connection;
+        // Quota tag on every selection, handoff or not. Without it a drained
+        // account is only explainable after the fact by re-reading the DB — the
+        // old line printed a single `remaining=`, which is exactly the number
+        // that hid the short/long split (1698 read 55% while its window was 1.6%).
+        log.info("AUTH", `${zoneMarker(connection)} ${provider} | ${quotaTag(connection, providerId, { family: targetFamily })}${relay.stepped ? ` | relay handoff from ${prevCarrier?.id?.slice(0, 8) ?? "?"}` : ""}`);
+        quotaLogged = true;
+        if (relay.stepped) {
+          log.info("AUTH", `${zoneMarker(connection)} ${provider} | relay handoff → ${connection.id?.slice(0, 8)} (${connection.name || connection.email || "unnamed"}) | remaining=${connection.earliestPackageRemaining ?? "?"}%`);
+        }
+        // Persist the carrier stamp — relay derives "who is carrying" from
+        // lastUsedAt, the same field round-robin maintains.
+        await updateProviderConnection(connection.id, { lastUsedAt: new Date().toISOString() });
       }
-      // Persist the carrier stamp — relay derives "who is carrying" from
-      // lastUsedAt, the same field round-robin maintains.
-      await updateProviderConnection(connection.id, { lastUsedAt: new Date().toISOString() });
     } else if (strategy === "round-robin") {
       const stickyLimit = providerOverride.stickyRoundRobinLimit || settings.stickyRoundRobinLimit || 3;
 
@@ -379,8 +619,8 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       connection = orderedConnections[0];
     }
 
-    if (earliestExpiryFirst && connection?.earliestPackageExpiry) {
-      log.info("AUTH", `${provider} | earliest-expiry selected ${connection.id?.slice(0, 8)} (${connection.name || connection.email || "unnamed"}) | expires in ${formatRetryAfter(connection.earliestPackageExpiry)} (${connection.earliestPackageName || "package"})`);
+    if (earliestExpiryFirst && !quotaLogged && connection?.earliestPackageExpiry) {
+      log.info("AUTH", `${zoneMarker(connection)} ${provider} | earliest-expiry selected ${connection.id?.slice(0, 8)} (${connection.name || connection.email || "unnamed"}) | expires in ${formatRetryAfter(connection.earliestPackageExpiry)} (${connection.earliestPackageName || "package"}) | ${quotaTag(connection, providerId, { family: targetFamily })}`);
     }
 
     const resolvedProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
@@ -456,7 +696,17 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     newBackoffLevel = 0;
   } else if (resetsAtMs && resetsAtMs > Date.now()) {
     shouldFallback = true;
-    cooldownMs = Math.min(resetsAtMs - Date.now(), MAX_RATE_LIMIT_COOLDOWN_MS);
+    // Which ceiling applies depends on WHAT the clock is, not on where it came
+    // from. A Google quota window (Antigravity's per-model 5h/7d bucket) is the
+    // account's real reset and sits hours out; a generic retryAfter is a
+    // per-minute hint. Both arrive here as a bare `resetsAtMs`, so capping
+    // unconditionally at 30min is what made the dashboard row count down "19m"
+    // while the upstream message said "Resets in 31h44m43s" — the lock expired
+    // long before the quota did, and every expiry bought another wasted 429.
+    // MAX_QUOTA_COOLDOWN_MS exists for exactly this case (see errorConfig.js).
+    const quotaWindowMs = extractQuotaResetMs(errorText);
+    const cap = quotaWindowMs !== null ? MAX_QUOTA_COOLDOWN_MS : MAX_RATE_LIMIT_COOLDOWN_MS;
+    cooldownMs = Math.min(resetsAtMs - Date.now(), cap);
     newBackoffLevel = 0;
   } else {
     ({ shouldFallback, cooldownMs, newBackoffLevel, channelScope } = checkFallbackError(status, errorText, backoffLevel, resolveProviderId(provider)));
